@@ -1,0 +1,63 @@
+/* ========================================
+   DocGen Plugin V2 - Design Tokens
+   ======================================== */
+
+:root {
+  /* ===== PRIMARY COLORS ===== */
+  --tacton-blue: #0A6DC2;
+  --tacton-dark: #054D8C;
+  --tacton-light: #EBF5FF;
+
+  /* ===== BACKGROUNDS ===== */
+  --bg: #F4F5F7;
+  --card: #FFFFFF;
+
+  /* ===== BORDERS ===== */
+  --border: #E1E4E8;
+  --border-light: #ECEEF1;
+
+  /* ===== TEXT COLORS ===== */
+  --text: #1B1F24;
+  --text-secondary: #57606A;
+  --text-tertiary: #8C959F;
+
+  /* ===== SEMANTIC COLORS ===== */
+  --success: #1A7F37;
+  --success-bg: #DAFBE1;
+  --success-border: #A7F0BA;
+
+  --warning: #9A6700;
+  --warning-bg: #FFF8C5;
+
+  --danger: #CF222E;
+  --danger-bg: #FFEBE9;
+
+  --purple: #8250DF;
+  --purple-bg: #FBEFFF;
+
+  --orange: #BC4C00;
+  --orange-bg: #FFF1E5;
+
+  /* ===== BORDER RADIUS ===== */
+  --radius: 6px;
+  --radius-lg: 10px;
+
+  /* ===== SHADOWS ===== */
+  --shadow-sm: 0 1px 2px rgba(27, 31, 36, 0.04);
+  --shadow: 0 1px 3px rgba(27, 31, 36, 0.08), 0 1px 2px rgba(27, 31, 36, 0.06);
+  --shadow-md: 0 4px 12px rgba(27, 31, 36, 0.1);
+
+  /* ===== TYPOGRAPHY ===== */
+  --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+  --mono: 'SF Mono', 'Cascadia Code', 'Consolas', 'Monaco',
+    'Courier New', monospace;
+
+  /* ===== SPACING ===== */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 20px;
+  --space-2xl: 24px;
+}

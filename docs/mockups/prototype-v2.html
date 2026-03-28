@@ -1,0 +1,1295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tacton DocGen — Product Prototype</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --tacton-blue: #0A6DC2;
+  --tacton-dark: #054D8C;
+  --tacton-light: #EBF5FF;
+  --bg: #F4F5F7;
+  --card: #FFFFFF;
+  --border: #E1E4E8;
+  --border-light: #ECEEF1;
+  --text: #1B1F24;
+  --text-secondary: #57606A;
+  --text-tertiary: #8C959F;
+  --success: #1A7F37;
+  --success-bg: #DAFBE1;
+  --success-border: #A7F0BA;
+  --warning: #9A6700;
+  --warning-bg: #FFF8C5;
+  --danger: #CF222E;
+  --danger-bg: #FFEBE9;
+  --purple: #8250DF;
+  --purple-bg: #FBEFFF;
+  --radius: 6px;
+  --radius-lg: 10px;
+  --shadow-sm: 0 1px 2px rgba(27,31,36,.04);
+  --shadow: 0 1px 3px rgba(27,31,36,.08), 0 1px 2px rgba(27,31,36,.06);
+  --shadow-md: 0 4px 12px rgba(27,31,36,.1);
+  --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --mono: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+}
+
+body {
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── SVG Icon defaults ── */
+.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.icon svg { display: block; }
+
+/* ── Taskpane container ── */
+.taskpane {
+  max-width: 420px;
+  margin: 0 auto;
+  min-height: 100vh;
+  background: var(--card);
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--shadow-md);
+}
+
+/* ── Proto banner ── */
+.proto-banner {
+  background: var(--text);
+  color: #fff;
+  text-align: center;
+  padding: 10px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .2px;
+}
+.proto-banner small {
+  opacity: .55;
+  font-weight: 400;
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+}
+
+/* ── Header ── */
+.header {
+  background: var(--tacton-blue);
+  color: #fff;
+  padding: 0 16px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.header-logo {
+  width: 24px;
+  height: 24px;
+  background: rgba(255,255,255,.15);
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.header-title {
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: -.2px;
+}
+.header-version {
+  font-size: 10px;
+  font-weight: 500;
+  background: rgba(255,255,255,.18);
+  padding: 1px 7px;
+  border-radius: 10px;
+  margin-left: 2px;
+}
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.status-dot-green { background: #69DB7C; }
+.status-dot-yellow { background: #FFD43B; }
+.header-instance {
+  font-weight: 500;
+  opacity: .9;
+}
+
+/* ── Tabs ── */
+.tabs {
+  display: flex;
+  background: #FAFBFC;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+.tab {
+  flex: 1;
+  padding: 10px 4px 8px;
+  text-align: center;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  border-bottom: 2px solid transparent;
+  transition: all .15s ease;
+  user-select: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+}
+.tab:hover { color: var(--tacton-blue); background: var(--tacton-light); }
+.tab.active {
+  color: var(--tacton-blue);
+  border-bottom-color: var(--tacton-blue);
+  background: #fff;
+}
+.tab .icon { opacity: .6; }
+.tab.active .icon { opacity: 1; }
+.tab-label { font-size: 11px; }
+
+/* ── Zone content ── */
+.zone { display: none; flex: 1; overflow-y: auto; }
+.zone.active { display: flex; flex-direction: column; }
+.zone-inner { padding: 16px; flex: 1; }
+
+/* ── Cards ── */
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 14px 16px;
+  margin-bottom: 12px;
+  box-shadow: var(--shadow-sm);
+}
+.card-muted { background: #FAFBFC; }
+.card-success { background: #F6FEF8; border-color: var(--success-border); }
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.card-title {
+  font-weight: 700;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+}
+.card-subtitle {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-top: 4px;
+}
+
+/* ── Badges ── */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .1px;
+}
+.badge-success { background: var(--success-bg); color: var(--success); }
+.badge-danger { background: var(--danger-bg); color: var(--danger); }
+.badge-muted { background: #ECEEF1; color: var(--text-secondary); }
+.badge-blue { background: var(--tacton-light); color: var(--tacton-blue); }
+.badge-purple { background: var(--purple-bg); color: var(--purple); }
+.badge-token { font-size: 9px; padding: 1px 6px; font-weight: 600; }
+.badge-token-both { background: var(--success-bg); color: var(--success); }
+.badge-token-refresh { background: var(--warning-bg); color: var(--warning); }
+.badge-token-access { background: var(--tacton-light); color: var(--tacton-blue); }
+
+/* ── Form elements ── */
+.form-group { margin-bottom: 12px; }
+.form-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  margin-bottom: 5px;
+  display: block;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+}
+.form-input, .form-select {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-family: var(--font);
+  background: #fff;
+  outline: none;
+  transition: border-color .15s, box-shadow .15s;
+  color: var(--text);
+}
+.form-input:focus, .form-select:focus {
+  border-color: var(--tacton-blue);
+  box-shadow: 0 0 0 3px rgba(10,109,194,.12);
+}
+.form-input::placeholder { color: var(--text-tertiary); }
+
+/* ── Buttons ── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all .12s ease;
+  font-family: var(--font);
+  line-height: 1.4;
+}
+.btn-primary {
+  background: var(--tacton-blue);
+  color: #fff;
+  border-color: var(--tacton-dark);
+}
+.btn-primary:hover { background: var(--tacton-dark); }
+.btn-sm { padding: 4px 10px; font-size: 11px; }
+.btn-outline {
+  background: #fff;
+  color: var(--text-secondary);
+  border-color: var(--border);
+}
+.btn-outline:hover { background: #F6F8FA; border-color: #D0D5DB; }
+.btn-success { background: var(--success); color: #fff; border-color: #116329; }
+.btn-group { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* ── Locked field ── */
+.locked-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: #FAFBFC;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
+}
+.lock-value {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.unlock-link {
+  font-size: 11px;
+  color: var(--tacton-blue);
+  cursor: pointer;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.unlock-link:hover { text-decoration: underline; }
+
+/* ── Ticket list ── */
+.ticket-item {
+  display: flex;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
+  margin-bottom: 4px;
+  gap: 8px;
+  cursor: pointer;
+  transition: all .1s ease;
+}
+.ticket-item:hover { background: #F6F8FA; border-color: var(--border); }
+.ticket-item.active { background: var(--tacton-light); border-color: var(--tacton-blue); }
+.ticket-id {
+  font-family: var(--mono);
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text);
+}
+.ticket-name {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Callout ── */
+.callout {
+  background: var(--tacton-light);
+  border: 1px solid #B6D4EE;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+.callout strong { color: var(--text); }
+.callout-success { background: #F6FEF8; border-color: var(--success-border); }
+
+/* ── Section heading ── */
+.section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.section-title {
+  font-weight: 700;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ── Section list (Builder) ── */
+.section-list { list-style: none; }
+.section-item {
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  margin-bottom: 8px;
+  overflow: hidden;
+  transition: all .12s ease;
+  cursor: pointer;
+}
+.section-item:hover { border-color: var(--tacton-blue); }
+.section-item.active { border-color: var(--tacton-blue); box-shadow: 0 0 0 2px rgba(10,109,194,.12); }
+.section-item.excluded { opacity: .5; }
+.section-item.hidden-section { opacity: .3; }
+.section-head {
+  display: flex;
+  align-items: center;
+  padding: 10px 14px;
+  gap: 10px;
+}
+.section-drag { color: #D0D5DB; cursor: grab; display: flex; }
+.section-info { flex: 1; min-width: 0; }
+.section-name { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.section-meta { font-size: 11px; color: var(--text-tertiary); margin-top: 1px; }
+.section-body {
+  padding: 0 14px 14px;
+  border-top: 1px solid var(--border-light);
+  background: #FAFBFC;
+}
+.section-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-style: italic;
+  padding: 10px 0 8px;
+  border-bottom: 1px dashed var(--border-light);
+  margin-bottom: 10px;
+  line-height: 1.5;
+}
+
+/* ── Nested items inside section ── */
+.nested-list { list-style: none; padding-left: 16px; border-left: 2px solid var(--border-light); margin: 8px 0; }
+.nested-item {
+  padding: 6px 10px;
+  margin-bottom: 4px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #fff;
+  border: 1px solid var(--border-light);
+  transition: background .1s;
+}
+.nested-item:hover { background: #F6F8FA; }
+.nested-label { font-weight: 600; color: var(--text); }
+
+/* ── Data set cards ── */
+.dataset-card {
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  padding: 12px 14px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  transition: all .12s ease;
+}
+.dataset-card:hover { border-color: var(--tacton-blue); }
+.dataset-card.active {
+  border-color: var(--tacton-blue);
+  background: var(--tacton-light);
+  box-shadow: 0 0 0 2px rgba(10,109,194,.1);
+}
+.dataset-name { font-weight: 700; font-size: 13px; margin-bottom: 3px; display: flex; align-items: center; gap: 8px; }
+.dataset-desc { font-size: 11px; color: var(--text-tertiary); margin-bottom: 8px; line-height: 1.45; }
+.dataset-records { display: flex; gap: 4px; flex-wrap: wrap; }
+.record-chip {
+  background: #F0F2F5;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  font-family: var(--mono);
+  color: var(--text-secondary);
+}
+
+/* ── Attribute list ── */
+.attr-list { list-style: none; }
+.attr-item {
+  display: flex;
+  align-items: center;
+  padding: 5px 10px;
+  border-radius: var(--radius);
+  margin-bottom: 1px;
+  cursor: pointer;
+  transition: background .1s;
+  gap: 8px;
+}
+.attr-item:hover { background: #F6F8FA; }
+.attr-item.selected { background: var(--tacton-light); }
+.attr-name { font-weight: 600; font-size: 12px; flex: 1; }
+.attr-value {
+  font-size: 11px;
+  color: var(--tacton-blue);
+  font-family: var(--mono);
+  background: var(--tacton-light);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+.attr-type { font-size: 10px; color: var(--text-tertiary); font-weight: 500; }
+
+.attr-category {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .8px;
+  color: var(--text-tertiary);
+  padding: 10px 10px 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ── Preview panel ── */
+.preview-block {
+  background: #FAFBFC;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  line-height: 1.7;
+}
+.preview-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .6px;
+  color: var(--text-tertiary);
+  margin-bottom: 6px;
+}
+.resolved { color: var(--tacton-blue); font-weight: 600; }
+.branch-active { background: var(--success-bg); padding: 1px 5px; border-radius: 3px; color: var(--success); }
+.branch-inactive { background: #F6F8FA; padding: 1px 5px; border-radius: 3px; text-decoration: line-through; opacity: .4; }
+
+/* ── Breadcrumb ── */
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  padding: 8px 0 14px;
+  flex-wrap: wrap;
+}
+.breadcrumb a { color: var(--tacton-blue); text-decoration: none; cursor: pointer; font-weight: 500; }
+.breadcrumb a:hover { text-decoration: underline; }
+.breadcrumb .sep { color: #D0D5DB; }
+
+/* ── Data set selector bar ── */
+.ds-selector {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: #FAFBFC;
+  border-bottom: 1px solid var(--border-light);
+  font-size: 12px;
+}
+.ds-selector label { font-weight: 600; color: var(--text-tertiary); font-size: 11px; white-space: nowrap; }
+.ds-selector select {
+  flex: 1;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 12px;
+  background: #fff;
+  font-family: var(--font);
+  color: var(--text);
+}
+
+/* ── Record toggle pills ── */
+.record-toggles { display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap; }
+.record-toggle {
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  background: #fff;
+  font-family: var(--mono);
+  color: var(--text-secondary);
+  transition: all .12s;
+}
+.record-toggle.active { background: var(--tacton-blue); color: #fff; border-color: var(--tacton-blue); }
+
+/* ── Insert bar ── */
+.insert-bar {
+  position: sticky;
+  bottom: 0;
+  background: #fff;
+  border-top: 1px solid var(--border);
+  padding: 10px 16px;
+  display: flex;
+  gap: 8px;
+  z-index: 10;
+  box-shadow: 0 -2px 8px rgba(27,31,36,.06);
+}
+.insert-bar .btn { flex: 1; justify-content: center; }
+
+/* ── Separator ── */
+.sep-line { border-top: 1px solid var(--border-light); margin: 14px 0; }
+
+/* ── Table ── */
+.data-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.data-table thead { background: #FAFBFC; }
+.data-table th {
+  padding: 7px 10px;
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+.data-table th:last-child { text-align: center; }
+.data-table th.right { text-align: right; }
+.data-table td { padding: 6px 10px; border-bottom: 1px solid var(--border-light); }
+.data-table td.mono { font-family: var(--mono); font-weight: 600; font-size: 11px; }
+.data-table td.right { text-align: right; }
+.data-table td.center { text-align: center; }
+.data-table tr.highlighted { background: #FFF5F5; }
+.data-table tr.highlighted td.right { font-weight: 700; color: var(--danger); }
+
+/* ── If branch cards ── */
+.branch-cards { display: flex; gap: 8px; margin-top: 8px; }
+.branch-card {
+  flex: 1;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  text-align: center;
+  font-size: 11px;
+  border: 1px solid;
+}
+.branch-card-if { background: var(--success-bg); border-color: var(--success-border); color: var(--success); }
+.branch-card-else { background: #F6F8FA; border-color: var(--border-light); color: var(--text-tertiary); opacity: .6; }
+.branch-card strong { display: block; margin-bottom: 3px; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; }
+</style>
+</head>
+<body>
+
+<div class="proto-banner">
+  Tacton DocGen — Interactive Prototype
+  <small>Explore the 4-zone architecture with mock data. No live connection required.</small>
+</div>
+
+<div class="taskpane">
+
+  <!-- ── Header ── -->
+  <div class="header">
+    <div class="header-left">
+      <div class="header-logo">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+      </div>
+      <span class="header-title">DocGen</span>
+      <span class="header-version">v2.0</span>
+    </div>
+    <div class="header-right">
+      <span class="status-dot status-dot-green"></span>
+      <span class="header-instance">edu-instance</span>
+    </div>
+  </div>
+
+  <!-- ── Tabs ── -->
+  <div class="tabs">
+    <div class="tab active" data-zone="setup">
+      <span class="icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
+      <span class="tab-label">Setup</span>
+    </div>
+    <div class="tab" data-zone="data">
+      <span class="icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg></span>
+      <span class="tab-label">Data</span>
+    </div>
+    <div class="tab" data-zone="builder">
+      <span class="icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4Z"/></svg></span>
+      <span class="tab-label">Builder</span>
+    </div>
+    <div class="tab" data-zone="preview">
+      <span class="icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></span>
+      <span class="tab-label">Preview</span>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════ -->
+  <!-- ZONE 1: SETUP                                -->
+  <!-- ═══════════════════════════════════════════ -->
+  <div class="zone active" id="zone-setup">
+    <div class="zone-inner">
+
+      <!-- Connection card (done) -->
+      <div class="card card-muted">
+        <div class="card-header">
+          <div class="card-title">
+            <span class="icon" style="color:var(--success)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></span>
+            Connection
+          </div>
+          <span class="badge badge-success">Connected</span>
+        </div>
+        <div class="locked-field">
+          <span class="icon" style="color:var(--text-tertiary)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span>
+          <span class="lock-value">p5870d4fd-edu.earlyaccess.tactoncpq.com</span>
+        </div>
+        <div class="card-subtitle" style="margin-top:8px;">Admin + Frontend credentials saved</div>
+      </div>
+
+      <!-- Ticket selection -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">
+            <span class="icon" style="color:var(--tacton-blue)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h5"/><path d="M17 12h5"/><path d="M7 5v14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2H9a2 2 0 0 0-2 2z"/></svg></span>
+            Ticket
+          </div>
+          <span class="badge badge-success">In Progress only</span>
+        </div>
+        <div class="form-group">
+          <input class="form-input" placeholder="Search tickets..." style="margin-bottom:8px;">
+        </div>
+
+        <div class="ticket-item active">
+          <span class="icon" style="color:#D4A015"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span>
+          <span class="ticket-id">T-00000018</span>
+          <span class="ticket-name">Bike proposal updates</span>
+          <span class="badge badge-token badge-token-both">both</span>
+        </div>
+        <div class="ticket-item">
+          <span class="icon" style="color:#D0D5DB"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span>
+          <span class="ticket-id">T-00000022</span>
+          <span class="ticket-name">Industrial pump config</span>
+          <span class="badge badge-token badge-token-refresh">refresh</span>
+        </div>
+        <div class="ticket-item">
+          <span class="icon" style="color:#D0D5DB"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span>
+          <span class="ticket-id">T-00000025</span>
+          <span class="ticket-name">Motor assembly docgen</span>
+          <span class="badge badge-token badge-token-access">access</span>
+        </div>
+
+        <div style="margin-top:8px;">
+          <button class="btn btn-outline btn-sm">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            Include ticket
+          </button>
+        </div>
+      </div>
+
+      <!-- Starting Object (locked) -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">
+            <span class="icon" style="color:var(--tacton-blue)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg></span>
+            Starting Object
+          </div>
+        </div>
+        <div class="locked-field">
+          <span class="icon" style="color:var(--text-tertiary)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span>
+          <span class="lock-value">Solution</span>
+          <span class="unlock-link">unlock</span>
+        </div>
+        <div class="card-subtitle" style="margin-top:6px;">Locked — all formula sections start from this object</div>
+      </div>
+
+      <!-- Document identity -->
+      <div class="card card-success">
+        <div class="card-header">
+          <div class="card-title">
+            <span class="icon" style="color:var(--success)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M9 15l2 2 4-4"/></svg></span>
+            Document Project
+          </div>
+          <span class="badge badge-success">Recognized</span>
+        </div>
+        <div style="font-size:12px; color:var(--text-secondary);">
+          This Word document was recognized as <strong>"Bike Proposal Template"</strong>. Project loaded automatically.
+        </div>
+        <div style="font-size:11px; color:var(--text-tertiary); margin-top:4px;">
+          ID: docgen-a7f3c2e1 &middot; Last edited: 2 hours ago
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════ -->
+  <!-- ZONE 2: DATA                                 -->
+  <!-- ═══════════════════════════════════════════ -->
+  <div class="zone" id="zone-data">
+    <div class="zone-inner">
+
+      <div class="callout">
+        <span class="icon" style="flex-shrink:0;margin-top:1px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></span>
+        <div>Build named data sets from your ticket's records. These are used as <strong>live context</strong> in the Builder and Preview tabs.</div>
+      </div>
+
+      <div class="section-heading">
+        <div class="section-title">
+          <span class="icon" style="color:var(--tacton-blue)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg></span>
+          Data Set Catalogue
+        </div>
+        <button class="btn btn-primary btn-sm">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          New data set
+        </button>
+      </div>
+
+      <!-- Active data set -->
+      <div class="dataset-card active" onclick="this.classList.toggle('active')">
+        <div class="dataset-name">
+          <span class="icon" style="color:var(--purple)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg></span>
+          High discount scenario
+          <span class="badge badge-purple">Active</span>
+        </div>
+        <div class="dataset-desc">CPs with &gt;50% discount — for testing red highlighting in pricing table</div>
+        <div class="dataset-records">
+          <span class="record-chip">CP-004</span>
+          <span class="record-chip">CP-006</span>
+        </div>
+      </div>
+
+      <div class="dataset-card">
+        <div class="dataset-name">
+          <span class="icon" style="color:var(--text-tertiary)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg></span>
+          Standard scenario
+        </div>
+        <div class="dataset-desc">Basic configs, no special discounts — happy path testing</div>
+        <div class="dataset-records">
+          <span class="record-chip">CP-001</span>
+          <span class="record-chip">CP-002</span>
+          <span class="record-chip">CP-003</span>
+        </div>
+      </div>
+
+      <div class="dataset-card">
+        <div class="dataset-name">
+          <span class="icon" style="color:var(--text-tertiary)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg></span>
+          Full BOM test
+        </div>
+        <div class="dataset-desc">Deep nested BOM structure — tests row group rendering</div>
+        <div class="dataset-records">
+          <span class="record-chip">CP-001</span>
+        </div>
+      </div>
+
+      <div class="dataset-card">
+        <div class="dataset-name">
+          <span class="icon" style="color:var(--text-tertiary)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg></span>
+          Edge case: empty CP
+        </div>
+        <div class="dataset-desc">No attributes set — tests null handling and fallback text</div>
+        <div class="dataset-records">
+          <span class="record-chip">CP-009</span>
+        </div>
+      </div>
+
+      <div class="sep-line"></div>
+
+      <!-- Record browser -->
+      <div class="section-heading" style="margin-bottom:8px;">
+        <div class="section-title">
+          <span class="icon" style="color:var(--text-secondary)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
+          Available Records
+        </div>
+        <span class="badge badge-blue">T-00000018</span>
+      </div>
+      <div class="form-group">
+        <input class="form-input" placeholder="Search records..." style="margin-bottom:8px;">
+      </div>
+
+      <div style="font-size:11px; color:var(--text-tertiary); margin-bottom:8px;">
+        ConfiguredProduct &middot; 8 records in ticket
+      </div>
+
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Name</th>
+            <th class="right">Discount</th>
+            <th style="text-align:center; width:48px;">Add</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td class="mono">CP-001</td><td>Sport Bike Basic</td><td class="right">5%</td><td class="center"><button class="btn btn-outline btn-sm" style="padding:2px 8px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button></td></tr>
+          <tr><td class="mono">CP-002</td><td>City Cruiser</td><td class="right">12%</td><td class="center"><button class="btn btn-outline btn-sm" style="padding:2px 8px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button></td></tr>
+          <tr><td class="mono">CP-003</td><td>Mountain Pro</td><td class="right">0%</td><td class="center"><button class="btn btn-outline btn-sm" style="padding:2px 8px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button></td></tr>
+          <tr class="highlighted"><td class="mono" style="font-weight:700;">CP-004</td><td>E-Bike Premium</td><td class="right">55%</td><td class="center"><span class="icon" style="color:var(--success)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span></td></tr>
+          <tr><td class="mono">CP-005</td><td>Kids Starter</td><td class="right">8%</td><td class="center"><button class="btn btn-outline btn-sm" style="padding:2px 8px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button></td></tr>
+          <tr class="highlighted"><td class="mono" style="font-weight:700;">CP-006</td><td>Cargo Heavy Duty</td><td class="right">62%</td><td class="center"><span class="icon" style="color:var(--success)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span></td></tr>
+        </tbody>
+      </table>
+
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════ -->
+  <!-- ZONE 3: BUILDER                              -->
+  <!-- ═══════════════════════════════════════════ -->
+  <div class="zone" id="zone-builder">
+
+    <!-- Data set selector bar -->
+    <div class="ds-selector">
+      <span class="icon" style="color:var(--tacton-blue)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg></span>
+      <label>Active data set:</label>
+      <select>
+        <option selected>High discount scenario (CP-004, CP-006)</option>
+        <option>Standard scenario (CP-001, CP-002, CP-003)</option>
+        <option>Full BOM test (CP-001)</option>
+        <option>Edge case: empty CP (CP-009)</option>
+      </select>
+    </div>
+
+    <div class="zone-inner" id="builder-main">
+
+      <div class="section-heading">
+        <div class="section-title">
+          <span class="icon" style="color:var(--tacton-blue)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><line x1="2" y1="10" x2="22" y2="10"/></svg></span>
+          Formula Sections
+        </div>
+        <button class="btn btn-primary btn-sm">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Add section
+        </button>
+      </div>
+
+      <ul class="section-list">
+
+        <!-- Section 1: Header Info -->
+        <li class="section-item" onclick="openSection(this, 'header-info')">
+          <div class="section-head">
+            <span class="section-drag"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="5" r="2"/><circle cx="15" cy="5" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="9" cy="19" r="2"/><circle cx="15" cy="19" r="2"/></svg></span>
+            <span class="icon" style="color:var(--text-secondary)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></span>
+            <div class="section-info">
+              <div class="section-name">Header Info</div>
+              <div class="section-meta">3 single-value tags</div>
+            </div>
+            <span class="badge badge-success">Included</span>
+          </div>
+        </li>
+
+        <!-- Section 2: Product Summary (expanded, active) -->
+        <li class="section-item active" id="section-product-summary">
+          <div class="section-head" onclick="openSection(this.parentElement, 'product-summary')">
+            <span class="section-drag"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="5" r="2"/><circle cx="15" cy="5" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="9" cy="19" r="2"/><circle cx="15" cy="19" r="2"/></svg></span>
+            <span class="icon" style="color:var(--tacton-blue)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg></span>
+            <div class="section-info">
+              <div class="section-name">Product Summary</div>
+              <div class="section-meta">for-loop over ConfiguredProducts</div>
+            </div>
+            <span class="badge badge-success">Included</span>
+          </div>
+          <div class="section-body">
+            <div class="section-desc">
+              Iterates configured products in the solution, prints name, description, and conditionally highlights high-discount items in red.
+            </div>
+            <ul class="nested-list">
+              <li class="nested-item">
+                <span class="icon" style="color:var(--tacton-blue)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg></span>
+                <span class="nested-label">For:</span> each #item in Solution.configuredProducts
+                <span class="badge badge-blue" style="margin-left:auto;">2 records</span>
+              </li>
+              <li class="nested-item" style="margin-left:12px;">
+                <span class="icon" style="color:var(--text-secondary)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="17" y1="10" x2="3" y2="10"/><line x1="21" y1="6" x2="3" y2="6"/><line x1="21" y1="14" x2="3" y2="14"/><line x1="17" y1="18" x2="3" y2="18"/></svg></span>
+                ${#item.name}$ &middot; ${#item.description}$
+              </li>
+              <li class="nested-item" style="margin-left:12px;">
+                <span class="icon" style="color:var(--warning)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><circle cx="12" cy="12" r="10"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>
+                <span class="nested-label">If:</span> #item.discount &gt; 50
+                <span class="badge badge-purple" style="margin-left:auto;">CP-004, CP-006 match</span>
+              </li>
+              <li class="nested-item" style="margin-left:24px;">
+                <span class="icon" style="color:var(--danger)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>
+                Highlight row red + bold price
+              </li>
+              <li class="nested-item" style="margin-left:12px;">
+                <span class="icon" style="color:var(--text-secondary)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></span>
+                <span class="nested-label">Row group:</span> #item.bomItems
+              </li>
+            </ul>
+            <div class="btn-group" style="margin-top:10px;">
+              <button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); showBuilderDetail()">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4Z"/></svg>
+                Edit formulas
+              </button>
+              <button class="btn btn-outline btn-sm" onclick="event.stopPropagation()">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                Preview
+              </button>
+            </div>
+          </div>
+        </li>
+
+        <!-- Section 3: Pricing Table -->
+        <li class="section-item" onclick="openSection(this, 'pricing')">
+          <div class="section-head">
+            <span class="section-drag"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="5" r="2"/><circle cx="15" cy="5" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="9" cy="19" r="2"/><circle cx="15" cy="19" r="2"/></svg></span>
+            <span class="icon" style="color:var(--text-secondary)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="21"/></svg></span>
+            <div class="section-info">
+              <div class="section-name">Pricing Table</div>
+              <div class="section-meta">row-group &middot; 5 columns</div>
+            </div>
+            <span class="badge badge-success">Included</span>
+          </div>
+        </li>
+
+        <!-- Section 4: Debug Info (excluded) -->
+        <li class="section-item excluded">
+          <div class="section-head">
+            <span class="section-drag"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="5" r="2"/><circle cx="15" cy="5" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="9" cy="19" r="2"/><circle cx="15" cy="19" r="2"/></svg></span>
+            <span class="icon" style="color:var(--text-tertiary)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-3-3.87"/><path d="M4 21v-2a4 4 0 0 1 3-3.87"/><circle cx="12" cy="7" r="4"/><line x1="8" y1="21" x2="16" y2="21"/><path d="M12 11v4"/><path d="M9 18h6"/></svg></span>
+            <div class="section-info">
+              <div class="section-name">Debug Info</div>
+              <div class="section-meta">4 single-value diagnostic tags</div>
+            </div>
+            <span class="badge badge-danger">Excluded</span>
+          </div>
+        </li>
+
+        <!-- Section 5: Terms (hidden) -->
+        <li class="section-item hidden-section">
+          <div class="section-head">
+            <span class="section-drag"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="5" r="2"/><circle cx="15" cy="5" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="9" cy="19" r="2"/><circle cx="15" cy="19" r="2"/></svg></span>
+            <span class="icon" style="color:var(--text-tertiary)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></span>
+            <div class="section-info">
+              <div class="section-name">Terms &amp; Conditions</div>
+              <div class="section-meta">conditional &middot; rarely changed</div>
+            </div>
+            <span class="badge badge-muted">Hidden</span>
+          </div>
+        </li>
+
+      </ul>
+
+    </div>
+
+    <!-- Builder detail view -->
+    <div class="zone-inner" id="builder-detail" style="display:none;">
+
+      <div class="breadcrumb">
+        <a onclick="showBuilderMain()">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;"><polyline points="15 18 9 12 15 6"/></svg>
+          Sections
+        </a>
+        <span class="sep">/</span>
+        <a>Product Summary</a>
+        <span class="sep">/</span>
+        <strong style="color:var(--text)">For: #item in configuredProducts</strong>
+      </div>
+
+      <div class="callout callout-success">
+        <span class="icon" style="flex-shrink:0;margin-top:1px;color:var(--success)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg></span>
+        <div><strong>Data context:</strong> Working with CP-004 (E-Bike Premium, 55%) and CP-006 (Cargo Heavy Duty, 62%) from "High discount scenario"</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title" style="margin-bottom:10px;">
+          <span class="icon" style="color:var(--text-secondary)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg></span>
+          Attributes of #item (ConfiguredProduct)
+        </div>
+
+        <div class="attr-category">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="color:#D4A015"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+          Favorites
+        </div>
+        <ul class="attr-list">
+          <li class="attr-item selected">
+            <span class="icon" style="color:#D4A015"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span>
+            <span class="attr-name">name</span>
+            <span class="attr-value">E-Bike Premium</span>
+            <span class="attr-type">String</span>
+          </li>
+          <li class="attr-item">
+            <span class="icon" style="color:#D4A015"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span>
+            <span class="attr-name">discount</span>
+            <span class="attr-value">55</span>
+            <span class="attr-type">Decimal</span>
+          </li>
+          <li class="attr-item">
+            <span class="icon" style="color:#D4A015"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span>
+            <span class="attr-name">totalPrice</span>
+            <span class="attr-value">4,299.00</span>
+            <span class="attr-type">Decimal</span>
+          </li>
+        </ul>
+
+        <div class="attr-category">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+          Attributes
+        </div>
+        <ul class="attr-list">
+          <li class="attr-item">
+            <span class="icon" style="color:#D0D5DB"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span>
+            <span class="attr-name">description</span>
+            <span class="attr-value">Premium electric city bike</span>
+            <span class="attr-type">String</span>
+          </li>
+          <li class="attr-item">
+            <span class="icon" style="color:#D0D5DB"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span>
+            <span class="attr-name">productModel</span>
+            <span class="attr-value">eBike-2024</span>
+            <span class="attr-type">String</span>
+          </li>
+          <li class="attr-item">
+            <span class="icon" style="color:#D0D5DB"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span>
+            <span class="attr-name">quantity</span>
+            <span class="attr-value">2</span>
+            <span class="attr-type">Integer</span>
+          </li>
+          <li class="attr-item">
+            <span class="icon" style="color:#D0D5DB"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span>
+            <span class="attr-name">currency</span>
+            <span class="attr-value">EUR</span>
+            <span class="attr-type">String</span>
+          </li>
+          <li class="attr-item">
+            <span class="icon" style="color:#D0D5DB"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span>
+            <span class="attr-name">netPrice</span>
+            <span class="attr-value">1,934.55</span>
+            <span class="attr-type">Decimal</span>
+          </li>
+        </ul>
+
+        <div class="attr-category">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+          Related
+        </div>
+        <ul class="attr-list">
+          <li class="attr-item">
+            <span class="icon" style="color:var(--tacton-blue)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></span>
+            <span class="attr-name">bomItems</span>
+            <span class="attr-value">14 items</span>
+            <span class="attr-type">BomItem[]</span>
+          </li>
+          <li class="attr-item">
+            <span class="icon" style="color:var(--tacton-blue)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></span>
+            <span class="attr-name">proposal</span>
+            <span class="attr-value">PROP-001</span>
+            <span class="attr-type">Proposal</span>
+          </li>
+        </ul>
+      </div>
+
+      <div class="card" style="background:var(--warning-bg); border-color:#EAD47A;">
+        <div class="card-title" style="margin-bottom:8px;">
+          <span class="icon" style="color:var(--warning)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><circle cx="12" cy="12" r="10"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>
+          If-statement branch preview
+        </div>
+        <div style="font-size:12px; margin-bottom:8px; font-family:var(--mono); color:var(--text-secondary); background:#fff; padding:6px 10px; border-radius:var(--radius); border:1px solid var(--border-light);">
+          $if{#item.discount &gt; 50}$
+        </div>
+        <div class="branch-cards">
+          <div class="branch-card branch-card-if">
+            <strong>IF branch</strong>
+            CP-004 (55%)<br>
+            CP-006 (62%)
+          </div>
+          <div class="branch-card branch-card-else">
+            <strong>ELSE branch</strong>
+            <em>0 records</em>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Sticky insert bar -->
+    <div class="insert-bar">
+      <button class="btn btn-primary">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+        Insert Formula
+      </button>
+      <button class="btn btn-outline">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+        Insert Table
+      </button>
+      <button class="btn btn-outline">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        Copy
+      </button>
+    </div>
+
+  </div>
+
+  <!-- ═══════════════════════════════════════════ -->
+  <!-- ZONE 4: PREVIEW                              -->
+  <!-- ═══════════════════════════════════════════ -->
+  <div class="zone" id="zone-preview">
+
+    <div class="ds-selector">
+      <span class="icon" style="color:var(--tacton-blue)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg></span>
+      <label>Data set:</label>
+      <select>
+        <option selected>High discount scenario (CP-004, CP-006)</option>
+        <option>Standard scenario (CP-001, CP-002, CP-003)</option>
+        <option>Full BOM test (CP-001)</option>
+      </select>
+    </div>
+
+    <div class="zone-inner">
+
+      <div class="section-heading" style="margin-bottom:8px;">
+        <div class="section-title">
+          <span class="icon" style="color:var(--tacton-blue)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></span>
+          Preview: Product Summary
+        </div>
+        <span class="badge badge-blue">for-loop</span>
+      </div>
+
+      <div style="font-size:11px; color:var(--text-tertiary); margin-bottom:8px;">
+        Toggle records to see resolution per instance:
+      </div>
+
+      <div class="record-toggles">
+        <span class="record-toggle active">CP-004</span>
+        <span class="record-toggle" onclick="this.classList.toggle('active')">CP-006</span>
+      </div>
+
+      <div class="preview-label">Formula</div>
+      <div class="preview-block" style="font-size:11px;">$for{#item in solution.configuredProducts}$
+  <span class="resolved">${#item.name}$</span> — <span class="resolved">${#item.description}$</span>
+  Price: <span class="resolved">${#item.totalPrice.price()}$</span>
+  $if{#item.discount > 50}$
+    <span class="branch-active">HIGH DISCOUNT: ${#item.discount.percent()}$</span>
+  $else$
+    <span class="branch-inactive">Discount: ${#item.discount.percent()}$</span>
+  $endif$
+$endfor$</div>
+
+      <div class="preview-label">Resolved Output (CP-004)</div>
+      <div class="preview-block" style="background:#F6FEF8; border-color:var(--success-border);">
+<strong>E-Bike Premium</strong> — Premium electric city bike
+Price: <span class="resolved">EUR 4,299.00</span>
+<span class="branch-active">HIGH DISCOUNT: 55%</span></div>
+
+      <div class="preview-label">Resolved Output (CP-006)</div>
+      <div class="preview-block" style="background:#F6FEF8; border-color:var(--success-border);">
+<strong>Cargo Heavy Duty</strong> — Heavy duty cargo bike for logistics
+Price: <span class="resolved">EUR 6,750.00</span>
+<span class="branch-active">HIGH DISCOUNT: 62%</span></div>
+
+      <div class="sep-line"></div>
+
+      <div class="callout">
+        <span class="icon" style="flex-shrink:0;margin-top:1px;color:var(--tacton-blue)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></span>
+        <div><strong>2/2 records</strong> take the IF branch (discount &gt; 50). Switch to "Standard scenario" to see ELSE branch resolution.</div>
+      </div>
+
+      <div class="btn-group">
+        <button class="btn btn-primary">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+          Insert into Document
+        </button>
+        <button class="btn btn-outline">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          Copy Formula
+        </button>
+      </div>
+
+    </div>
+  </div>
+
+</div>
+
+<script>
+// Tab switching
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.zone').forEach(z => z.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('zone-' + tab.dataset.zone).classList.add('active');
+  });
+});
+
+// Toggle section expand
+function openSection(el, id) {
+  const body = el.querySelector('.section-body');
+  if (body) {
+    el.classList.toggle('active');
+  }
+}
+
+// Builder detail view
+function showBuilderDetail() {
+  document.getElementById('builder-main').style.display = 'none';
+  document.getElementById('builder-detail').style.display = 'block';
+}
+function showBuilderMain() {
+  document.getElementById('builder-main').style.display = 'block';
+  document.getElementById('builder-detail').style.display = 'none';
+}
+
+// Record toggle in preview
+document.querySelectorAll('.record-toggle').forEach(pill => {
+  pill.addEventListener('click', () => pill.classList.toggle('active'));
+});
+</script>
+
+</body>
+</html>

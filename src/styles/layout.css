@@ -1,0 +1,325 @@
+/* ========================================
+   DocGen Plugin V2 - Layout Styles
+   ======================================== */
+
+/* ===== TASKPANE LAYOUT ===== */
+.taskpane {
+  width: 100%;
+  min-width: 480px;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--card);
+  overflow: auto;
+}
+
+/* ===== HEADER ===== */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--space-lg);
+  height: 48px;
+  background-color: var(--tacton-blue);
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--tacton-dark);
+  position: relative;
+  z-index: 20;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  flex-shrink: 0;
+}
+
+.header-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+}
+
+.header-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  background-color: rgba(255, 255, 255, 0.2);
+  font-size: 14px;
+  font-weight: 700;
+  color: white;
+}
+
+.header-logo-img {
+  height: 18px;
+  width: auto;
+  flex-shrink: 0;
+  filter: brightness(0) invert(1);
+}
+
+.header-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: white;
+}
+
+.header-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: white;
+  border: 1.5px solid rgba(255, 255, 255, 0.5);
+  border-radius: 4px;
+}
+
+.header-version {
+  margin-left: auto;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-shrink: 0;
+}
+
+/* ── Mode Toggle (in header) ── */
+.mode-toggle {
+  display: inline-flex;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 16px;
+  padding: 2px;
+}
+
+.mode-btn {
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 600;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+  padding: 3px 10px;
+  border-radius: 14px;
+  transition: all 0.2s;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.mode-btn:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.mode-btn.is-active {
+  background: #fff;
+  color: var(--tacton-blue);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+}
+
+.mode-ai-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 14px;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.3px;
+  line-height: 1;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.25);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.mode-btn.is-active .mode-ai-badge {
+  background: var(--tacton-blue);
+  color: #fff;
+}
+
+/* Disabled state */
+.mode-toggle-disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  position: relative;
+}
+
+.mode-toggle-disabled .mode-btn {
+  pointer-events: none;
+}
+
+/* CSS tooltip on hover */
+.mode-toggle[data-tooltip]:hover::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.85);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 4px 10px;
+  border-radius: 4px;
+  white-space: nowrap;
+  z-index: 100;
+  pointer-events: none;
+}
+
+.mode-toggle[data-tooltip]:hover::before {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 4px solid transparent;
+  border-bottom-color: rgba(0, 0, 0, 0.85);
+  z-index: 100;
+  pointer-events: none;
+}
+
+/* ===== TABS ===== */
+.tabs {
+  display: flex;
+  flex-direction: row;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background-color: #FAFBFC;
+  border-bottom: 1px solid var(--border-light);
+  flex-shrink: 0;
+}
+
+.tab {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 12px 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.tab:hover {
+  color: var(--text-secondary);
+  background-color: var(--bg);
+}
+
+.tab.active {
+  color: var(--tacton-blue);
+  border-bottom-color: var(--tacton-blue);
+}
+
+/* Disabled tab */
+.tab.tab-disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+.tab.tab-disabled:hover {
+  color: var(--text-tertiary);
+  background-color: transparent;
+}
+
+/* Tab icon wrapper (relative anchor for indicator) */
+.tab-icon-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Status indicator badge on tab icon */
+.tab-indicator {
+  position: absolute;
+  top: -4px;
+  right: -6px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
+  border: 1.5px solid #FAFBFC;
+}
+.tab-indicator-warning {
+  background: #f5a623;
+  color: #fff;
+}
+.tab-indicator-ok {
+  background: var(--success);
+  color: #fff;
+}
+.tab-indicator-ok .icon {
+  width: 8px;
+  height: 8px;
+}
+
+/* ===== ZONES ===== */
+.zone {
+  display: none;
+  flex: 1;
+  overflow-y: auto;
+  flex-direction: column;
+}
+
+.zone.active {
+  display: flex;
+}
+
+.zone-inner {
+  padding: var(--space-lg);
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ===== DATA VIEWS (Sub-views within zones) ===== */
+.data-view {
+  display: none;
+  flex: 1;
+  overflow-y: auto;
+  flex-direction: column;
+}
+
+.data-view.active {
+  display: flex;
+}
+
+.data-view-inner {
+  padding: var(--space-lg);
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ===== RESPONSIVE ADJUSTMENTS ===== */
+@media (max-height: 600px) {
+  .taskpane {
+    min-height: auto;
+  }
+
+  .zone-inner,
+  .data-view-inner {
+    padding: var(--space-md);
+  }
+}

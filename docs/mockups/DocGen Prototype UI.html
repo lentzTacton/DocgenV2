@@ -1,0 +1,1464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DocGen Word Add-in Prototype</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background-color: #e5e7eb;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .taskpane-container {
+            width: 420px;
+            background-color: #ffffff;
+            border-radius: 12px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            height: 600px;
+        }
+
+        /* Header */
+        .header {
+            height: 48px;
+            padding: 0 16px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid #d1d9e0;
+            background-color: #ffffff;
+        }
+
+        .header-logo {
+            font-size: 18px;
+            font-weight: 700;
+            color: #1f2328;
+            letter-spacing: -0.5px;
+        }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            font-weight: 500;
+            color: #1f2328;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: #28a745;
+            animation: pulse 2s infinite;
+        }
+
+        .status-dot.disconnected {
+            background-color: #d1453b;
+            animation: none;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+
+        /* Tab Bar */
+        .tab-bar {
+            display: flex;
+            background-color: #f6f8fa;
+            border-bottom: 1px solid #d1d9e0;
+            padding: 0;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+
+        .tab {
+            flex: 1;
+            padding: 12px 16px;
+            text-align: center;
+            font-size: 13px;
+            font-weight: 500;
+            color: #656d76;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            transition: all 0.2s ease;
+            background-color: #f6f8fa;
+        }
+
+        .tab:hover {
+            color: #1f2328;
+            background-color: #eaeef2;
+        }
+
+        .tab.active {
+            color: #0969da;
+            border-bottom-color: #0969da;
+            background-color: #ffffff;
+        }
+
+        .tab svg {
+            width: 16px;
+            height: 16px;
+        }
+
+        /* Content Area */
+        .content-wrapper {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px;
+        }
+
+        .content-section {
+            display: none;
+        }
+
+        .content-section.active {
+            display: block;
+        }
+
+        /* Setup Zone */
+        .setup-zone {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .card {
+            border: 1px solid #d1d9e0;
+            border-radius: 12px;
+            background-color: #ffffff;
+            overflow: hidden;
+        }
+
+        .card-header {
+            padding: 12px 16px;
+            background-color: #f6f8fa;
+            border-bottom: 1px solid #d1d9e0;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-weight: 600;
+            font-size: 13px;
+            color: #1f2328;
+        }
+
+        .card-header svg {
+            width: 16px;
+            height: 16px;
+            flex-shrink: 0;
+        }
+
+        .card-body {
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .form-label {
+            font-size: 12px;
+            font-weight: 500;
+            color: #1f2328;
+        }
+
+        .form-input {
+            padding: 8px 12px;
+            border: 1px solid #d1d9e0;
+            border-radius: 6px;
+            font-family: 'Inter', sans-serif;
+            font-size: 13px;
+            transition: all 0.2s ease;
+            background-color: #ffffff;
+            color: #1f2328;
+        }
+
+        .form-input:focus {
+            outline: none;
+            border-color: #0969da;
+            box-shadow: 0 0 0 3px #ddf4ff;
+        }
+
+        .form-input::placeholder {
+            color: #656d76;
+        }
+
+        .form-input.monospace {
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 8px;
+            margin-top: 4px;
+        }
+
+        .btn {
+            flex: 1;
+            padding: 8px 16px;
+            border: 1px solid transparent;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            font-family: 'Inter', sans-serif;
+        }
+
+        .btn-primary {
+            background-color: #0969da;
+            color: #ffffff;
+            border-color: #0969da;
+        }
+
+        .btn-primary:hover {
+            background-color: #0550ae;
+            border-color: #0550ae;
+        }
+
+        .btn-primary:active {
+            background-color: #033d8b;
+        }
+
+        .btn-secondary {
+            background-color: #ffffff;
+            color: #0969da;
+            border-color: #0969da;
+        }
+
+        .btn-secondary:hover {
+            background-color: #ddf4ff;
+        }
+
+        .btn-secondary:active {
+            background-color: #54aeff;
+        }
+
+        .btn-sm {
+            flex: none;
+            padding: 6px 12px;
+            font-size: 12px;
+        }
+
+        .btn-icon {
+            padding: 6px;
+            width: 32px;
+            height: 32px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background-color: transparent;
+            color: #656d76;
+            border: 1px solid transparent;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .btn-icon:hover {
+            background-color: #f6f8fa;
+            color: #1f2328;
+        }
+
+        .btn-icon svg {
+            width: 16px;
+            height: 16px;
+        }
+
+        /* Connection Card */
+        .connection-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            background-color: #f0f9ff;
+            border: 1px solid #a3e635;
+            border-radius: 6px;
+            font-size: 12px;
+            margin: 8px 0 0 0;
+        }
+
+        .connection-status.disconnected {
+            background-color: #fff5f5;
+            border-color: #f87171;
+        }
+
+        .connection-status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background-color: #22c55e;
+        }
+
+        .connection-status.disconnected .connection-status-dot {
+            background-color: #ef4444;
+        }
+
+        .connection-status-text {
+            font-weight: 500;
+            color: #1f2328;
+        }
+
+        /* Ticket List */
+        .ticket-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .ticket-item {
+            padding: 10px;
+            border: 1px solid #d1d9e0;
+            border-radius: 6px;
+            background-color: #f6f8fa;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            transition: all 0.2s ease;
+        }
+
+        .ticket-item:hover {
+            background-color: #eaeef2;
+        }
+
+        .ticket-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .ticket-id {
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 11px;
+            font-weight: 600;
+            color: #0969da;
+        }
+
+        .ticket-name {
+            font-size: 12px;
+            color: #1f2328;
+            font-weight: 500;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin-top: 2px;
+        }
+
+        .ticket-badges {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 3px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 500;
+            white-space: nowrap;
+        }
+
+        .badge-success {
+            background-color: #d3f9d8;
+            color: #2d6a4f;
+        }
+
+        .badge-warning {
+            background-color: #fff3bf;
+            color: #856404;
+        }
+
+        .toggle-switch {
+            width: 40px;
+            height: 24px;
+            border-radius: 12px;
+            background-color: #d1d9e0;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            position: relative;
+            border: none;
+            padding: 2px;
+            display: flex;
+            align-items: center;
+        }
+
+        .toggle-switch.active {
+            background-color: #28a745;
+        }
+
+        .toggle-switch-knob {
+            width: 20px;
+            height: 20px;
+            border-radius: 10px;
+            background-color: #ffffff;
+            transition: all 0.2s ease;
+            position: absolute;
+            left: 2px;
+        }
+
+        .toggle-switch.active .toggle-switch-knob {
+            left: 18px;
+        }
+
+        /* Dropdown */
+        .form-select {
+            padding: 8px 12px;
+            border: 1px solid #d1d9e0;
+            border-radius: 6px;
+            font-family: 'Inter', sans-serif;
+            font-size: 13px;
+            background-color: #ffffff;
+            color: #1f2328;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23656d76' d='M6 9L1 4h10z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 8px center;
+            padding-right: 28px;
+        }
+
+        .form-select:focus {
+            outline: none;
+            border-color: #0969da;
+            box-shadow: 0 0 0 3px #ddf4ff;
+        }
+
+        /* Lock Toggle */
+        .lock-control {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 4px;
+        }
+
+        .lock-control label {
+            font-size: 12px;
+            color: #656d76;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .lock-control input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            cursor: pointer;
+        }
+
+        .info-text {
+            font-size: 12px;
+            color: #656d76;
+            margin-top: 8px;
+            line-height: 1.4;
+        }
+
+        /* Data Zone */
+        .data-zone {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .data-view {
+            display: none;
+        }
+
+        .data-view.active {
+            display: block;
+        }
+
+        /* Variable List View */
+        .list-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .list-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #1f2328;
+        }
+
+        .coverage-bar {
+            width: 100%;
+            height: 24px;
+            background-color: #f6f8fa;
+            border-radius: 6px;
+            overflow: hidden;
+            display: flex;
+            margin-bottom: 8px;
+            border: 1px solid #d1d9e0;
+        }
+
+        .coverage-segment {
+            height: 100%;
+            flex-shrink: 0;
+            transition: all 0.3s ease;
+        }
+
+        .coverage-segment.var1 { background-color: #0969da; flex: 25%; }
+        .coverage-segment.var2 { background-color: #54aeff; flex: 20%; }
+        .coverage-segment.var3 { background-color: #fd7e14; flex: 22%; }
+        .coverage-segment.var4 { background-color: #a3e635; flex: 18%; }
+        .coverage-segment.uncovered { background-color: #d1d9e0; flex: 15%; }
+
+        .coverage-info {
+            font-size: 12px;
+            color: #656d76;
+            margin-bottom: 12px;
+        }
+
+        .variable-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .variable-card {
+            padding: 12px;
+            border: 1px solid #d1d9e0;
+            border-radius: 6px;
+            background-color: #f6f8fa;
+            transition: all 0.2s ease;
+            cursor: pointer;
+        }
+
+        .variable-card:hover {
+            background-color: #eaeef2;
+            border-color: #0969da;
+        }
+
+        .variable-card-header {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .variable-name {
+            font-size: 13px;
+            font-weight: 600;
+            color: #1f2328;
+            flex: 1;
+        }
+
+        .variable-actions {
+            display: flex;
+            gap: 4px;
+        }
+
+        .type-badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .type-badge.bom {
+            background-color: #ddf4ff;
+            color: #0969da;
+        }
+
+        .type-badge.object {
+            background-color: #e7f5ff;
+            color: #1971c2;
+        }
+
+        .type-badge.list {
+            background-color: #f0fdf4;
+            color: #15803d;
+        }
+
+        .expression-preview {
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 11px;
+            color: #656d76;
+            background-color: #ffffff;
+            padding: 6px 8px;
+            border-radius: 4px;
+            border: 1px solid #d1d9e0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        /* Variable Detail View */
+        .detail-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 16px;
+            cursor: pointer;
+            color: #0969da;
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        .detail-header svg {
+            width: 16px;
+            height: 16px;
+        }
+
+        .detail-section {
+            margin-bottom: 16px;
+        }
+
+        .section-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: #1f2328;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .expression-textarea {
+            width: 100%;
+            min-height: 80px;
+            padding: 8px 12px;
+            border: 1px solid #d1d9e0;
+            border-radius: 6px;
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 12px;
+            color: #1f2328;
+            resize: vertical;
+            transition: all 0.2s ease;
+        }
+
+        .expression-textarea:focus {
+            outline: none;
+            border-color: #0969da;
+            box-shadow: 0 0 0 3px #ddf4ff;
+        }
+
+        /* Filter Builder */
+        .filter-row {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .filter-field {
+            flex: 1;
+            min-width: 80px;
+        }
+
+        .filter-operator {
+            flex: 1;
+            min-width: 70px;
+        }
+
+        .filter-value {
+            flex: 1.5;
+            min-width: 100px;
+        }
+
+        .filter-buttons {
+            display: flex;
+            gap: 4px;
+        }
+
+        .filter-button {
+            padding: 4px 8px;
+            font-size: 12px;
+            white-space: nowrap;
+        }
+
+        /* Match Table */
+        .match-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 12px;
+            font-size: 12px;
+            background-color: #f6f8fa;
+            border: 1px solid #d1d9e0;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        .match-table th {
+            background-color: #eaeef2;
+            padding: 8px;
+            text-align: left;
+            font-weight: 600;
+            color: #1f2328;
+            border-bottom: 1px solid #d1d9e0;
+        }
+
+        .match-table td {
+            padding: 8px;
+            border-bottom: 1px solid #d1d9e0;
+            color: #656d76;
+        }
+
+        .match-table td.ref {
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 11px;
+            color: #0969da;
+            font-weight: 500;
+        }
+
+        .match-table tr:hover {
+            background-color: #e7eef2;
+        }
+
+        .match-info {
+            font-size: 12px;
+            color: #656d76;
+            margin-top: 8px;
+        }
+
+        /* Type Selector Cards */
+        .type-selector-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+
+        .type-card {
+            padding: 12px;
+            border: 2px solid #d1d9e0;
+            border-radius: 8px;
+            background-color: #f6f8fa;
+            cursor: pointer;
+            text-align: center;
+            transition: all 0.2s ease;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .type-card:hover {
+            background-color: #eaeef2;
+            border-color: #0969da;
+        }
+
+        .type-card.selected {
+            border-color: #0969da;
+            background-color: #ddf4ff;
+        }
+
+        .type-card svg {
+            width: 24px;
+            height: 24px;
+            color: #0969da;
+        }
+
+        .type-card.selected svg {
+            color: #0969da;
+        }
+
+        .type-card-name {
+            font-size: 13px;
+            font-weight: 600;
+            color: #1f2328;
+        }
+
+        .type-card-desc {
+            font-size: 11px;
+            color: #656d76;
+            line-height: 1.3;
+        }
+
+        /* Placeholder Views */
+        .placeholder {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 300px;
+            gap: 12px;
+            text-align: center;
+        }
+
+        .placeholder svg {
+            width: 48px;
+            height: 48px;
+            color: #d1d9e0;
+        }
+
+        .placeholder-text {
+            font-size: 13px;
+            color: #656d76;
+        }
+
+        /* Scrollbar */
+        .content-wrapper::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .content-wrapper::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .content-wrapper::-webkit-scrollbar-thumb {
+            background-color: #d1d9e0;
+            border-radius: 4px;
+        }
+
+        .content-wrapper::-webkit-scrollbar-thumb:hover {
+            background-color: #a0aec0;
+        }
+
+        /* Back Button Styling */
+        .back-button {
+            background: none;
+            border: none;
+            padding: 0;
+            cursor: pointer;
+            color: #0969da;
+            font-size: 13px;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            transition: all 0.2s ease;
+        }
+
+        .back-button:hover {
+            color: #0550ae;
+        }
+
+        /* Detail Form Buttons */
+        .form-buttons {
+            display: flex;
+            gap: 8px;
+            margin-top: 16px;
+        }
+
+        /* Utilities */
+        .hidden {
+            display: none !important;
+        }
+
+        .flex-space-between {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+    </style>
+</head>
+<body>
+    <div class="taskpane-container">
+        <!-- Header -->
+        <div class="header">
+            <div class="header-logo">DocGen</div>
+            <div class="status-badge" id="statusBadge">
+                <div class="status-dot"></div>
+                <span>Connected</span>
+            </div>
+        </div>
+
+        <!-- Tab Bar -->
+        <div class="tab-bar">
+            <div class="tab active" data-tab="setup">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="1"></circle>
+                    <path d="M12 1v6m0 6v6M4.22 4.22l4.24 4.24m5.08 5.08l4.24 4.24M1 12h6m6 0h6M4.22 19.78l4.24-4.24m5.08-5.08l4.24-4.24"></path>
+                </svg>
+                <span>Setup</span>
+            </div>
+            <div class="tab" data-tab="data">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+                    <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3m0-7v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+                </svg>
+                <span>Data</span>
+            </div>
+            <div class="tab" data-tab="builder">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="16 18 22 12 16 6"></polyline>
+                    <polyline points="8 6 2 12 8 18"></polyline>
+                </svg>
+                <span>Builder</span>
+            </div>
+            <div class="tab" data-tab="preview">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                    <circle cx="12" cy="12" r="3"></circle>
+                </svg>
+                <span>Preview</span>
+            </div>
+        </div>
+
+        <!-- Content Wrapper -->
+        <div class="content-wrapper">
+
+            <!-- Setup Zone -->
+            <div class="content-section active" id="setup-zone">
+                <div class="setup-zone">
+                    <!-- Connection Card -->
+                    <div class="card">
+                        <div class="card-header">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M5 12a7 7 0 0 0 7 7 7 7 0 0 0 7-7 7 7 0 0 0-7-7 7 7 0 0 0-7 7"></path>
+                                <path d="M12 1v6m0 6v6"></path>
+                                <path d="M4.22 4.22l4.24 4.24m5.08 5.08l4.24 4.24"></path>
+                            </svg>
+                            Connection
+                        </div>
+                        <div class="card-body">
+                            <div class="form-group">
+                                <label class="form-label">Instance URL</label>
+                                <input type="text" class="form-input" value="acme.cpq.cloud.tacton.com" placeholder="instance.cpq.cloud.tacton.com">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Client ID</label>
+                                <input type="password" class="form-input" placeholder="••••••••••••••••" value="client_demo_123">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Client Secret</label>
+                                <input type="password" class="form-input" placeholder="••••••••••••••••" value="secret_demo_456">
+                            </div>
+                            <div class="button-group">
+                                <button class="btn btn-secondary">Test Connection</button>
+                                <button class="btn btn-primary">Save</button>
+                            </div>
+                            <div class="connection-status">
+                                <div class="connection-status-dot"></div>
+                                <span class="connection-status-text">Connected</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Tickets Card -->
+                    <div class="card">
+                        <div class="card-header">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
+                                <polyline points="13 2 13 9 20 9"></polyline>
+                            </svg>
+                            Tickets
+                        </div>
+                        <div class="card-body">
+                            <div class="ticket-list">
+                                <div class="ticket-item">
+                                    <div class="ticket-info">
+                                        <div class="ticket-id">T-00000006</div>
+                                        <div class="ticket-name">Acme Corp Q1 2026</div>
+                                    </div>
+                                    <div class="ticket-badges">
+                                        <div class="badge badge-success">
+                                            <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor">
+                                                <path d="M13.78 4.22a.75.75 0 010 1.06l-7.25 7.25a.75.75 0 11-1.06-1.06L12.72 4.22a.75.75 0 011.06 0z"></path>
+                                                <path d="M2.5 1.75a.75.75 0 00-1.5 0v12.5c0 .414.336.75.75.75h12.5a.75.75 0 000-1.5H1.75V1.75z"></path>
+                                            </svg>
+                                            Authorized
+                                        </div>
+                                    </div>
+                                    <button class="toggle-switch active" onclick="this.classList.toggle('active')">
+                                        <div class="toggle-switch-knob"></div>
+                                    </button>
+                                </div>
+
+                                <div class="ticket-item">
+                                    <div class="ticket-info">
+                                        <div class="ticket-id">T-00000005</div>
+                                        <div class="ticket-name">Beta Testing Program</div>
+                                    </div>
+                                    <div class="ticket-badges">
+                                        <div class="badge badge-warning">
+                                            <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor">
+                                                <circle cx="8" cy="8" r="6"></circle>
+                                            </svg>
+                                            Pending
+                                        </div>
+                                    </div>
+                                    <button class="toggle-switch" onclick="this.classList.toggle('active')">
+                                        <div class="toggle-switch-knob"></div>
+                                    </button>
+                                </div>
+
+                                <div class="ticket-item">
+                                    <div class="ticket-info">
+                                        <div class="ticket-id">T-00000003</div>
+                                        <div class="ticket-name">Product Configuration</div>
+                                    </div>
+                                    <div class="ticket-badges">
+                                        <div class="badge badge-success">
+                                            <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor">
+                                                <path d="M13.78 4.22a.75.75 0 010 1.06l-7.25 7.25a.75.75 0 11-1.06-1.06L12.72 4.22a.75.75 0 011.06 0z"></path>
+                                                <path d="M2.5 1.75a.75.75 0 00-1.5 0v12.5c0 .414.336.75.75.75h12.5a.75.75 0 000-1.5H1.75V1.75z"></path>
+                                            </svg>
+                                            Authorized
+                                        </div>
+                                    </div>
+                                    <button class="toggle-switch active" onclick="this.classList.toggle('active')">
+                                        <div class="toggle-switch-knob"></div>
+                                    </button>
+                                </div>
+
+                                <div class="ticket-item">
+                                    <div class="ticket-info">
+                                        <div class="ticket-id">T-00000001</div>
+                                        <div class="ticket-name">Enterprise Agreement</div>
+                                    </div>
+                                    <div class="ticket-badges">
+                                        <div class="badge badge-success">
+                                            <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor">
+                                                <path d="M13.78 4.22a.75.75 0 010 1.06l-7.25 7.25a.75.75 0 11-1.06-1.06L12.72 4.22a.75.75 0 011.06 0z"></path>
+                                                <path d="M2.5 1.75a.75.75 0 00-1.5 0v12.5c0 .414.336.75.75.75h12.5a.75.75 0 000-1.5H1.75V1.75z"></path>
+                                            </svg>
+                                            Authorized
+                                        </div>
+                                    </div>
+                                    <button class="toggle-switch active" onclick="this.classList.toggle('active')">
+                                        <div class="toggle-switch-knob"></div>
+                                    </button>
+                                </div>
+                            </div>
+                            <div style="margin-top: 8px;">
+                                <button class="btn btn-secondary" style="width: 100%; justify-content: center; display: flex; align-items: center; gap: 6px;">
+                                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polyline points="23 4 23 10 17 10"></polyline>
+                                        <path d="M20.49 15a9 9 0 1 1-2-8.83"></path>
+                                    </svg>
+                                    Refresh
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Starting Object Card -->
+                    <div class="card">
+                        <div class="card-header">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                                <path d="M7 11V7a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v4"></path>
+                            </svg>
+                            Starting Object
+                        </div>
+                        <div class="card-body">
+                            <div class="form-group">
+                                <label class="form-label">Object Type</label>
+                                <select class="form-select">
+                                    <option>ConfiguredProduct</option>
+                                    <option>Solution</option>
+                                    <option>Opportunity</option>
+                                </select>
+                            </div>
+                            <div class="lock-control">
+                                <label>
+                                    <input type="checkbox" checked>
+                                    <span>Lock starting object</span>
+                                </label>
+                            </div>
+                            <div class="info-text">
+                                Locking prevents changes after variables are defined
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Data Zone -->
+            <div class="content-section" id="data-zone">
+                <div class="data-zone">
+
+                    <!-- Variable List View -->
+                    <div class="data-view active" id="view-list">
+                        <div class="list-header">
+                            <div class="list-title">Data Catalogue</div>
+                            <button class="btn btn-primary btn-sm" onclick="showDataView('wizard')">
+                                <span style="display: flex; align-items: center; gap: 4px;">
+                                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                        <line x1="12" y1="5" x2="12" y2="19"></line>
+                                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                                    </svg>
+                                    New Variable
+                                </span>
+                            </button>
+                        </div>
+
+                        <div class="coverage-bar">
+                            <div class="coverage-segment var1"></div>
+                            <div class="coverage-segment var2"></div>
+                            <div class="coverage-segment var3"></div>
+                            <div class="coverage-segment var4"></div>
+                            <div class="coverage-segment uncovered"></div>
+                        </div>
+
+                        <div class="coverage-info">
+                            342 of 512 items covered (67%)
+                        </div>
+
+                        <div class="variable-list">
+                            <div class="variable-card" onclick="showDataView('detail')">
+                                <div class="variable-card-header">
+                                    <div class="variable-name">Hydraulic Components</div>
+                                    <div class="variable-actions">
+                                        <button class="btn-icon" onclick="event.stopPropagation()">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L21 7z"></path>
+                                            </svg>
+                                        </button>
+                                        <button class="btn-icon" onclick="event.stopPropagation()">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <polyline points="3 6 5 6 21 6"></polyline>
+                                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                                                <line x1="10" y1="11" x2="10" y2="17"></line>
+                                                <line x1="14" y1="11" x2="14" y2="17"></line>
+                                            </svg>
+                                        </button>
+                                    </div>
+                                </div>
+                                <div style="margin-bottom: 6px;">
+                                    <span class="type-badge bom">BOM</span>
+                                </div>
+                                <div class="expression-preview">$startingObject.flatbom.{?#this.ref matches '^HYD.*'}</div>
+                            </div>
+
+                            <div class="variable-card" onclick="showDataView('detail')">
+                                <div class="variable-card-header">
+                                    <div class="variable-name">Frame Assembly</div>
+                                    <div class="variable-actions">
+                                        <button class="btn-icon" onclick="event.stopPropagation()">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L21 7z"></path>
+                                            </svg>
+                                        </button>
+                                        <button class="btn-icon" onclick="event.stopPropagation()">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <polyline points="3 6 5 6 21 6"></polyline>
+                                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                                                <line x1="10" y1="11" x2="10" y2="17"></line>
+                                                <line x1="14" y1="11" x2="14" y2="17"></line>
+                                            </svg>
+                                        </button>
+                                    </div>
+                                </div>
+                                <div style="margin-bottom: 6px;">
+                                    <span class="type-badge bom">BOM</span>
+                                </div>
+                                <div class="expression-preview">$startingObject.flatbom.{?#this.category == 'FRAME'}</div>
+                            </div>
+
+                            <div class="variable-card" onclick="showDataView('detail')">
+                                <div class="variable-card-header">
+                                    <div class="variable-name">Product Name</div>
+                                    <div class="variable-actions">
+                                        <button class="btn-icon" onclick="event.stopPropagation()">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L21 7z"></path>
+                                            </svg>
+                                        </button>
+                                        <button class="btn-icon" onclick="event.stopPropagation()">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <polyline points="3 6 5 6 21 6"></polyline>
+                                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                                                <line x1="10" y1="11" x2="10" y2="17"></line>
+                                                <line x1="14" y1="11" x2="14" y2="17"></line>
+                                            </svg>
+                                        </button>
+                                    </div>
+                                </div>
+                                <div style="margin-bottom: 6px;">
+                                    <span class="type-badge object">Object</span>
+                                </div>
+                                <div class="expression-preview">$startingObject.name</div>
+                            </div>
+
+                            <div class="variable-card" onclick="showDataView('detail')">
+                                <div class="variable-card-header">
+                                    <div class="variable-name">Color Options</div>
+                                    <div class="variable-actions">
+                                        <button class="btn-icon" onclick="event.stopPropagation()">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L21 7z"></path>
+                                            </svg>
+                                        </button>
+                                        <button class="btn-icon" onclick="event.stopPropagation()">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <polyline points="3 6 5 6 21 6"></polyline>
+                                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                                                <line x1="10" y1="11" x2="10" y2="17"></line>
+                                                <line x1="14" y1="11" x2="14" y2="17"></line>
+                                            </svg>
+                                        </button>
+                                    </div>
+                                </div>
+                                <div style="margin-bottom: 6px;">
+                                    <span class="type-badge list">List</span>
+                                </div>
+                                <div class="expression-preview">{"Red","Blue","Silver","Black"}</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Variable Detail View -->
+                    <div class="data-view" id="view-detail">
+                        <button class="back-button" onclick="showDataView('list')">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="19" y1="12" x2="5" y2="12"></line>
+                                <polyline points="12 19 5 12 12 5"></polyline>
+                            </svg>
+                            Back
+                        </button>
+
+                        <div style="margin-top: 16px;">
+                            <div style="margin-bottom: 12px;">
+                                <span class="type-badge bom">BOM</span>
+                            </div>
+
+                            <div class="detail-section">
+                                <div class="section-title">Variable Name</div>
+                                <input type="text" class="form-input" value="Hydraulic Components">
+                            </div>
+
+                            <div class="detail-section">
+                                <div class="section-title">Expression</div>
+                                <textarea class="expression-textarea">$startingObject.flatbom.{?#this.ref matches '^HYD.*'}</textarea>
+                            </div>
+
+                            <div class="detail-section">
+                                <div class="section-title">Filters</div>
+                                <div class="filter-row">
+                                    <select class="form-select filter-field">
+                                        <option>ref</option>
+                                        <option>name</option>
+                                        <option>category</option>
+                                    </select>
+                                    <select class="form-select filter-operator">
+                                        <option>matches</option>
+                                        <option>equals</option>
+                                        <option>contains</option>
+                                    </select>
+                                    <input type="text" class="form-input filter-value" value="^HYD.*">
+                                    <button class="btn-icon">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <polyline points="3 6 5 6 21 6"></polyline>
+                                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                                            <line x1="10" y1="11" x2="10" y2="17"></line>
+                                            <line x1="14" y1="11" x2="14" y2="17"></line>
+                                        </svg>
+                                    </button>
+                                </div>
+                                <div style="margin-top: 8px;">
+                                    <button class="btn btn-secondary btn-sm">Add Condition</button>
+                                </div>
+                            </div>
+
+                            <div class="detail-section">
+                                <div class="section-title">Matched Items</div>
+                                <div class="match-info">12 items matched</div>
+                                <table class="match-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Ref</th>
+                                            <th>Name</th>
+                                            <th>Category</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr>
+                                            <td class="ref">HYD-001</td>
+                                            <td>Hydraulic Pump A</td>
+                                            <td>Hydraulics</td>
+                                        </tr>
+                                        <tr>
+                                            <td class="ref">HYD-002</td>
+                                            <td>Hydraulic Valve B</td>
+                                            <td>Hydraulics</td>
+                                        </tr>
+                                        <tr>
+                                            <td class="ref">HYD-003</td>
+                                            <td>Hose Assembly C</td>
+                                            <td>Hydraulics</td>
+                                        </tr>
+                                        <tr>
+                                            <td class="ref">HYD-004</td>
+                                            <td>Pressure Gauge</td>
+                                            <td>Hydraulics</td>
+                                        </tr>
+                                        <tr>
+                                            <td class="ref">HYD-005</td>
+                                            <td>Accumulator Tank</td>
+                                            <td>Hydraulics</td>
+                                        </tr>
+                                        <tr>
+                                            <td class="ref">HYD-006</td>
+                                            <td>Relief Valve</td>
+                                            <td>Hydraulics</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            <div class="form-buttons">
+                                <button class="btn btn-primary">Save Variable</button>
+                                <button class="btn btn-secondary" onclick="showDataView('list')">Cancel</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- New Variable Wizard View -->
+                    <div class="data-view" id="view-wizard">
+                        <div style="margin-bottom: 20px;">
+                            <div class="section-title">Step 1: Choose Type</div>
+                        </div>
+
+                        <div class="type-selector-grid" id="typeSelector">
+                            <div class="type-card" onclick="selectType(this, 'bom')">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+                                    <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3m0-7v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+                                </svg>
+                                <div class="type-card-name">BOM</div>
+                                <div class="type-card-desc">Filter items from the flat BOM</div>
+                            </div>
+
+                            <div class="type-card" onclick="selectType(this, 'object')">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+                                    <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
+                                    <line x1="12" y1="22.08" x2="12" y2="12"></line>
+                                </svg>
+                                <div class="type-card-name">Object</div>
+                                <div class="type-card-desc">Reference a field directly</div>
+                            </div>
+
+                            <div class="type-card" onclick="selectType(this, 'list')">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="8" y1="6" x2="21" y2="6"></line>
+                                    <line x1="8" y1="12" x2="21" y2="12"></line>
+                                    <line x1="8" y1="18" x2="21" y2="18"></line>
+                                    <line x1="3" y1="6" x2="3.01" y2="6"></line>
+                                    <line x1="3" y1="12" x2="3.01" y2="12"></line>
+                                    <line x1="3" y1="18" x2="3.01" y2="18"></line>
+                                </svg>
+                                <div class="type-card-name">List</div>
+                                <div class="type-card-desc">Define a set of values</div>
+                            </div>
+                        </div>
+
+                        <div class="form-group" style="margin-bottom: 16px;">
+                            <label class="form-label">Variable Name</label>
+                            <input type="text" class="form-input" placeholder="e.g., Hydraulic Components">
+                        </div>
+
+                        <div class="form-buttons">
+                            <button class="btn btn-primary">Create</button>
+                            <button class="btn btn-secondary" onclick="showDataView('list')">Cancel</button>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+
+            <!-- Builder Zone -->
+            <div class="content-section" id="builder-zone">
+                <div class="placeholder">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M3 12h6m6 0h6M9 3h6m0 0v6m0 0v6m-3-3h6"></path>
+                    </svg>
+                    <div class="placeholder-text">Formula sections will be available in a future update.</div>
+                </div>
+            </div>
+
+            <!-- Preview Zone -->
+            <div class="content-section" id="preview-zone">
+                <div class="placeholder">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                        <circle cx="12" cy="12" r="3"></circle>
+                    </svg>
+                    <div class="placeholder-text">Live preview will be available in a future update.</div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <script>
+        // Tab Switching
+        const tabs = document.querySelectorAll('.tab');
+        const contentSections = document.querySelectorAll('.content-section');
+
+        tabs.forEach(tab => {
+            tab.addEventListener('click', () => {
+                // Remove active class from all tabs and sections
+                tabs.forEach(t => t.classList.remove('active'));
+                contentSections.forEach(s => s.classList.remove('active'));
+
+                // Add active class to clicked tab and corresponding section
+                tab.classList.add('active');
+                const tabName = tab.getAttribute('data-tab');
+                const section = document.getElementById(`${tabName}-zone`);
+                if (section) {
+                    section.classList.add('active');
+                }
+
+                // Reset data views to list when switching tabs
+                if (tabName === 'data') {
+                    showDataView('list');
+                }
+            });
+        });
+
+        // Data View Switching
+        function showDataView(viewName) {
+            const dataViews = document.querySelectorAll('.data-view');
+            dataViews.forEach(view => {
+                view.classList.remove('active');
+            });
+            const activeView = document.getElementById(`view-${viewName}`);
+            if (activeView) {
+                activeView.classList.add('active');
+            }
+        }
+
+        // Type Selector for Wizard
+        function selectType(element, type) {
+            const typeCards = document.querySelectorAll('.type-card');
+            typeCards.forEach(card => {
+                card.classList.remove('selected');
+            });
+            element.classList.add('selected');
+        }
+
+        // Initialize with proper state
+        document.addEventListener('DOMContentLoaded', () => {
+            console.log('DocGen Prototype loaded successfully');
+        });
+    </script>
+</body>
+</html>

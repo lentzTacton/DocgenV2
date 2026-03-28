@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DocGen — Data Catalogue Deep Mockup</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --blue:#0A6DC2;--blue-dark:#054D8C;--blue-light:#EBF5FF;
+  --bg:#F4F5F7;--card:#FFF;--border:#E1E4E8;--border-l:#ECEEF1;
+  --text:#1B1F24;--text2:#57606A;--text3:#8C959F;
+  --green:#1A7F37;--green-bg:#DAFBE1;--green-bdr:#A7F0BA;
+  --warn:#9A6700;--warn-bg:#FFF8C5;
+  --red:#CF222E;--red-bg:#FFEBE9;
+  --purple:#8250DF;--purple-bg:#FBEFFF;
+  --orange:#BC4C00;--orange-bg:#FFF1E5;
+  --r:6px;--rl:10px;
+  --sh:0 1px 3px rgba(27,31,36,.08),0 1px 2px rgba(27,31,36,.06);
+  --f:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  --m:'SF Mono','Cascadia Code','Consolas',monospace;
+}
+body{font-family:var(--f);background:var(--bg);color:var(--text);font-size:13px;line-height:1.5;-webkit-font-smoothing:antialiased}
+.icon{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0}
+.icon svg{display:block}
+
+/* ── Container ── */
+.taskpane{max-width:440px;margin:0 auto;min-height:100vh;background:var(--card);border-left:1px solid var(--border);border-right:1px solid var(--border);display:flex;flex-direction:column;box-shadow:0 4px 12px rgba(27,31,36,.1)}
+
+/* ── Banner ── */
+.banner{background:var(--text);color:#fff;text-align:center;padding:10px 16px;font-size:12px;font-weight:600}
+.banner small{opacity:.5;font-weight:400;display:block;margin-top:2px;font-size:11px}
+
+/* ── Header ── */
+.header{background:var(--blue);color:#fff;padding:0 16px;height:48px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+.header-left{display:flex;align-items:center;gap:10px}
+.header-logo{width:24px;height:24px;background:rgba(255,255,255,.15);border-radius:6px;display:flex;align-items:center;justify-content:center}
+.header-title{font-weight:700;font-size:14px}
+.header-ver{font-size:10px;font-weight:500;background:rgba(255,255,255,.18);padding:1px 7px;border-radius:10px}
+.header-right{display:flex;align-items:center;gap:8px;font-size:12px}
+.dot{width:7px;height:7px;border-radius:50%;background:#69DB7C;display:inline-block}
+
+/* ── Sub-tabs within zone ── */
+.sub-tabs{display:flex;border-bottom:1px solid var(--border);background:#FAFBFC;padding:0 16px}
+.sub-tab{padding:10px 14px;font-size:12px;font-weight:600;color:var(--text3);cursor:pointer;border-bottom:2px solid transparent;transition:all .12s;display:flex;align-items:center;gap:6px}
+.sub-tab:hover{color:var(--blue)}
+.sub-tab.active{color:var(--blue);border-bottom-color:var(--blue);background:#fff}
+.sub-tab .count{background:var(--border-l);color:var(--text2);font-size:10px;padding:0 6px;border-radius:8px;font-weight:700}
+.sub-tab.active .count{background:var(--blue-light);color:var(--blue)}
+
+/* ── Zone ── */
+.zone{display:none;flex:1;overflow-y:auto;flex-direction:column}
+.zone.active{display:flex}
+.zone-inner{padding:16px;flex:1}
+
+/* ── View toggling ── */
+.view{display:none}.view.active{display:block}
+
+/* ── Badges ── */
+.badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700;letter-spacing:.2px}
+.badge-bom{background:var(--orange-bg);color:var(--orange)}
+.badge-obj{background:var(--purple-bg);color:var(--purple)}
+.badge-list{background:var(--blue-light);color:var(--blue)}
+.badge-green{background:var(--green-bg);color:var(--green)}
+.badge-muted{background:#ECEEF1;color:var(--text2)}
+.badge-blue{background:var(--blue-light);color:var(--blue)}
+.badge-purple{background:var(--purple-bg);color:var(--purple)}
+.badge-warn{background:var(--warn-bg);color:var(--warn)}
+
+/* ── Buttons ── */
+.btn{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:var(--r);font-size:12px;font-weight:600;border:1px solid transparent;cursor:pointer;transition:all .12s;font-family:var(--f)}
+.btn-primary{background:var(--blue);color:#fff;border-color:var(--blue-dark)}.btn-primary:hover{background:var(--blue-dark)}
+.btn-sm{padding:4px 10px;font-size:11px}
+.btn-outline{background:#fff;color:var(--text2);border-color:var(--border)}.btn-outline:hover{background:#F6F8FA}
+.btn-ghost{background:transparent;color:var(--blue);border:none;padding:4px 8px;font-size:11px;font-weight:600}
+.btn-ghost:hover{background:var(--blue-light)}
+.btn-danger-ghost{background:transparent;color:var(--red);border:none;padding:4px 8px;font-size:11px;font-weight:600}
+.btn-danger-ghost:hover{background:var(--red-bg)}
+
+/* ── Cards ── */
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--rl);padding:14px 16px;margin-bottom:12px;box-shadow:0 1px 2px rgba(27,31,36,.04)}
+.card-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.card-title{font-weight:700;font-size:13px;display:flex;align-items:center;gap:8px}
+
+/* ── Section heading ── */
+.sec-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.sec-title{font-weight:700;font-size:13px;display:flex;align-items:center;gap:8px}
+
+/* ── Callout ── */
+.callout{background:var(--blue-light);border:1px solid #B6D4EE;padding:10px 12px;border-radius:var(--r);font-size:12px;color:var(--text2);margin-bottom:12px;display:flex;gap:8px;align-items:flex-start}
+.callout strong{color:var(--text)}
+
+/* ── Variable cards ── */
+.var-card{border:1px solid var(--border-l);border-radius:var(--rl);margin-bottom:8px;cursor:pointer;transition:all .12s;overflow:hidden}
+.var-card:hover{border-color:var(--blue)}
+.var-card.active{border-color:var(--blue);box-shadow:0 0 0 2px rgba(10,109,194,.12)}
+.var-head{display:flex;align-items:center;padding:10px 14px;gap:10px}
+.var-name{font-weight:700;font-size:13px;font-family:var(--m);color:var(--text)}
+.var-desc{font-size:11px;color:var(--text3)}
+.var-info{flex:1;min-width:0}
+.var-meta{font-size:11px;color:var(--text3);margin-top:2px;display:flex;align-items:center;gap:6px}
+.var-expr{font-family:var(--m);font-size:11px;color:var(--text2);background:#FAFBFC;padding:8px 14px;border-top:1px solid var(--border-l);white-space:nowrap;overflow-x:auto}
+.var-preview{border-top:1px solid var(--border-l);padding:10px 14px;background:#FAFBFC}
+
+/* ── Filter builder ── */
+.filter-row{display:flex;align-items:center;gap:6px;margin-bottom:6px;padding:6px 10px;background:#fff;border:1px solid var(--border-l);border-radius:var(--r);font-size:12px}
+.filter-field{font-weight:600;font-family:var(--m);font-size:11px;color:var(--purple);background:var(--purple-bg);padding:2px 8px;border-radius:4px}
+.filter-op{color:var(--text3);font-weight:600;font-size:11px}
+.filter-val{font-family:var(--m);font-size:11px;color:var(--blue);background:var(--blue-light);padding:2px 8px;border-radius:4px}
+.filter-logic{font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;padding:0 4px}
+.filter-remove{color:var(--text3);cursor:pointer;margin-left:auto;display:flex}.filter-remove:hover{color:var(--red)}
+
+/* ── Match table ── */
+.match-table{width:100%;border-collapse:collapse;font-size:11px}
+.match-table th{padding:5px 8px;text-align:left;font-weight:600;color:var(--text2);border-bottom:1px solid var(--border);font-size:10px;text-transform:uppercase;letter-spacing:.4px}
+.match-table td{padding:5px 8px;border-bottom:1px solid var(--border-l)}
+.match-table .mono{font-family:var(--m);font-weight:600;font-size:11px}
+.match-table tr.match{background:var(--green-bg)}
+.match-table tr.no-match{opacity:.4}
+
+/* ── Data set cards (compact in sub-tab) ── */
+.ds-card{border:1px solid var(--border-l);border-radius:var(--rl);padding:10px 14px;margin-bottom:6px;cursor:pointer;transition:all .12s;display:flex;align-items:center;gap:10px}
+.ds-card:hover{border-color:var(--blue)}
+.ds-card.active{border-color:var(--blue);background:var(--blue-light)}
+.ds-info{flex:1;min-width:0}
+.ds-name{font-weight:700;font-size:12px}
+.ds-desc{font-size:11px;color:var(--text3)}
+.ds-chips{display:flex;gap:3px;flex-wrap:wrap;margin-top:4px}
+.chip{background:#F0F2F5;padding:1px 7px;border-radius:3px;font-size:10px;font-weight:500;font-family:var(--m);color:var(--text2)}
+
+/* ── Expression editor ── */
+.expr-editor{position:relative;margin-bottom:12px}
+.expr-input{width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:var(--r);font-family:var(--m);font-size:12px;line-height:1.5;background:#FAFBFC;outline:none;resize:vertical;min-height:48px;color:var(--text)}
+.expr-input:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(10,109,194,.12);background:#fff}
+
+/* ── Form ── */
+.form-group{margin-bottom:12px}
+.form-label{font-size:11px;font-weight:600;color:var(--text3);margin-bottom:5px;display:flex;align-items:center;gap:6px;text-transform:uppercase;letter-spacing:.5px}
+.form-input{width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:var(--r);font-size:13px;font-family:var(--f);background:#fff;outline:none;color:var(--text)}
+.form-input:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(10,109,194,.12)}
+.form-row{display:flex;gap:8px}
+.form-row > *{flex:1}
+
+/* ── Separator ── */
+.sep{border-top:1px solid var(--border-l);margin:14px 0}
+
+/* ── Pipeline steps ── */
+.pipeline{margin:12px 0}
+.pipe-step{display:flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid var(--border-l);border-radius:var(--r);margin-bottom:4px;background:#fff;font-size:12px}
+.pipe-step:hover{border-color:var(--blue)}
+.pipe-num{width:20px;height:20px;border-radius:50%;background:var(--border-l);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:var(--text2);flex-shrink:0}
+.pipe-label{font-weight:600;color:var(--text)}
+.pipe-detail{font-family:var(--m);font-size:11px;color:var(--text2);margin-left:auto;background:#FAFBFC;padding:1px 8px;border-radius:4px}
+.pipe-arrow{text-align:center;color:var(--text3);font-size:10px;margin:2px 0}
+
+/* ── Toolbar ── */
+.toolbar{display:flex;align-items:center;gap:6px;padding:8px 0}
+
+/* ── Section toggles for detail views ── */
+.detail-section{margin-bottom:16px}
+.detail-section-head{display:flex;align-items:center;gap:8px;padding:8px 0;cursor:pointer;font-weight:600;font-size:12px;color:var(--text2)}
+.detail-section-head:hover{color:var(--text)}
+.detail-section-body{padding-left:4px}
+
+/* ── Totals preview ── */
+.totals-row{display:flex;align-items:center;justify-content:space-between;padding:6px 10px;border-radius:var(--r);font-size:12px}
+.totals-row:nth-child(odd){background:#FAFBFC}
+.totals-label{color:var(--text2)}
+.totals-value{font-family:var(--m);font-weight:700;color:var(--text)}
+
+/* ── Back button ── */
+.back-btn{display:flex;align-items:center;gap:4px;font-size:12px;font-weight:600;color:var(--blue);cursor:pointer;padding:4px 0 12px;border:none;background:none;font-family:var(--f)}
+.back-btn:hover{text-decoration:underline}
+
+/* ── Type selector ── */
+.type-selector{display:flex;gap:6px;margin-bottom:12px}
+.type-opt{flex:1;padding:10px;border:1px solid var(--border-l);border-radius:var(--r);cursor:pointer;text-align:center;transition:all .12s}
+.type-opt:hover{border-color:var(--blue)}
+.type-opt.selected{border-color:var(--blue);background:var(--blue-light);box-shadow:0 0 0 2px rgba(10,109,194,.12)}
+.type-opt .t-label{font-weight:700;font-size:12px;margin-top:4px}
+.type-opt .t-desc{font-size:10px;color:var(--text3);margin-top:2px}
+</style>
+</head>
+<body>
+
+<div class="banner">
+  DocGen — Data Catalogue Deep Mockup
+  <small>Focused prototype of the variable system and data management layer. Pentair pump data.</small>
+</div>
+
+<div class="taskpane">
+
+  <!-- Header -->
+  <div class="header">
+    <div class="header-left">
+      <div class="header-logo"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></div>
+      <span class="header-title">DocGen</span>
+      <span class="header-ver">v2.0</span>
+    </div>
+    <div class="header-right"><span class="dot"></span> pentair-prod</div>
+  </div>
+
+  <!-- Sub-tabs: Data Sets vs Variables -->
+  <div class="sub-tabs">
+    <div class="sub-tab active" data-view="variables" onclick="switchView('variables')">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+      Variables
+      <span class="count">6</span>
+    </div>
+    <div class="sub-tab" data-view="datasets" onclick="switchView('datasets')">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+      Data Sets
+      <span class="count">2</span>
+    </div>
+    <div class="sub-tab" data-view="records" onclick="switchView('records')">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      Records
+      <span class="count">42</span>
+    </div>
+  </div>
+
+  <!-- ═══════════ VIEW: Variables List ═══════════ -->
+  <div class="zone active" id="view-variables">
+    <div class="zone-inner">
+
+      <div class="callout">
+        <span class="icon" style="flex-shrink:0;margin-top:1px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></span>
+        <div>Variables slice raw data into <strong>named building blocks</strong> used in formula sections. Auto-tagged as BOM, Object, or List based on expression.</div>
+      </div>
+
+      <div class="sec-head">
+        <div class="sec-title">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+          Defined Variables
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="showNewVariable()">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          New variable
+        </button>
+      </div>
+
+      <!-- #pump -->
+      <div class="var-card active" onclick="showVarDetail('pump')">
+        <div class="var-head">
+          <span class="icon" style="color:var(--orange)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 3h-8l-2 4h12z"/></svg></span>
+          <div class="var-info">
+            <div class="var-name">#pump</div>
+            <div class="var-meta">
+              <span class="badge badge-bom">BOM</span>
+              <span>14 items matched</span>
+            </div>
+          </div>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+        </div>
+        <div class="var-expr">flatbom.{? jdeSegmentGroup == "411SEG" || "420SEG" || "430SEG" || "412/3SEG" }</div>
+      </div>
+
+      <!-- #motor -->
+      <div class="var-card" onclick="showVarDetail('motor')">
+        <div class="var-head">
+          <span class="icon" style="color:var(--orange)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></span>
+          <div class="var-info">
+            <div class="var-name">#motor</div>
+            <div class="var-meta">
+              <span class="badge badge-bom">BOM</span>
+              <span>8 items matched</span>
+            </div>
+          </div>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+        </div>
+        <div class="var-expr">flatbom.{? jdeSegmentGroup == "driver" || "MOTOR411" || "MOTOR412/3" || ... }</div>
+      </div>
+
+      <!-- #firePumpController -->
+      <div class="var-card">
+        <div class="var-head">
+          <span class="icon" style="color:var(--orange)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="2" x2="9" y2="4"/><line x1="15" y1="2" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="22"/><line x1="15" y1="20" x2="15" y2="22"/></svg></span>
+          <div class="var-info">
+            <div class="var-name">#firePumpController</div>
+            <div class="var-meta">
+              <span class="badge badge-bom">BOM</span>
+              <span>3 items matched</span>
+            </div>
+          </div>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+        </div>
+        <div class="var-expr">flatbom.{? jdeSegmentGroup == "ELECTFPCONT" || jdePartNumber == "ELECT FP CONT" }</div>
+      </div>
+
+      <!-- #jockeyPumpController -->
+      <div class="var-card">
+        <div class="var-head">
+          <span class="icon" style="color:var(--orange)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="2" x2="9" y2="4"/><line x1="15" y1="2" x2="15" y2="4"/></svg></span>
+          <div class="var-info">
+            <div class="var-name">#jockeyPumpController</div>
+            <div class="var-meta">
+              <span class="badge badge-bom">BOM</span>
+              <span>2 items matched</span>
+            </div>
+          </div>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+        </div>
+        <div class="var-expr">flatbom.{? jdeSegmentGroup == "JOCKEYFPCONT" || jdePartNumber == "JOCKEY PUMP CONT" }</div>
+      </div>
+
+      <!-- #remoteAlarmPanel -->
+      <div class="var-card">
+        <div class="var-head">
+          <span class="icon" style="color:var(--orange)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></span>
+          <div class="var-info">
+            <div class="var-name">#remoteAlarmPanel</div>
+            <div class="var-meta">
+              <span class="badge badge-bom">BOM</span>
+              <span>1 item matched</span>
+            </div>
+          </div>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+        </div>
+        <div class="var-expr">flatbom.{? jdeSegmentGroup == "REMALARMPNLINTL" || jdePartNumber == "REM ALARM PNL INTL" }</div>
+      </div>
+
+      <!-- #otherItems (catch-all) -->
+      <div class="var-card">
+        <div class="var-head">
+          <span class="icon" style="color:var(--text3)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg></span>
+          <div class="var-info">
+            <div class="var-name">#otherItems</div>
+            <div class="var-meta">
+              <span class="badge badge-bom">BOM</span>
+              <span>14 items matched</span>
+              <span class="badge badge-warn" style="font-size:9px">catch-all</span>
+            </div>
+          </div>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+        </div>
+        <div class="var-expr">flatbom.{? NOT IN #pump, #motor, #firePumpController, ... }</div>
+      </div>
+
+      <div class="sep"></div>
+      <div style="font-size:11px;color:var(--text3);text-align:center;padding:4px 0">
+        42 total BOM items &middot; 42 covered by variables &middot; <span style="color:var(--green);font-weight:600">0 unassigned</span>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ═══════════ VIEW: Variable Detail (#pump) ═══════════ -->
+  <div class="zone" id="view-var-detail">
+    <div class="zone-inner">
+
+      <button class="back-btn" onclick="showVarList()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+        Back to variables
+      </button>
+
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+        <span class="icon" style="color:var(--orange)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 3h-8l-2 4h12z"/></svg></span>
+        <div>
+          <div style="font-size:16px;font-weight:700;font-family:var(--m)">#pump</div>
+          <div style="font-size:11px;color:var(--text3)">Pump segment line items</div>
+        </div>
+        <span class="badge badge-bom" style="margin-left:auto;font-size:11px;padding:3px 10px">BOM</span>
+      </div>
+
+      <!-- Source expression -->
+      <div class="form-group">
+        <div class="form-label">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+          Source
+        </div>
+        <div style="padding:8px 12px;background:#FAFBFC;border:1px solid var(--border);border-radius:var(--r);font-family:var(--m);font-size:12px;color:var(--text2)">
+          #this.flatbom
+        </div>
+        <div style="font-size:10px;color:var(--text3);margin-top:4px">Flat BOM of current ConfiguredProduct &middot; 42 total items</div>
+      </div>
+
+      <!-- Filter conditions -->
+      <div class="form-group">
+        <div class="form-label">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+          Filter conditions
+          <span class="badge badge-muted" style="font-size:9px;margin-left:auto">ANY match (OR)</span>
+        </div>
+
+        <div class="filter-row">
+          <span class="filter-field">jdeSegmentGroup</span>
+          <span class="filter-op">==</span>
+          <span class="filter-val">"411SEG"</span>
+          <span class="filter-remove"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></span>
+        </div>
+        <div style="text-align:center"><span class="filter-logic">or</span></div>
+        <div class="filter-row">
+          <span class="filter-field">jdeSegmentGroup</span>
+          <span class="filter-op">==</span>
+          <span class="filter-val">"420SEG"</span>
+          <span class="filter-remove"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></span>
+        </div>
+        <div style="text-align:center"><span class="filter-logic">or</span></div>
+        <div class="filter-row">
+          <span class="filter-field">jdeSegmentGroup</span>
+          <span class="filter-op">==</span>
+          <span class="filter-val">"430SEG"</span>
+          <span class="filter-remove"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></span>
+        </div>
+        <div style="text-align:center"><span class="filter-logic">or</span></div>
+        <div class="filter-row">
+          <span class="filter-field">jdeSegmentGroup</span>
+          <span class="filter-op">==</span>
+          <span class="filter-val">"412/3SEG"</span>
+          <span class="filter-remove"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></span>
+        </div>
+
+        <div style="margin-top:8px;display:flex;gap:6px">
+          <button class="btn btn-outline btn-sm">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            Add condition
+          </button>
+          <button class="btn-ghost" style="margin-left:auto">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+            Edit as expression
+          </button>
+        </div>
+      </div>
+
+      <div class="sep"></div>
+
+      <!-- Generated expression (readonly) -->
+      <div class="form-group">
+        <div class="form-label">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          Generated expression
+        </div>
+        <div class="expr-editor">
+          <textarea class="expr-input" readonly rows="2" style="color:var(--text3)">$define{#pump=#this.flatbom.{?jdeSegmentGroup=="411SEG"||jdeSegmentGroup=="420SEG"||jdeSegmentGroup=="430SEG"||jdeSegmentGroup=="412/3SEG"}}$</textarea>
+        </div>
+      </div>
+
+      <div class="sep"></div>
+
+      <!-- Live match preview -->
+      <div class="form-group">
+        <div class="form-label">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          Live match preview
+          <span class="badge badge-green" style="margin-left:auto">14 / 42 items</span>
+        </div>
+
+        <table class="match-table">
+          <thead>
+            <tr><th>Part #</th><th>Description</th><th>Segment</th><th style="text-align:right">Net Price</th></tr>
+          </thead>
+          <tbody>
+            <tr class="match"><td class="mono">FP-411-001</td><td>Vertical turbine pump</td><td><span class="chip">411SEG</span></td><td style="text-align:right;font-family:var(--m)">$12,450</td></tr>
+            <tr class="match"><td class="mono">FP-411-002</td><td>Impeller assembly</td><td><span class="chip">411SEG</span></td><td style="text-align:right;font-family:var(--m)">$3,200</td></tr>
+            <tr class="match"><td class="mono">FP-411-003</td><td>Bowl assembly 8"</td><td><span class="chip">411SEG</span></td><td style="text-align:right;font-family:var(--m)">$4,750</td></tr>
+            <tr class="match"><td class="mono">FP-420-001</td><td>Horizontal split case</td><td><span class="chip">420SEG</span></td><td style="text-align:right;font-family:var(--m)">$18,900</td></tr>
+            <tr class="match"><td class="mono">FP-430-001</td><td>End suction pump</td><td><span class="chip">430SEG</span></td><td style="text-align:right;font-family:var(--m)">$6,100</td></tr>
+            <tr style="text-align:center;color:var(--text3);font-size:11px"><td colspan="4" style="padding:8px">... 9 more items match</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="sep"></div>
+
+      <!-- Aggregations available -->
+      <div class="form-group">
+        <div class="form-label">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>
+          Quick aggregations
+          <span style="margin-left:auto;font-size:10px;font-weight:400;text-transform:none;letter-spacing:0;color:var(--text3)">click to copy expression</span>
+        </div>
+        <div class="totals-row">
+          <span class="totals-label">Net price total</span>
+          <span class="totals-value">$45,400.00</span>
+        </div>
+        <div class="totals-row">
+          <span class="totals-label">List price total</span>
+          <span class="totals-value">$62,180.00</span>
+        </div>
+        <div class="totals-row">
+          <span class="totals-label">Item count</span>
+          <span class="totals-value">14</span>
+        </div>
+        <div class="totals-row">
+          <span class="totals-label">Unique part numbers</span>
+          <span class="totals-value">11</span>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:6px;margin-top:12px">
+        <button class="btn btn-primary" style="flex:1;justify-content:center">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+          Save variable
+        </button>
+        <button class="btn-danger-ghost">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+          Delete
+        </button>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ═══════════ VIEW: New Variable ═══════════ -->
+  <div class="zone" id="view-new-var">
+    <div class="zone-inner">
+
+      <button class="back-btn" onclick="showVarList()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+        Cancel
+      </button>
+
+      <div style="font-size:16px;font-weight:700;margin-bottom:4px">New Variable</div>
+      <div style="font-size:12px;color:var(--text3);margin-bottom:16px">Create a named building block from your data</div>
+
+      <!-- Step 1: Choose type -->
+      <div class="form-group">
+        <div class="form-label">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          What kind of variable?
+        </div>
+        <div class="type-selector">
+          <div class="type-opt selected" onclick="selectType(this)">
+            <span class="icon" style="color:var(--orange)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 3h-8l-2 4h12z"/></svg></span>
+            <div class="t-label">BOM</div>
+            <div class="t-desc">Filter line items from flat BOM</div>
+          </div>
+          <div class="type-opt" onclick="selectType(this)">
+            <span class="icon" style="color:var(--purple)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg></span>
+            <div class="t-label">Object</div>
+            <div class="t-desc">Reference a single entity</div>
+          </div>
+          <div class="type-opt" onclick="selectType(this)">
+            <span class="icon" style="color:var(--blue)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg></span>
+            <div class="t-label">List</div>
+            <div class="t-desc">Static values for iteration</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Step 2: Name -->
+      <div class="form-group">
+        <div class="form-label">Variable name</div>
+        <div style="display:flex;align-items:center;gap:4px">
+          <span style="font-family:var(--m);font-size:14px;color:var(--text3);font-weight:700">#</span>
+          <input class="form-input" placeholder="e.g. pump, motor, accessories" style="font-family:var(--m)">
+        </div>
+      </div>
+
+      <!-- Step 3: Source (for BOM) -->
+      <div class="form-group">
+        <div class="form-label">Source collection</div>
+        <select class="form-input" style="font-family:var(--m);font-size:12px">
+          <option selected>#this.flatbom (42 items)</option>
+          <option>#this.bomItems (28 items)</option>
+          <option>#this.nodes (12 items)</option>
+        </select>
+      </div>
+
+      <!-- Step 4: Filter -->
+      <div class="form-group">
+        <div class="form-label">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+          Filter
+        </div>
+
+        <div class="filter-row">
+          <select class="form-input" style="width:auto;padding:3px 8px;font-family:var(--m);font-size:11px;flex:1">
+            <option>jdeSegmentGroup</option>
+            <option>jdePartNumber</option>
+            <option>description</option>
+            <option>listPrice</option>
+            <option>netPrice</option>
+          </select>
+          <select class="form-input" style="width:auto;padding:3px 8px;font-size:11px;flex:0 0 auto">
+            <option>==</option>
+            <option>!=</option>
+            <option>contains</option>
+            <option>&gt;</option>
+            <option>&lt;</option>
+          </select>
+          <input class="form-input" placeholder="value" style="flex:1;padding:3px 8px;font-family:var(--m);font-size:11px">
+          <span class="filter-remove"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></span>
+        </div>
+
+        <div style="display:flex;gap:6px;margin-top:6px">
+          <button class="btn btn-outline btn-sm">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            Add OR condition
+          </button>
+          <button class="btn btn-outline btn-sm">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            Add AND condition
+          </button>
+        </div>
+
+        <div style="margin-top:8px;padding:8px 10px;border:1px dashed var(--border);border-radius:var(--r);text-align:center">
+          <button class="btn-ghost" style="font-size:12px">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+            Or: "Everything NOT in other variables" (catch-all)
+          </button>
+        </div>
+      </div>
+
+      <div class="sep"></div>
+
+      <!-- Pipeline visualization -->
+      <div class="form-group">
+        <div class="form-label">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/></svg>
+          Pipeline preview
+        </div>
+        <div class="pipeline">
+          <div class="pipe-step">
+            <span class="pipe-num">1</span>
+            <span class="pipe-label">Source</span>
+            <span class="pipe-detail">#this.flatbom</span>
+          </div>
+          <div class="pipe-arrow">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>
+            42 items
+          </div>
+          <div class="pipe-step">
+            <span class="pipe-num">2</span>
+            <span class="pipe-label">Filter</span>
+            <span class="pipe-detail">jdeSegmentGroup == ...</span>
+          </div>
+          <div class="pipe-arrow">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>
+            <span style="color:var(--green);font-weight:600">? items</span>
+          </div>
+          <div class="pipe-step" style="border-color:var(--green);background:var(--green-bg)">
+            <span class="pipe-num" style="background:var(--green);color:#fff">3</span>
+            <span class="pipe-label" style="color:var(--green)">#newVariable</span>
+            <span class="badge badge-bom">BOM</span>
+          </div>
+        </div>
+      </div>
+
+      <button class="btn btn-primary" style="width:100%;justify-content:center;margin-top:8px">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        Create variable
+      </button>
+
+    </div>
+  </div>
+
+  <!-- ═══════════ VIEW: Data Sets ═══════════ -->
+  <div class="zone" id="view-datasets">
+    <div class="zone-inner">
+
+      <div class="callout">
+        <span class="icon" style="flex-shrink:0;margin-top:1px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></span>
+        <div>Data sets select <strong>which records</strong> to include from the ticket. The active data set drives live values in Builder and Preview.</div>
+      </div>
+
+      <div class="sec-head">
+        <div class="sec-title">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+          Data Sets
+        </div>
+        <button class="btn btn-primary btn-sm">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          New data set
+        </button>
+      </div>
+
+      <div class="ds-card active">
+        <span class="icon" style="color:var(--purple)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg></span>
+        <div class="ds-info">
+          <div class="ds-name">Fire pump system <span class="badge badge-purple" style="font-size:9px;vertical-align:1px">Active</span></div>
+          <div class="ds-desc">Full fire pump config with controller and alarm panel</div>
+          <div class="ds-chips">
+            <span class="chip">CP-001</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="ds-card">
+        <span class="icon" style="color:var(--text3)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg></span>
+        <div class="ds-info">
+          <div class="ds-name">Minimal config</div>
+          <div class="ds-desc">Pump only, no controller — tests empty variable handling</div>
+          <div class="ds-chips">
+            <span class="chip">CP-003</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ═══════════ VIEW: Records ═══════════ -->
+  <div class="zone" id="view-records">
+    <div class="zone-inner">
+
+      <div class="sec-head" style="margin-bottom:8px">
+        <div class="sec-title">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          Flat BOM Items
+        </div>
+        <span class="badge badge-blue">CP-001</span>
+      </div>
+
+      <input class="form-input" placeholder="Search by part number, description, segment..." style="margin-bottom:10px">
+
+      <div style="font-size:11px;color:var(--text3);margin-bottom:8px;display:flex;align-items:center;justify-content:space-between">
+        <span>42 items in flat BOM</span>
+        <span>Color = variable assignment</span>
+      </div>
+
+      <table class="match-table">
+        <thead>
+          <tr><th>Part #</th><th>Description</th><th>Segment</th><th>Assigned to</th></tr>
+        </thead>
+        <tbody>
+          <tr style="background:var(--orange-bg)"><td class="mono">FP-411-001</td><td>Vertical turbine pump</td><td><span class="chip">411SEG</span></td><td><span style="font-family:var(--m);font-size:11px;font-weight:600;color:var(--orange)">#pump</span></td></tr>
+          <tr style="background:var(--orange-bg)"><td class="mono">FP-411-002</td><td>Impeller assembly</td><td><span class="chip">411SEG</span></td><td><span style="font-family:var(--m);font-size:11px;font-weight:600;color:var(--orange)">#pump</span></td></tr>
+          <tr style="background:var(--orange-bg)"><td class="mono">FP-420-001</td><td>Horizontal split case</td><td><span class="chip">420SEG</span></td><td><span style="font-family:var(--m);font-size:11px;font-weight:600;color:var(--orange)">#pump</span></td></tr>
+          <tr style="background:#FFF1F0"><td class="mono">MT-411-001</td><td>Electric motor 75HP</td><td><span class="chip">MOTOR411</span></td><td><span style="font-family:var(--m);font-size:11px;font-weight:600;color:#BC4C00">#motor</span></td></tr>
+          <tr style="background:#FFF1F0"><td class="mono">MT-411-002</td><td>Motor coupling</td><td><span class="chip">MOTOR411</span></td><td><span style="font-family:var(--m);font-size:11px;font-weight:600;color:#BC4C00">#motor</span></td></tr>
+          <tr style="background:var(--purple-bg)"><td class="mono">ELECT FP CONT</td><td>Fire pump controller</td><td><span class="chip">ELECTFPCONT</span></td><td><span style="font-family:var(--m);font-size:11px;font-weight:600;color:var(--purple)">#firePumpCtrl</span></td></tr>
+          <tr style="background:var(--blue-light)"><td class="mono">REM ALARM PNL</td><td>Remote alarm panel</td><td><span class="chip">REMALARMPNLINTL</span></td><td><span style="font-family:var(--m);font-size:11px;font-weight:600;color:var(--blue)">#remoteAlarm</span></td></tr>
+          <tr><td class="mono">ACC-001</td><td>Pressure gauge kit</td><td><span class="chip">SYSTEM ACC</span></td><td><span style="font-family:var(--m);font-size:11px;color:var(--text3)">#otherItems</span></td></tr>
+          <tr><td class="mono">WFB-001</td><td>Crating &amp; freight</td><td><span class="chip">WFB</span></td><td><span style="font-family:var(--m);font-size:11px;color:var(--text3)">#otherItems</span></td></tr>
+          <tr style="text-align:center;color:var(--text3);font-size:11px"><td colspan="4" style="padding:8px">... 33 more items</td></tr>
+        </tbody>
+      </table>
+
+    </div>
+  </div>
+
+</div>
+
+<script>
+function switchView(name) {
+  document.querySelectorAll('.sub-tab').forEach(t => t.classList.remove('active'));
+  document.querySelector(`[data-view="${name}"]`).classList.add('active');
+  document.querySelectorAll('.zone').forEach(z => z.classList.remove('active'));
+  document.getElementById('view-' + name).classList.add('active');
+}
+
+function showVarDetail(id) {
+  document.querySelectorAll('.zone').forEach(z => z.classList.remove('active'));
+  document.getElementById('view-var-detail').classList.add('active');
+}
+
+function showVarList() {
+  document.querySelectorAll('.zone').forEach(z => z.classList.remove('active'));
+  document.getElementById('view-variables').classList.add('active');
+}
+
+function showNewVariable() {
+  document.querySelectorAll('.zone').forEach(z => z.classList.remove('active'));
+  document.getElementById('view-new-var').classList.add('active');
+}
+
+function selectType(el) {
+  el.parentElement.querySelectorAll('.type-opt').forEach(o => o.classList.remove('selected'));
+  el.classList.add('selected');
+}
+</script>
+
+</body>
+</html>
