@@ -16,10 +16,17 @@ const _data = {
   activeZone: 'setup',
 
   // Connection
+  // Global config lock
+  config: {
+    locked: false,
+    autoConnectPending: false, // set by splash to trigger connection-card reconnect
+  },
+
+  // Connection
   connection: {
     instanceId: null,
     url: '',
-    status: 'disconnected', // disconnected | connecting | connected | error
+    status: 'disconnected', // disconnected | connecting | connected | restoring | error
     error: null,
   },
 

@@ -20,7 +20,7 @@
  */
 
 import { getToken, setToken, deleteToken } from '../core/storage.js';
-import { isDevMode } from './proxy.js';
+import { isDevMode, apiUrl, proxyHeaders } from './proxy.js';
 
 // ─── In-Memory Token Caches ─────────────────────────────────────────────
 
@@ -330,25 +330,7 @@ export async function getTicketToken(instance, ticketId) {
     diag.push('No refresh token stored');
   }
 
-  // ── Try client_credentials for ticket token ──
-  try {
-    const result = isDevMode()
-      ? await getTicketTokenViaServer(instance, ticketId)
-      : await getTicketTokenDirect(instance, ticketId);
-
-    ticketTokens[ticketId] = { token: result.token, expiry: result.expiry };
-    await setToken(`access:${ticketId}`, result.token);
-    if (result.refreshToken) {
-      await setToken(refreshKey, result.refreshToken);
-    }
-
-    diag.push('Client credentials ticket token obtained');
-    return { token: result.token, diag };
-  } catch (e) {
-    diag.push(`Client credentials failed: ${e.message}`);
-  }
-
-  // ── Tier 3: Stored access token (last resort) ──
+  // ── Tier 3: Stored access token ──
   const storedAccess = await getToken(`access:${ticketId}`);
   if (storedAccess) {
     diag.push('Using stored access token (may be expired)');
@@ -483,6 +465,221 @@ export async function storeManualTicketToken(ticketId, accessToken) {
     expiry: Date.now() + 55 * 60 * 1000,
   };
   await setToken(`access:${ticketId}`, accessToken);
+}
+
+/**
+ * Quick check whether a ticket has any stored token (access or refresh).
+ * Does NOT make network calls — just checks Dexie.
+ */
+export async function hasStoredToken(ticketId) {
+  const access = await getToken(`access:${ticketId}`);
+  if (access) return true;
+  const refresh = await getToken(`refresh:${ticketId}`);
+  return !!refresh;
+}
+
+// ─── Try Pasted Value as Refresh Token ───────────────────────────────────
+
+/**
+ * Try using a pasted value as a refresh token — exchange it, validate the
+ * resulting access token, and persist both if valid.
+ *
+ * Mirrors TactonUtil SAVE_TICKET_TOKEN step 2: if the raw string fails as an
+ * access token, attempt a grant_type=refresh_token exchange with it.
+ *
+ * @param {Object} instance - { url, admin, frontend? }
+ * @param {string} ticketId
+ * @param {string} rawToken - The pasted string to try as a refresh token
+ * @returns {Promise<{ok: boolean, error?: string, note?: string}>}
+ */
+export async function tryAsRefreshToken(instance, ticketId, rawToken) {
+  try {
+    const result = isDevMode()
+      ? await refreshTicketTokenViaServer(instance, ticketId, rawToken)
+      : await refreshTicketTokenDirect(instance, ticketId, rawToken);
+
+    // Verify the new access token actually works
+    const probe = await probeTicketToken(instance, ticketId, result.token);
+    if (!probe.ok) {
+      return { ok: false, error: 'Refreshed token failed validation' };
+    }
+
+    // Cache in memory
+    ticketTokens[ticketId] = { token: result.token, expiry: result.expiry };
+
+    // Persist access + refresh tokens
+    await setToken(`access:${ticketId}`, result.token);
+    await setToken(`refresh:${ticketId}`, result.refreshToken || rawToken);
+
+    return { ok: true, note: 'Refresh token exchanged for access token' };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+// ─── Ticket Token Health Check (5-step diagnostic) ──────────────────────
+
+/**
+ * Probe a bearer token against the ticket describe endpoint.
+ * Returns whether the token is valid (200 + XML body with <resource).
+ */
+async function probeTicketToken(instance, ticketId, bearerToken) {
+  const path = `/!tickets~${ticketId}/api-v2.2/describe`;
+  const url = apiUrl(instance.url, path);
+  const res = await fetch(url, {
+    headers: {
+      'Authorization': `Bearer ${bearerToken}`,
+      'Accept': 'application/xml',
+      ...proxyHeaders(instance.url),
+    },
+    credentials: 'omit',
+  });
+  const body = await res.text();
+  const isHtml = body.trimStart().startsWith('<!DOCTYPE') || body.trimStart().startsWith('<html');
+  const ok = res.ok && !isHtml && body.includes('<resource');
+  return { ok, status: res.status, length: body.length, isHtml };
+}
+
+/**
+ * Full 5-step ticket token health check — mirrors TactonUtil TEST_TICKET_TOKEN.
+ *
+ * Steps:
+ *   1. Check stored tokens (access + refresh)
+ *   2. Validate current access token against describe endpoint
+ *   3. Refresh token exchange
+ *   4. Validate refreshed token
+ *   5. Persist new tokens if valid
+ *
+ * @param {Object} instance - { url, admin, frontend? }
+ * @param {string} ticketId
+ * @returns {Promise<{status: string, steps: Array<{label: string, status: string, detail: string}>}>}
+ */
+export async function testTicketToken(instance, ticketId) {
+  const steps = [];
+
+  // ── Step 1: Check stored tokens ──
+  const storedAccess = await getToken(`access:${ticketId}`);
+  const storedRefresh = await getToken(`refresh:${ticketId}`);
+  const hasFrontend = !!(instance.frontend?.clientId && instance.frontend?.clientSecret);
+
+  steps.push({
+    label: 'Stored Access Token',
+    status: storedAccess ? 'pass' : 'fail',
+    detail: storedAccess ? storedAccess.substring(0, 12) + '…' : 'None stored',
+  });
+  steps.push({
+    label: 'Stored Refresh Token',
+    status: storedRefresh ? 'pass' : 'fail',
+    detail: storedRefresh ? storedRefresh.substring(0, 12) + '…' : 'None stored',
+  });
+  steps.push({
+    label: 'Frontend Credentials',
+    status: hasFrontend ? 'pass' : 'skip',
+    detail: hasFrontend
+      ? `Client ID: ${instance.frontend.clientId.substring(0, 12)}…`
+      : 'Not configured (using admin)',
+  });
+
+  // ── Step 2: Validate current access token ──
+  let currentTokenValid = false;
+  if (storedAccess) {
+    try {
+      const probe = await probeTicketToken(instance, ticketId, storedAccess);
+      currentTokenValid = probe.ok;
+      steps.push({
+        label: 'Validate Current Token',
+        status: probe.ok ? 'pass' : 'fail',
+        detail: probe.ok
+          ? `${probe.status} (${probe.length}b)`
+          : `HTTP ${probe.status} (${probe.length}b${probe.isHtml ? ', HTML redirect' : ''})`,
+      });
+    } catch (e) {
+      steps.push({ label: 'Validate Current Token', status: 'fail', detail: e.message });
+    }
+  } else {
+    steps.push({ label: 'Validate Current Token', status: 'skip', detail: 'No token to test' });
+  }
+
+  // ── Step 3: Refresh token exchange ──
+  let refreshedToken = null;
+  let newRefreshToken = null;
+  if (storedRefresh) {
+    try {
+      const result = isDevMode()
+        ? await refreshTicketTokenViaServer(instance, ticketId, storedRefresh)
+        : await refreshTicketTokenDirect(instance, ticketId, storedRefresh);
+
+      refreshedToken = result.token;
+      newRefreshToken = result.refreshToken || null;
+      const expiryMin = Math.round((result.expiry - Date.now()) / 60000);
+      steps.push({
+        label: 'Refresh Token Exchange',
+        status: 'pass',
+        detail: `New access token (expires: ${expiryMin}min)${newRefreshToken ? ', refresh rotated' : ''}`,
+      });
+    } catch (e) {
+      steps.push({ label: 'Refresh Token Exchange', status: 'fail', detail: e.message });
+    }
+  } else {
+    steps.push({ label: 'Refresh Token Exchange', status: 'skip', detail: 'No refresh token stored' });
+  }
+
+  // ── Step 4: Validate refreshed token ──
+  let refreshedTokenValid = false;
+  if (refreshedToken) {
+    try {
+      const probe = await probeTicketToken(instance, ticketId, refreshedToken);
+      refreshedTokenValid = probe.ok;
+      steps.push({
+        label: 'Validate New Token',
+        status: probe.ok ? 'pass' : 'fail',
+        detail: probe.ok
+          ? `${probe.status} (${probe.length}b)`
+          : `HTTP ${probe.status} (${probe.length}b)`,
+      });
+    } catch (e) {
+      steps.push({ label: 'Validate New Token', status: 'fail', detail: e.message });
+    }
+  } else {
+    steps.push({ label: 'Validate New Token', status: 'skip', detail: 'No refreshed token to test' });
+  }
+
+  // ── Step 5: Persist if the refreshed token works ──
+  if (refreshedTokenValid) {
+    try {
+      // Update in-memory cache
+      ticketTokens[ticketId] = {
+        token: refreshedToken,
+        expiry: Date.now() + 3500000, // ~58 min
+      };
+      // Persist access token
+      await setToken(`access:${ticketId}`, refreshedToken);
+      // Persist new refresh token if rotated
+      if (newRefreshToken) {
+        await setToken(`refresh:${ticketId}`, newRefreshToken);
+      }
+      steps.push({
+        label: 'Persist New Tokens',
+        status: 'pass',
+        detail: `Access token updated${newRefreshToken ? ', refresh token rotated' : ''}`,
+      });
+    } catch (e) {
+      steps.push({ label: 'Persist New Tokens', status: 'fail', detail: e.message });
+    }
+  } else if (refreshedToken) {
+    steps.push({ label: 'Persist New Tokens', status: 'fail', detail: 'Refreshed token invalid — kept old tokens' });
+  } else {
+    steps.push({ label: 'Persist New Tokens', status: 'skip', detail: 'Nothing to persist' });
+  }
+
+  // ── Overall status ──
+  const overallStatus = refreshedTokenValid ? 'ok'
+    : currentTokenValid ? 'warn'
+    : storedRefresh ? 'expired'
+    : storedAccess ? 'expired'
+    : 'none';
+
+  return { status: overallStatus, steps };
 }
 
 // ─── Cache Management ───────────────────────────────────────────────────

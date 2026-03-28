@@ -16,7 +16,6 @@
 import { el, qs, clear, show, hide } from '../../core/dom.js';
 import { iconEl, icon } from '../../components/icon.js';
 import state from '../../core/state.js';
-import events from '../../core/events.js';
 import {
   getInstances,
   saveInstance,
@@ -43,13 +42,14 @@ let selectedInstanceId = null;
 // Credential tab state
 let activeCredsTab = 'admin';
 
-// Validation steps shown in the tooltip
+// Validation steps shown in the tooltip (admin connection)
 let validationSteps = [
   { label: 'Instance URL', detail: 'Not configured', status: 'skip' },
   { label: 'Admin Credentials', detail: 'Not configured', status: 'skip' },
   { label: 'Frontend Credentials', detail: 'Not configured (optional)', status: 'skip' },
   { label: 'Admin Token', detail: 'Not tested', status: 'skip' },
 ];
+
 
 /**
  * Create the connection management card.
@@ -215,8 +215,12 @@ export function createConnectionCard(container) {
   // React to connection state changes
   state.on('connection.status', updateBadge);
 
-  // Auto-connect when locked config triggers reconnect from splash
-  events.on('config:autoConnect', async () => {
+  // Auto-connect when splash triggers reconnect via state flag
+  state.on('config.autoConnectPending', async (pending) => {
+    if (!pending) return;
+    // Clear the flag immediately to avoid re-triggering
+    state.set('config.autoConnectPending', false);
+
     const savedId = state.get('connection.instanceId');
     if (savedId) {
       await selectInstance(savedId, true);
@@ -225,6 +229,7 @@ export function createConnectionCard(container) {
       const autoSelect = firstFav || allInstances[0];
       if (autoSelect) await selectInstance(autoSelect.id, true);
     }
+
   });
 }
 
@@ -404,7 +409,6 @@ async function handleSaveInstance() {
       });
 
       showStatus('', ''); // success: badge updates via state
-      events.emit('connection:established', saved);
     } else {
       testPassed = false;
       testResultMap.set(saved.id, 'error');
@@ -754,23 +758,26 @@ function updateBadge() {
   badge.appendChild(badgeSpan);
 
   // Only show tooltip after a test or connection has been attempted
-  const hasInfo = validationSteps.some(s => s.status !== 'skip');
-  if (!hasInfo) return;
+  const hasAdminInfo = validationSteps.some(s => s.status !== 'skip');
+  if (!hasAdminInfo) return;
 
   // Build tooltip
   const tooltip = el('div', { class: 'conn-tooltip' });
+  const ICONS = { pass: '✓', fail: '✗', skip: '–', warn: '!' };
+
+  // Admin connection section
+  const adminBadge = (status === 'connected' || testPassed) ? 'ok' : status === 'error' ? 'error' : 'warn';
+  const adminLabel = (status === 'connected' || testPassed) ? 'All Good' : status === 'error' ? 'Error' : 'Pending';
+
   const header = el('div', { class: 'conn-tooltip-header' }, [
-    el('span', { class: 'conn-tooltip-title' }, 'Connection Status'),
-    el('span', { class: `conn-tooltip-badge ${status === 'connected' || testPassed ? 'ok' : status === 'error' ? 'error' : 'warn'}` },
-      status === 'connected' || testPassed ? 'All Good' : status === 'error' ? 'Error' : 'Pending'),
+    el('span', { class: 'conn-tooltip-title' }, 'Admin Connection'),
+    el('span', { class: `conn-tooltip-badge ${adminBadge}` }, adminLabel),
   ]);
   tooltip.appendChild(header);
 
   const stepsEl = el('div', { class: 'conn-tooltip-steps' });
-  const ICONS = { pass: '✓', fail: '✗', skip: '–', warn: '!' };
-
   for (const step of validationSteps) {
-    stepsEl.appendChild(el('div', { class: `conn-tooltip-step` }, [
+    stepsEl.appendChild(el('div', { class: 'conn-tooltip-step' }, [
       el('span', { class: `conn-tooltip-icon tt-${step.status}` }, ICONS[step.status] || '–'),
       el('div', { class: 'conn-tooltip-body' }, [
         el('div', { class: 'conn-tooltip-label' }, step.label),
@@ -779,6 +786,7 @@ function updateBadge() {
     ]));
   }
   tooltip.appendChild(stepsEl);
+
   badge.appendChild(tooltip);
 }
 

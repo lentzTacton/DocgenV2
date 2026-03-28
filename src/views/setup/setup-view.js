@@ -15,7 +15,6 @@
 import { el, qs, clear } from '../../core/dom.js';
 import { iconEl, icon } from '../../components/icon.js';
 import state from '../../core/state.js';
-import events from '../../core/events.js';
 import { getSetting, setSetting, deleteSetting } from '../../core/storage.js';
 import { createConnectionCard } from './connection-card.js';
 import { createTicketCard } from './ticket-card.js';
@@ -37,6 +36,43 @@ const RING_CIRC = 2 * Math.PI * RING_RADIUS;
 
 let activeStep = 'connection';
 let lockWasReady = false;
+
+/**
+ * Config lock schema — single source of truth for snapshot keys.
+ * Each entry maps a snapshot field to the state path it reads/writes.
+ * `fallback` is used when the saved value is missing.
+ */
+const CONFIG_SCHEMA = [
+  { key: 'instanceId',  state: 'connection.instanceId',  fallback: null },
+  { key: 'url',         state: 'connection.url',         fallback: '' },
+  { key: 'ticketId',    state: 'tickets.selected',       fallback: null },
+  { key: 'tokenMap',    state: 'tickets.tokenMap',       fallback: {} },
+  { key: 'objectType',  state: 'startingObject.type',    fallback: null },
+  { key: 'aiKeyValid',  state: 'ai.apiKeyValid',         fallback: false },
+];
+
+/** Build a snapshot object from current state using CONFIG_SCHEMA */
+function buildConfigSnapshot() {
+  const snap = {};
+  for (const { key, state: path, fallback } of CONFIG_SCHEMA) {
+    snap[key] = state.get(path) ?? fallback;
+  }
+  return snap;
+}
+
+/** Restore state from a saved snapshot using CONFIG_SCHEMA */
+function applyConfigSnapshot(saved) {
+  const updates = { 'config.locked': true };
+  for (const { key, state: path, fallback } of CONFIG_SCHEMA) {
+    updates[path] = saved[key] ?? fallback;
+  }
+  // Derived state not in schema.
+  // Status is 'restoring' — the real 'connected' comes after the
+  // auto-connect health check in connection-card re-tests credentials.
+  updates['connection.status'] = 'restoring';
+  updates['startingObject.name'] = saved.objectType ?? null;
+  return updates;
+}
 
 export function createSetupView(container) {
   const inner = el('div', { class: 'zone-inner' });
@@ -159,10 +195,12 @@ export function createSetupView(container) {
   // ── Listen for completion events to advance steps ──
 
   state.on('connection.status', (status) => {
+    // Skip step transitions while config is locked (summary is shown)
+    if (state.get('config.locked')) return;
+
     if (status === 'connected') {
       unlockStep('ticket');
-      // Don't auto-advance — let the user proceed when ready
-    } else {
+    } else if (status !== 'restoring') {
       // Instance disconnected or changed — re-lock downstream steps
       lockStep('ticket');
       lockStep('starting-object');
@@ -197,6 +235,13 @@ export function createSetupView(container) {
     updateStepperState();
   });
 
+  // Re-render locked summary when ticket token health check completes
+  state.on('tickets.tokenHealth', () => {
+    if (state.get('config.locked')) {
+      renderLockedSummaryContent();
+    }
+  });
+
   // Restore locked config from persistent storage on page reload
   loadLockedConfig();
 }
@@ -209,15 +254,7 @@ async function handleConfigLock() {
   state.set('config.locked', newLocked);
 
   if (newLocked) {
-    // Persist the full locked config snapshot
-    await setSetting('config-locked', {
-      instanceId: state.get('connection.instanceId'),
-      url: state.get('connection.url'),
-      ticketId: state.get('tickets.selected'),
-      tokenMap: state.get('tickets.tokenMap') || {},
-      objectType: state.get('startingObject.type'),
-      aiKeyValid: !!state.get('ai.apiKeyValid'),
-    });
+    await setSetting('config-locked', buildConfigSnapshot());
     showLockedSummary();
   } else {
     await deleteSetting('config-locked');
@@ -231,17 +268,7 @@ async function loadLockedConfig() {
   if (!saved) return;
 
   // Restore all state from the saved snapshot
-  state.batch({
-    'config.locked': true,
-    'connection.instanceId': saved.instanceId,
-    'connection.url': saved.url,
-    'connection.status': 'connected',
-    'tickets.selected': saved.ticketId,
-    'tickets.tokenMap': saved.tokenMap || {},
-    'startingObject.type': saved.objectType,
-    'startingObject.name': saved.objectType,
-    'ai.apiKeyValid': saved.aiKeyValid || false,
-  });
+  state.batch(applyConfigSnapshot(saved));
 
   showLockedSummary();
   updateStepperState();
@@ -254,17 +281,41 @@ function showLockedSummary() {
     if (wrap) wrap.style.display = 'none';
   });
 
-  // Build summary
+  const summaryEl = qs('#config-summary');
+  if (!summaryEl) return;
+  summaryEl.style.display = '';
+
+  renderLockedSummaryContent();
+}
+
+/** Build / rebuild the locked summary content (called on show + token health updates) */
+function renderLockedSummaryContent() {
+  // Remove any orphaned token health tooltips from body before rebuilding
+  document.querySelectorAll('.token-health-tooltip').forEach(t => t.remove());
+
   const summaryEl = qs('#config-summary');
   if (!summaryEl) return;
   clear(summaryEl);
-  summaryEl.style.display = '';
 
   const url = state.get('connection.url') || '';
   const hostname = url ? (() => { try { return new URL(url).hostname; } catch { return url; } })() : '—';
   const ticketId = state.get('tickets.selected') || '—';
   const objectType = state.get('startingObject.type') || '—';
   const hasAi = !!state.get('ai.apiKeyValid');
+  const tokenHealth = state.get('tickets.tokenHealth');
+
+  // Derive ticket token display
+  let tokenLabel = 'Pending…';
+  let tokenOk = false;
+  if (tokenHealth && tokenHealth.ticketId === state.get('tickets.selected')) {
+    const s = tokenHealth.status;
+    tokenOk = s === 'ok';
+    tokenLabel = s === 'ok' ? 'Valid'
+      : s === 'warn' ? 'Partial'
+      : s === 'expired' ? 'Expired'
+      : s === 'none' ? 'No token'
+      : 'Error';
+  }
 
   const sections = [
     {
@@ -280,6 +331,7 @@ function showLockedSummary() {
       items: [
         { label: 'Ticket', value: ticketId, ok: true },
         { label: 'Object', value: objectType, ok: true },
+        { label: 'Ticket Token', value: tokenLabel, ok: tokenOk, hasTooltip: !!tokenHealth },
       ],
     },
     {
@@ -290,6 +342,8 @@ function showLockedSummary() {
       ],
     },
   ];
+
+  const ICONS = { pass: '✓', fail: '✗', skip: '–', warn: '!' };
 
   for (const section of sections) {
     summaryEl.appendChild(
@@ -304,18 +358,81 @@ function showLockedSummary() {
         class: `config-summary-dot ${item.ok ? 'dot-ok' : 'dot-muted'}`,
       });
 
+      // Value element — either plain text or a badge with hover tooltip
+      let valueEl;
+      if (item.hasTooltip && tokenHealth?.steps) {
+        const badgeClass = item.ok ? 'token-health-ok' : 'token-health-warn';
+        const badge = el('span', {
+          class: `config-summary-token-badge ${badgeClass}`,
+        }, item.value);
+
+        // Build tooltip (appended to body to escape overflow:hidden parents)
+        const tooltip = buildTokenHealthTooltip(tokenHealth, tokenLabel, item.ok, ICONS);
+
+        badge.addEventListener('mouseenter', () => {
+          const rect = badge.getBoundingClientRect();
+          tooltip.style.left = rect.left + 'px';
+          tooltip.style.top = (rect.bottom + 6) + 'px';
+          // Flip upward if it would overflow the viewport
+          document.body.appendChild(tooltip);
+          tooltip.classList.add('is-visible');
+          const ttRect = tooltip.getBoundingClientRect();
+          if (ttRect.bottom > window.innerHeight - 8) {
+            tooltip.style.top = (rect.top - ttRect.height - 6) + 'px';
+          }
+        });
+        badge.addEventListener('mouseleave', () => {
+          tooltip.classList.remove('is-visible');
+          if (tooltip.parentNode) tooltip.parentNode.removeChild(tooltip);
+        });
+
+        valueEl = el('span', { class: 'config-summary-token-wrap' }, [badge]);
+      } else {
+        valueEl = el('span', { class: 'config-summary-value' }, item.value);
+      }
+
       summaryEl.appendChild(
         el('div', { class: 'config-summary-row' }, [
           dot,
           el('span', { class: 'config-summary-label' }, item.label),
-          el('span', { class: 'config-summary-value' }, item.value),
+          valueEl,
         ])
       );
     }
   }
 }
 
+/** Build a detached tooltip element for ticket token health (appended to body on hover) */
+function buildTokenHealthTooltip(tokenHealth, tokenLabel, isOk, ICONS) {
+  const tooltip = el('div', { class: 'token-health-tooltip' });
+
+  const tooltipHeader = el('div', { class: 'conn-tooltip-header' }, [
+    el('span', { class: 'conn-tooltip-title' }, `Ticket Token (${tokenHealth.ticketId})`),
+    el('span', {
+      class: `conn-tooltip-badge ${isOk ? 'ok' : tokenHealth.status === 'warn' ? 'warn' : 'error'}`,
+    }, tokenLabel),
+  ]);
+  tooltip.appendChild(tooltipHeader);
+
+  const stepsEl = el('div', { class: 'conn-tooltip-steps' });
+  for (const step of tokenHealth.steps) {
+    stepsEl.appendChild(el('div', { class: 'conn-tooltip-step' }, [
+      el('span', { class: `conn-tooltip-icon tt-${step.status}` }, ICONS[step.status] || '–'),
+      el('div', { class: 'conn-tooltip-body' }, [
+        el('div', { class: 'conn-tooltip-label' }, step.label),
+        el('div', { class: 'conn-tooltip-detail' }, step.detail),
+      ]),
+    ]));
+  }
+  tooltip.appendChild(stepsEl);
+
+  return tooltip;
+}
+
 function hideLockedSummary() {
+  // Remove any orphaned token health tooltips from body
+  document.querySelectorAll('.token-health-tooltip').forEach(t => t.remove());
+
   const summaryEl = qs('#config-summary');
   if (summaryEl) {
     summaryEl.style.display = 'none';
@@ -408,11 +525,17 @@ function addProceedButton(wrap, currentStepId, nextStepId) {
   }
 }
 
+/** Is connection live or being restored from snapshot? */
+function isConnectedOrRestoring() {
+  const s = state.get('connection.status');
+  return s === 'connected' || s === 'restoring';
+}
+
 /**
  * Enable/disable proceed buttons based on step completion.
  */
 function updateProceedButtons() {
-  const isConnected = state.get('connection.status') === 'connected';
+  const isConnected = isConnectedOrRestoring();
   const hasTicket = !!state.get('tickets.selected');
   const hasObject = !!state.get('startingObject.type');
 
@@ -431,7 +554,7 @@ function updateProceedButtons() {
 }
 
 function updateStepperState() {
-  const isConnected = state.get('connection.status') === 'connected';
+  const isConnected = isConnectedOrRestoring();
   const hasTicket = !!state.get('tickets.selected');
   const hasObject = !!state.get('startingObject.type');
   const hasAiKey = !!state.get('ai.apiKeyValid');
@@ -493,11 +616,22 @@ function updateStepperState() {
       isComplete = hasAiKey;
     }
 
+    // When config is locked, all completed steps are green, no blue active highlight
+    const configLocked = !!state.get('config.locked');
+
     if (isComplete) {
       marker.classList.add('marker-complete');
-    } else if (step.id === activeStep) {
+    }
+
+    if (configLocked) {
+      // Locked: completed → green, optional uncompleted → muted, nothing active
+      if (!isComplete && step.optional) {
+        marker.classList.add('marker-locked');
+      }
+    } else if (step.id === activeStep && !isLocked) {
+      // Active step gets blue highlight even if also complete
       marker.classList.add('marker-active');
-    } else if (isLocked) {
+    } else if (isLocked && !isComplete) {
       marker.classList.add('marker-locked');
     }
 

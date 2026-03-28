@@ -1,6 +1,5 @@
 import { el } from '../core/dom.js';
 import state from '../core/state.js';
-import events from '../core/events.js';
 
 /**
  * Creates the splash screen shown when no connection is established.
@@ -47,9 +46,9 @@ function handleSplashConnect() {
   hideSplash();
   state.set('activeZone', 'setup');
 
-  // If config is locked, auto-connect with saved settings
+  // If config is locked, signal connection-card to auto-connect
   if (state.get('config.locked')) {
-    events.emit('config:autoConnect');
+    state.set('config.autoConnectPending', true);
   }
 }
 

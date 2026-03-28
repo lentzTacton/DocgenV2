@@ -34,9 +34,9 @@ export function createAiSettingsCard(container) {
     class: 'input',
     id: 'ai-model',
   }, [
-    el('option', { value: 'claude-sonnet-4-5-20250514' }, 'Claude Sonnet 4.5'),
-    el('option', { value: 'claude-sonnet-4-6-20250627' }, 'Claude Sonnet 4.6'),
-    el('option', { value: 'claude-opus-4-6-20250627' }, 'Claude Opus 4.6'),
+    el('option', { value: 'claude-sonnet-4-6' }, 'Claude Sonnet 4.6'),
+    el('option', { value: 'claude-opus-4-6' }, 'Claude Opus 4.6'),
+    el('option', { value: 'claude-sonnet-4-5' }, 'Claude Sonnet 4.5'),
     el('option', { value: 'claude-haiku-4-5-20251001' }, 'Claude Haiku 4.5'),
   ]);
 
@@ -192,7 +192,7 @@ async function initFromStorage() {
   const settings = await loadAiSettings();
   if (settings.apiKey) {
     qs('#ai-api-key').value = settings.apiKey;
-    qs('#ai-model').value = settings.model || 'claude-sonnet-4-5-20250514';
+    qs('#ai-model').value = settings.model || 'claude-sonnet-4-6';
     qs('#ai-max-tokens').value = settings.maxTokens || 2048;
   }
 }

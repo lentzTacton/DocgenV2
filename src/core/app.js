@@ -1,5 +1,4 @@
 import state from './state.js';
-import events from './events.js';
 import { el, qs, clear } from './dom.js';
 import { createTabs } from '../components/tabs.js';
 import { createSplash, hideSplash, showSplash } from '../components/splash.js';
