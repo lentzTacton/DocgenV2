@@ -157,6 +157,14 @@ export function createTicketCard(container) {
   // Load favorites from Dexie
   loadFavorites('tickets').then(f => { favs = f; });
 
+  // When config is unlocked while already connected, re-render the ticket list
+  // (the connection.status listener won't fire because the status hasn't changed)
+  state.on('config.locked', (locked) => {
+    if (!locked && state.get('connection.status') === 'connected') {
+      handleRefreshTickets();
+    }
+  });
+
   state.on('connection.status', async (status) => {
     const btn = qs('#ticket-refresh-btn');
     const search = qs('#ticket-search-row');

@@ -1,0 +1,1826 @@
+/**
+ * Variable List — Catalogue > Section > Variable hierarchy.
+ *
+ * Structure:
+ *   Data Catalogues (instance / ticket / shared)
+ *     └─ Sections (collapsible, named, with description + tags)
+ *         └─ Data Sets (cards)
+ *
+ * Coverage bar at bottom shows BOM item distribution.
+ */
+
+import { el, qs, clear } from '../../core/dom.js';
+import { icon, iconEl } from '../../components/icon.js';
+import state from '../../core/state.js';
+import {
+  calculateCoverage,
+  createVariable, updateVariable, removeVariable,
+  createCatalogue, updateCatalogue, removeCatalogue,
+  createSection, updateSection, removeSection,
+  assignVariableToSection,
+  canDeleteCatalogue, canDeleteSection, canDeleteVariable,
+  validateDataSet, getDependents,
+} from '../../services/variables.js';
+import { isConnected, getBomSources, getBomFields, fetchBomRecords, fetchModel, getConfiguredProductList, fetchConfiguredProductData, indexConfigAttributes } from '../../services/data-api.js';
+import {
+  exportCatalogue, downloadJson, importCatalogue, readJsonFile,
+} from '../../services/catalogue-io.js';
+import { handleInsertIntoDoc, handleInsertSectionIntoDoc, buildSectionExpression } from '../../services/word-api.js';
+import { wizState } from './wizard-state.js';
+
+// ─── Constants ──────────────────────────────────────────────────────────
+
+const TYPE_CONFIG = {
+  bom:    { badge: 'badge-bom',    label: 'BOM',    icon: 'box',    color: 'var(--orange)' },
+  object: { badge: 'badge-obj',    label: 'OBJ',    icon: 'cube',   color: 'var(--purple)' },
+  single: { badge: 'badge-single', label: 'SINGLE', icon: 'target', color: 'var(--success)' },
+  define: { badge: 'badge-define', label: 'DEF',    icon: 'link',   color: 'var(--purple, #8250DF)' },
+  list:   { badge: 'badge-list',   label: 'LIST',   icon: 'list',   color: 'var(--tacton-blue)' },
+  code:   { badge: 'badge-code',   label: 'CODE',   icon: 'code',   color: 'var(--text-tertiary)' },
+};
+
+const SCOPE_CONFIG = {
+  instance: { label: 'Instance', icon: 'database', color: 'var(--purple)', desc: 'Shared across all tickets on this instance' },
+  ticket:   { label: 'Ticket',   icon: 'ticket',   color: 'var(--orange)', desc: 'Scoped to the current ticket/branch' },
+  shared:   { label: 'Shared',   icon: 'globe',    color: 'var(--tacton-blue)', desc: 'Available in all projects' },
+};
+
+// Collapse state (in-memory, persists during session)
+const collapseState = {};  // key: 'cat-{id}' or 'sec-{id}' → boolean
+
+// "Expand all" — persisted via localStorage; when unchecked everything is collapsed (default)
+const EXPAND_ALL_KEY = 'docgen_expand_all';
+let expandAll = (() => { try { return localStorage.getItem(EXPAND_ALL_KEY) === 'true'; } catch { return false; } })();
+
+function isCollapsed(key) {
+  // If a specific key has been toggled, use that; otherwise follow expandAll
+  if (key in collapseState) return collapseState[key];
+  return !expandAll; // collapsed by default unless "expand all" is on
+}
+function toggleCollapse(key) { collapseState[key] = !isCollapsed(key); }
+
+function setExpandAll(val) {
+  expandAll = val;
+  // Clear per-item overrides so the global takes effect
+  Object.keys(collapseState).forEach(k => delete collapseState[k]);
+  try { localStorage.setItem(EXPAND_ALL_KEY, String(val)); } catch { /* noop */ }
+}
+
+// "Show expression" — persisted via localStorage
+const SHOW_EXPR_KEY = 'docgen_show_expr';
+let showExpr = (() => { try { return localStorage.getItem(SHOW_EXPR_KEY) === 'true'; } catch { return false; } })();
+
+function setShowExpr(val) {
+  showExpr = val;
+  try { localStorage.setItem(SHOW_EXPR_KEY, String(val)); } catch { /* noop */ }
+}
+
+// Search / filter state
+let searchQuery = '';
+let activeTagFilters = new Set();  // set of tag strings
+
+// Validation context cache (populated once per render when connected)
+let validationCtx = { bomSources: [], bomFields: [], bomRecords: [], modelObjects: [], configAttrPaths: new Set() };
+let validationCtxLoaded = false;
+
+async function ensureValidationCtx() {
+  if (validationCtxLoaded || !isConnected()) return;
+  try {
+    const [sources, fields, records, model] = await Promise.all([
+      getBomSources(), getBomFields(), fetchBomRecords(), fetchModel(),
+    ]);
+    validationCtx = {
+      bomSources: sources || [],
+      bomFields: fields || [],
+      bomRecords: records || [],
+      modelObjects: model || [],
+      configAttrPaths: new Set(),
+    };
+
+    // Load config attribute paths from all configured products (non-blocking)
+    try {
+      const cpList = await getConfiguredProductList();
+      for (const cp of cpList) {
+        const tree = await fetchConfiguredProductData(cp.id);
+        if (tree) {
+          const idx = indexConfigAttributes(tree);
+          for (const entry of idx) validationCtx.configAttrPaths.add(entry.path);
+        }
+      }
+    } catch (e) { console.warn('[validation] Config attr index load failed:', e); }
+
+    validationCtxLoaded = true;
+    // Re-render to show validation badges now that data is loaded
+    rerender();
+  } catch (e) { console.warn('[validation] Failed to load context:', e); }
+}
+
+// Map of variable id → { status, issues }
+const validationResults = {};
+
+// ─── Floating tooltip (delegates on [data-val-tip]) ──────────────────────
+let _valTip = null;
+function dismissAllTooltips() {
+  if (_valTip) { _valTip.remove(); _valTip = null; }
+  // Also clean up any chip tooltips from the code editor
+  document.querySelectorAll('.wiz-chip-tooltip').forEach(t => t.remove());
+}
+document.addEventListener('mouseover', (e) => {
+  const target = e.target.closest('[data-val-tip]');
+  if (!target) return;
+  if (_valTip) _valTip.remove();
+  const text = target.dataset.valTip;
+  if (!text) return;
+  _valTip = el('div', { class: 'wiz-chip-tooltip' }, text);
+  document.body.appendChild(_valTip);
+  const rect = target.getBoundingClientRect();
+  _valTip.style.left = `${rect.right + 8}px`;
+  _valTip.style.top = `${rect.top + (rect.height / 2) - (_valTip.offsetHeight / 2)}px`;
+  if (rect.right + 8 + _valTip.offsetWidth > window.innerWidth - 8) {
+    _valTip.style.left = `${rect.left - _valTip.offsetWidth - 8}px`;
+  }
+  if (parseFloat(_valTip.style.top) + _valTip.offsetHeight > window.innerHeight - 8) {
+    _valTip.style.top = `${window.innerHeight - _valTip.offsetHeight - 8}px`;
+  }
+});
+document.addEventListener('mouseout', (e) => {
+  const target = e.target.closest('[data-val-tip]');
+  if (target && _valTip) { _valTip.remove(); _valTip = null; }
+});
+// Dismiss all tooltips on any state navigation (click into data set, back, etc.)
+state.on('dataView', dismissAllTooltips);
+state.on('activeVariable', dismissAllTooltips);
+
+// ─── Main render ────────────────────────────────────────────────────────
+
+export function renderVariableList(container) {
+  const variables = state.get('variables') || [];
+  const catalogues = state.get('catalogues') || [];
+  const sections = state.get('sections') || [];
+  const locked = state.get('config.locked');
+
+  // Kick off async validation data loading (will re-render when ready)
+  if (!validationCtxLoaded) ensureValidationCtx();
+
+  // Compute validation for all variables and publish to state for cross-module access
+  for (const v of variables) {
+    validationResults[v.id] = validateDataSet(v, validationCtx);
+  }
+  state.set('validationResults', { ...validationResults });
+
+  // Setup-not-complete callout
+  if (!locked) {
+    container.appendChild(
+      el('div', { class: 'callout callout-info' }, [
+        el('span', { class: 'icon', html: icon('info', 14) }),
+        el('div', { class: 'callout-text' },
+          'Complete Setup to enable live BOM data. You can still define data sets now.'
+        ),
+      ])
+    );
+  }
+
+  // ── Page header ──
+  const dsCount = variables.length;
+
+  container.appendChild(
+    el('div', { class: 'data-section-head' }, [
+      el('div', { class: 'data-section-left' }, [
+        el('span', { class: 'icon', style: { color: 'var(--tacton-blue)' }, html: icon('database', 15) }),
+        el('span', { style: { fontWeight: '700', fontSize: '13px' } }, 'Data'),
+        el('span', {
+          class: 'badge badge-muted',
+          style: { fontSize: '9px', marginLeft: '6px' },
+        }, `${dsCount} data set${dsCount !== 1 ? 's' : ''}` + (catalogues.length > 0 ? `, ${catalogues.filter(c => !c.readonly).length} catalogue${catalogues.filter(c => !c.readonly).length !== 1 ? 's' : ''}` : '')),
+      ]),
+      el('div', { style: { display: 'flex', gap: '4px' } }, [
+        el('button', {
+          class: 'btn btn-outline btn-sm',
+          onclick: () => triggerImport(),
+          title: 'Import catalogue from JSON',
+        }, [el('span', { class: 'icon', html: icon('arrowDown', 12) }), 'Import']),
+        el('button', {
+          class: 'btn btn-outline btn-sm',
+          onclick: () => showNewCatalogueInline(container),
+        }, [el('span', { class: 'icon', html: icon('folder', 12) }), 'New catalogue']),
+        // "New data set" button lives inside each catalogue tile now
+      ]),
+    ])
+  );
+
+  // ── Search & tag filter ──
+  const allTags = collectAllTags(catalogues, sections);
+  container.appendChild(renderSearchFilter(allTags));
+
+  // ── Catalogues ──
+  if (catalogues.length === 0 && variables.length === 0) {
+    container.appendChild(
+      el('div', { class: 'data-empty' }, [
+        el('div', { class: 'data-empty-icon', html: icon('database', 36) }),
+        el('div', { class: 'data-empty-text' }, 'No data sets defined yet'),
+        el('div', { style: { fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' } },
+          'Create a data catalogue to organize your data sets, or add a data set directly.'
+        ),
+      ])
+    );
+    return;
+  }
+
+  // Apply search/tag filters
+  const q = searchQuery.toLowerCase().trim();
+  const hasFilter = q || activeTagFilters.size > 0;
+
+  function matchesCatalogueTags(cat) {
+    if (activeTagFilters.size === 0) return true;
+    const catTags = cat.tags || [];
+    return [...activeTagFilters].some(t => catTags.includes(t));
+  }
+
+  function matchesCatalogue(cat) {
+    if (!hasFilter) return true;
+    if (!matchesCatalogueTags(cat)) return false;
+    if (q && !cat.name.toLowerCase().includes(q) && !(cat.description || '').toLowerCase().includes(q)) return false;
+    return true;
+  }
+
+  function matchesVariable(v) {
+    if (!q) return true;
+    return v.name.toLowerCase().includes(q)
+      || (v.expression || '').toLowerCase().includes(q)
+      || (v.source || '').toLowerCase().includes(q);
+  }
+
+  // Render user catalogues first, then read-only ones
+  const userCats = catalogues.filter(c => !c.readonly);
+  const readonlyCats = catalogues.filter(c => c.readonly);
+
+  for (const cat of userCats) {
+    // Tag filter on catalogue level — skip entirely if tags don't match
+    if (activeTagFilters.size > 0 && !matchesCatalogueTags(cat)) continue;
+    const catSections = sections.filter(s => s.catalogueId === cat.id);
+    let catVars = variables.filter(v => v.catalogueId === cat.id);
+    if (hasFilter) catVars = catVars.filter(matchesVariable);
+    if (!matchesCatalogue(cat) && catVars.length === 0) continue;
+    container.appendChild(renderCatalogue(cat, catSections, catVars));
+  }
+
+  // Unassigned variables (not in any catalogue)
+  let unassigned = variables.filter(v => !v.catalogueId);
+  if (hasFilter) unassigned = unassigned.filter(matchesVariable);
+  if (unassigned.length > 0) {
+    container.appendChild(renderUnassigned(unassigned));
+  }
+
+  // Read-only catalogues (e.g. Cookbook Samples)
+  for (const cat of readonlyCats) {
+    // Tag filter on catalogue level — skip entirely if tags don't match
+    if (activeTagFilters.size > 0 && !matchesCatalogueTags(cat)) continue;
+    const catSections = sections.filter(s => s.catalogueId === cat.id);
+    let catVars = variables.filter(v => v.catalogueId === cat.id);
+    if (hasFilter) catVars = catVars.filter(matchesVariable);
+    if (!matchesCatalogue(cat) && catVars.length === 0) continue;
+    container.appendChild(renderCatalogue(cat, catSections, catVars));
+  }
+
+  // Coverage bar (only if BOM variables exist)
+  const bomVars = variables.filter(v => v.type === 'bom');
+  if (bomVars.length > 0) {
+    container.appendChild(renderCoverageBar(variables));
+  }
+}
+
+// ─── Unassigned block ───────────────────────────────────────────────────
+
+function renderUnassigned(variables) {
+  const unKey = 'cat-unassigned';
+  const collapsed = isCollapsed(unKey);
+  const frag = el('div', { class: 'cat-group' });
+
+  frag.appendChild(el('div', { class: 'cat-header cat-header-muted' }, [
+    el('button', {
+      class: 'cat-collapse-btn',
+      onclick: () => { toggleCollapse(unKey); rerender(); },
+      html: icon(collapsed ? 'chevronRight' : 'chevronDown', 12),
+    }),
+    el('span', { class: 'icon', style: { color: 'var(--text-tertiary)' }, html: icon('list', 14) }),
+    el('div', { class: 'cat-title' }, 'Unassigned'),
+    el('span', { class: 'badge badge-muted', style: { marginLeft: 'auto' } }, `${variables.length}`),
+  ]));
+
+  if (!collapsed) {
+    const cardList = el('div', { class: 'var-card-list', style: { marginLeft: '16px' } });
+    variables.forEach(v => cardList.appendChild(renderVarCard(v)));
+    makeDropZone(cardList, null, null); // drop here = unassign
+    frag.appendChild(cardList);
+  }
+
+  return frag;
+}
+
+// ─── Catalogue rendering ────────────────────────────────────────────────
+
+function renderCatalogue(catalogue, sections, variables) {
+  const sc = SCOPE_CONFIG[catalogue.scope] || SCOPE_CONFIG.ticket;
+  const catKey = `cat-${catalogue.id}`;
+  const collapsed = isCollapsed(catKey);
+  const isReadonly = !!catalogue.readonly;
+
+  const frag = el('div', { class: 'cat-group' });
+
+  // ── Catalogue header ──
+  const scopeLabel = isReadonly ? 'LOCKED' : sc.label.toUpperCase();
+  const scopeColor = isReadonly ? '#ABB4BD' : sc.color;
+
+  const headerChildren = [
+    el('button', {
+      class: 'cat-collapse-btn',
+      onclick: (e) => { e.stopPropagation(); toggleCollapse(catKey); rerender(); },
+      html: icon(collapsed ? 'chevronRight' : 'chevronDown', 12),
+    }),
+    // Folder icon + scope badge stacked vertically (mirrors var-type-col)
+    el('div', { class: 'cat-type-col' }, [
+      el('span', { class: 'icon', style: { color: scopeColor }, html: icon(collapsed ? 'folder' : 'folderOpen', 16) }),
+      el('span', { class: 'cat-scope-label', style: { color: scopeColor } }, scopeLabel),
+    ]),
+    el('div', { class: 'cat-info' }, [
+      el('div', { class: 'cat-title-row' }, [
+        el('span', { class: 'cat-title' }, catalogue.name),
+        ...((catalogue.tags || []).map(t => el('span', { class: 'cat-tag' }, t))),
+      ]),
+      catalogue.description
+        ? el('div', { class: 'cat-desc' }, catalogue.description)
+        : null,
+    ].filter(Boolean)),
+  ];
+
+  // Right-aligned group: count → actions
+  const rightGroup = el('div', { class: 'cat-header-right' });
+
+  rightGroup.appendChild(
+    el('span', { class: 'badge badge-muted cat-count-badge' }, `${variables.length}`)
+  );
+
+  // Actions button (always visible — readonly gets limited menu)
+  rightGroup.appendChild(
+    el('button', {
+      class: 'cat-action-btn',
+      onclick: (e) => { e.stopPropagation(); showCatalogueMenu(catalogue, e.currentTarget); },
+      html: icon('moreHorizontal', 14),
+    })
+  );
+
+  headerChildren.push(rightGroup);
+
+  frag.appendChild(el('div', {
+    class: `cat-header ${isReadonly ? 'cat-header-readonly' : ''}`,
+    onclick: () => { toggleCollapse(catKey); rerender(); },
+    style: { cursor: 'pointer' },
+  }, headerChildren));
+
+  if (collapsed) return frag;
+
+  // ── Sections within this catalogue ──
+  const body = el('div', { class: 'cat-body' });
+
+  for (const section of sections) {
+    const secVars = variables.filter(v => String(v.sectionId) === String(section.id));
+    body.appendChild(renderSection(section, secVars, catalogue));
+  }
+
+  // Section reorder drop handling
+  if (!isReadonly) {
+    makeSectionDropZone(body, catalogue.id);
+  }
+
+  // Variables not in any section (directly in catalogue)
+  const looseCatVars = variables.filter(v => !v.sectionId);
+  if (looseCatVars.length > 0 || !isReadonly) {
+    const cardList = el('div', { class: 'var-card-list' });
+    looseCatVars.forEach(v => cardList.appendChild(renderVarCard(v, isReadonly)));
+    if (!isReadonly) makeDropZone(cardList, catalogue.id, null);
+    body.appendChild(cardList);
+  }
+
+  // Footer actions (not for readonly)
+  if (!isReadonly) {
+    body.appendChild(
+      el('div', { class: 'cat-footer-actions' }, [
+        el('button', {
+          class: 'sec-add-btn',
+          onclick: () => showNewSectionInline(body, catalogue.id),
+        }, [el('span', { class: 'icon', html: icon('plus', 10) }), 'Add section']),
+      ])
+    );
+  }
+
+  frag.appendChild(body);
+  return frag;
+}
+
+// ─── Section rendering ──────────────────────────────────────────────────
+
+function renderSection(section, variables, catalogue) {
+  const secKey = `sec-${section.id}`;
+  const collapsed = isCollapsed(secKey);
+  const isCatReadonly = !!catalogue.readonly;
+  const isLocked = !!section.locked;
+  const isReadonly = isCatReadonly || isLocked;
+
+  const frag = el('div', {
+    class: `sec-group${isLocked ? ' sec-group-locked' : ''}`,
+    'data-sec-id': String(section.id),
+    draggable: isCatReadonly ? undefined : 'true',
+  });
+
+  // ── Section drag & drop (reorder within catalogue) ──
+  if (!isCatReadonly) {
+    let _dragFromHandle = false;
+    frag.addEventListener('mousedown', (e) => {
+      _dragFromHandle = !!e.target.closest('.sec-drag-handle');
+    });
+    frag.addEventListener('dragstart', (e) => {
+      // If drag started from a child var-card, let it handle its own drag
+      if (e.target.closest('.var-card')) return;
+      if (!_dragFromHandle) { e.preventDefault(); return; }
+      e.dataTransfer.setData('application/x-docgen-sec-id', String(section.id));
+      // Also set plain text so dropping onto Word inserts all section expressions
+      e.dataTransfer.setData('text/plain', buildSectionExpression(variables));
+      e.dataTransfer.effectAllowed = 'copyMove';
+      frag.classList.add('sec-group-dragging');
+    });
+    frag.addEventListener('dragend', () => {
+      _dragFromHandle = false;
+      frag.classList.remove('sec-group-dragging');
+      document.querySelectorAll('.sec-drop-indicator').forEach(d => d.remove());
+    });
+  }
+
+  // ── Section header ──
+  const headerChildren = [];
+
+  // Drag handle (before collapse icon, only for non-catalogue-readonly)
+  if (!isCatReadonly) {
+    headerChildren.push(el('span', {
+      class: 'sec-drag-handle',
+      title: 'Drag to reorder section',
+      html: icon('moreHorizontal', 10),
+      onclick: (e) => e.stopPropagation(),
+    }));
+  }
+
+  headerChildren.push(
+    el('span', {
+      class: 'sec-collapse-icon',
+      html: icon(collapsed ? 'chevronRight' : 'chevronDown', 10),
+    }),
+    // Lock icon for locked sections
+    isLocked ? el('span', {
+      class: 'sec-lock-icon',
+      title: 'Section is locked — data sets cannot be edited',
+      html: icon('lock', 10),
+    }) : null,
+    el('div', { class: 'sec-info' }, [
+      el('span', { class: 'sec-title' }, section.name),
+      section.description
+        ? el('span', { class: 'sec-desc' }, section.description)
+        : null,
+    ]),
+    ...(section.tags || []).map(t =>
+      el('span', { class: 'sec-tag' }, t)
+    ),
+    el('span', { class: 'badge badge-muted', style: { fontSize: '9px' } }, `${variables.length}`),
+  );
+
+  // Insert section into Word button
+  headerChildren.push(
+    el('button', {
+      class: 'sec-insert-btn',
+      title: `Insert all ${variables.length} data sets into document`,
+      onclick: (e) => { e.stopPropagation(); handleInsertSectionIntoDoc(section.name, variables); },
+      html: icon('chevronLeft', 10),
+    })
+  );
+
+  // Context menu — show for non-catalogue-readonly (locked sections still get menu for unlock)
+  if (!isCatReadonly) {
+    headerChildren.push(
+      el('button', {
+        class: 'sec-action-btn',
+        onclick: (e) => { e.stopPropagation(); showSectionMenu(section, catalogue, e.target); },
+        html: icon('moreHorizontal', 12),
+      })
+    );
+  }
+
+  const secHeader = el('div', {
+    class: `sec-header${isLocked ? ' sec-header-locked' : ''}`,
+    onclick: () => { toggleCollapse(secKey); rerender(); },
+  }, headerChildren);
+
+  // Allow dropping variables onto section header to move them into this section
+  if (!isCatReadonly && !isLocked) {
+    secHeader.addEventListener('dragover', (e) => {
+      // Accept variable drags (not section drags)
+      if (e.dataTransfer.types.includes('application/x-docgen-sec-id')) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      secHeader.classList.add('sec-header-drop-target');
+    });
+    secHeader.addEventListener('dragleave', (e) => {
+      if (!secHeader.contains(e.relatedTarget)) {
+        secHeader.classList.remove('sec-header-drop-target');
+      }
+    });
+    secHeader.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      secHeader.classList.remove('sec-header-drop-target');
+
+      // Handle cookbook drags
+      const cookbookId = e.dataTransfer.getData('application/x-docgen-cookbook-id');
+      if (cookbookId) {
+        const allVars = state.get('variables') || [];
+        const srcVar = allVars.find(v => String(v.id) === cookbookId);
+        if (srcVar) await copyToCatalogue(srcVar, section.catalogueId, section.id);
+        return;
+      }
+
+      // Handle variable drags
+      const varId = e.dataTransfer.getData('application/x-docgen-var-id');
+      if (!varId) return;
+
+      // Check if from locked section
+      const allVars = state.get('variables') || [];
+      const draggedVar = allVars.find(v => String(v.id) === varId);
+      if (draggedVar && draggedVar.sectionId) {
+        const allSections = state.get('sections') || [];
+        const srcSec = allSections.find(s => s.id === draggedVar.sectionId);
+        if (srcSec && srcSec.locked && srcSec.id !== section.id) {
+          showConfirmDialog(
+            `Move out of locked section?`,
+            `"${draggedVar.name}" is in locked section "${srcSec.name}". Moving it out will remove its protection.`,
+            async () => { await performDrop(varId, section.catalogueId, section.id, null); },
+            'Move'
+          );
+          return;
+        }
+      }
+
+      await performDrop(varId, section.catalogueId, section.id, null);
+    });
+  }
+
+  frag.appendChild(secHeader);
+
+  if (collapsed) return frag;
+
+  // ── Variable cards ──
+  const cardList = el('div', { class: 'var-card-list sec-card-list' });
+  variables.forEach(v => cardList.appendChild(renderVarCard(v, isCatReadonly, isLocked)));
+  if (!isCatReadonly) makeDropZone(cardList, section.catalogueId, section.id);
+  if (variables.length === 0) {
+    cardList.appendChild(el('div', { class: 'sec-empty' }, 'No data sets in this section'));
+  }
+  frag.appendChild(cardList);
+
+  return frag;
+}
+
+// ─── Variable card ──────────────────────────────────────────────────────
+
+/**
+ * Build the validation issue icon with a JS-positioned tooltip
+ * that escapes parent overflow clipping.
+ */
+function makeExprIssueIcon(valResult) {
+  const isErr = valResult.status === 'error';
+  const tooltipText = valResult.issues.map(i => `${i.level}: ${i.message}`).join('\n');
+
+  const tooltip = el('div', { class: 'expr-tooltip' }, tooltipText);
+  const wrapper = el('span', {
+    class: `var-expr-issue ${isErr ? 'var-expr-issue-err' : 'var-expr-issue-warn'}`,
+  }, [
+    el('span', { html: icon('info', 12) }),
+    tooltip,
+  ]);
+
+  wrapper.addEventListener('mouseenter', () => {
+    const rect = wrapper.getBoundingClientRect();
+    tooltip.style.display = 'block';
+    // Position above the icon, right-aligned
+    tooltip.style.left = 'auto';
+    tooltip.style.right = `${document.documentElement.clientWidth - rect.right}px`;
+    tooltip.style.top = `${rect.top - tooltip.offsetHeight - 8}px`;
+
+    // If tooltip goes off-screen top, flip below
+    if (rect.top - tooltip.offsetHeight - 8 < 4) {
+      tooltip.style.top = `${rect.bottom + 8}px`;
+    }
+  });
+
+  wrapper.addEventListener('mouseleave', () => {
+    tooltip.style.display = 'none';
+  });
+
+  return wrapper;
+}
+
+function renderVarCard(variable, isReadonly = false, sectionLocked = false) {
+  const tc = TYPE_CONFIG[variable.type] || TYPE_CONFIG.bom;
+  const dependents = getDependents(variable.id);
+  const isSource = dependents.length > 0;
+
+  // Validation status
+  const valResult = validationResults[variable.id];
+  const valStatus = valResult ? valResult.status : 'unchecked';
+  const valColor = valStatus === 'error' ? 'var(--danger, #CF222E)'
+    : valStatus === 'warning' ? 'var(--warning, #D4A015)'
+    : valStatus === 'valid' ? 'var(--success, #1A7F37)'
+    : null; // unchecked → null → falls back to tc.color
+  const valDotClass = valStatus === 'error' ? 'token-error'
+    : valStatus === 'warning' ? 'token-warn'
+    : valStatus === 'valid' ? 'token-ok'
+    : 'token-none';
+  const valTooltip = valResult && valResult.issues.length > 0
+    ? valResult.issues.map(i => `${i.level}: ${i.message}`).join('\n')
+    : valStatus === 'valid' ? 'Valid — verified against live data'
+    : 'Not verified — connect to Tacton to validate';
+
+  const statsChildren = [];
+  if (variable.type === 'bom') {
+    statsChildren.push(
+      el('div', { class: 'var-stat' }, [
+        el('span', { class: 'icon', html: icon('list', 11) }),
+        el('strong', {}, String(variable.matchCount || 0)),
+        ' items',
+      ])
+    );
+  }
+  if (variable.filters && variable.filters.length > 0) {
+    statsChildren.push(
+      el('div', { class: 'var-stat' }, [
+        el('span', { class: 'icon', html: icon('filter', 11) }),
+        `${variable.filters.length} condition${variable.filters.length > 1 ? 's' : ''}`,
+      ])
+    );
+  }
+  if (variable.catchAll) {
+    statsChildren.push(el('div', { class: 'var-stat' }, 'catch-all'));
+  }
+
+  // Right-side inline action icons (like instance row pattern)
+  const actionButtons = el('div', { class: 'var-card-actions' });
+  const noEdit = isReadonly || sectionLocked;
+
+  if (isReadonly) {
+    // Copy-to-own button for readonly items (cookbook)
+    actionButtons.appendChild(el('button', {
+      class: 'row-action-btn', title: 'Copy to your catalogue',
+      onclick: (e) => { e.stopPropagation(); copyToOwn(variable); },
+      html: icon('copy', 14),
+    }));
+  } else if (sectionLocked) {
+    // Locked section: only show lock indicator + move button
+    actionButtons.appendChild(el('span', {
+      class: 'row-action-btn', title: 'Section is locked',
+      style: { cursor: 'default', color: 'var(--text-tertiary)' },
+      html: icon('lock', 14),
+    }));
+  } else {
+    // Move to catalogue
+    actionButtons.appendChild(el('button', {
+      class: 'row-action-btn', title: 'Move to catalogue',
+      onclick: (e) => { e.stopPropagation(); showMoveMenu(variable, e.currentTarget); },
+      html: icon('folder', 14),
+    }));
+    // Duplicate
+    actionButtons.appendChild(el('button', {
+      class: 'row-action-btn', title: 'Duplicate data set',
+      onclick: (e) => { e.stopPropagation(); duplicateVariable(variable); },
+      html: icon('copy', 14),
+    }));
+    // Delete
+    actionButtons.appendChild(el('button', {
+      class: 'row-action-btn row-action-danger', title: 'Delete data set',
+      onclick: (e) => { e.stopPropagation(); handleDeleteVariable(variable); },
+      html: icon('trash', 14),
+    }));
+  }
+
+  // Expression row status background class
+  const exprStatusClass = valResult
+    ? valResult.status === 'error' ? 'var-expr-error'
+      : valResult.status === 'warning' ? 'var-expr-warning'
+      : 'var-expr-valid'
+    : '';
+
+  const card = el('div', {
+    class: `var-card${sectionLocked ? ' var-card-locked' : ''}`,
+    draggable: isReadonly ? undefined : 'true',
+    'data-var-id': String(variable.id),
+    'data-locked-section': sectionLocked ? 'true' : undefined,
+    style: isReadonly ? { opacity: '0.85' } : {},
+    onclick: noEdit ? null : () => {
+      state.set('activeVariable', variable.id);
+      state.set('dataView', 'detail');
+    },
+  }, [
+    el('div', { class: 'var-head' }, [
+      // Drag handle (for non-readonly; locked section cards get handle for moving out)
+      !isReadonly ? el('span', {
+        class: 'var-drag-handle',
+        title: sectionLocked ? 'Drag to move out of locked section' : 'Drag to reorder',
+        html: icon('moreHorizontal', 12),
+        onclick: (e) => e.stopPropagation(),
+      }) : null,
+      // Insert arrow (left of icon, subtle, points left → towards Word)
+      el('button', {
+        class: 'var-insert-btn',
+        title: valTooltip + '\nClick to insert into document',
+        onclick: (e) => { e.stopPropagation(); handleInsertIntoDoc(variable, valResult); },
+        html: icon('chevronLeft', 12),
+      }),
+      // Type icon + purpose label — colored by validation status when available
+      el('div', { class: 'var-type-col', 'data-val-tip': valTooltip }, [
+        el('span', { class: 'icon', style: { color: valColor || tc.color }, html: icon(tc.icon, 16) }),
+        el('span', { class: 'var-purpose-label', style: { color: valColor || tc.color } },
+          tc.label
+        ),
+      ]),
+      el('div', { class: 'var-info' }, [
+        el('div', { class: 'var-name' }, [
+          variable.name.replace(/^#/, ''),
+          isSource
+            ? el('span', {
+                class: 'badge badge-source',
+                title: `Source for: ${dependents.map(d => d.name).join(', ')}`,
+              }, [
+                el('span', { html: icon('link', 9) }),
+                ' SRC',
+              ])
+            : null,
+        ]),
+        el('div', { class: 'var-meta' }, [
+          variable.catchAll
+            ? el('span', { class: 'badge badge-wrn', style: { fontSize: '9px' } }, 'catch-all')
+            : null,
+          variable.description
+            ? el('span', { style: { color: 'var(--text-tertiary)', fontSize: '11px' } }, variable.description)
+            : null,
+        ]),
+      ]),
+      actionButtons,
+    ]),
+    // Expression preview row — background tinted by validation status
+    variable.expression
+      ? el('div', { class: `var-expr ${exprStatusClass}${showExpr ? ' var-expr-visible' : ''}` }, [
+          el('span', { class: 'var-expr-text' }, variable.expression),
+          // Show warning/error icon with hover tooltip when not valid
+          valResult && valResult.status !== 'valid'
+            ? makeExprIssueIcon(valResult)
+            : null,
+        ])
+      : null,
+    // Stats row
+    statsChildren.length > 0
+      ? el('div', { class: 'var-stats' }, statsChildren)
+      : null,
+  ]);
+
+  // ── Drag & drop ──
+  card.addEventListener('dragstart', (e) => {
+    if (isReadonly) {
+      // Cookbook items: use a special MIME so drop zones can trigger copy-to-catalogue
+      e.dataTransfer.setData('application/x-docgen-cookbook-id', String(variable.id));
+      e.dataTransfer.effectAllowed = 'copy';
+    } else {
+      // Internal ID for reorder drops within the plugin
+      e.dataTransfer.setData('application/x-docgen-var-id', String(variable.id));
+      e.dataTransfer.effectAllowed = 'copyMove';
+    }
+    // Expression text for Word drops (external targets)
+    e.dataTransfer.setData('text/plain', variable.expression || variable.name);
+    card.classList.add('var-card-dragging');
+  });
+  card.addEventListener('dragend', () => {
+    card.classList.remove('var-card-dragging');
+    document.querySelectorAll('.var-drop-target').forEach(t => t.classList.remove('var-drop-target'));
+  });
+
+  return card;
+}
+
+// ─── Inline forms ───────────────────────────────────────────────────────
+
+function showNewCatalogueInline(container) {
+  // Remove existing inline form if any
+  const existing = qs('#cat-inline-form');
+  if (existing) existing.remove();
+
+  const form = el('div', { class: 'cat-inline-form', id: 'cat-inline-form' });
+
+  const nameInput = el('input', {
+    class: 'input', placeholder: 'Catalogue name',
+    style: { fontSize: '12px', fontWeight: '600' },
+  });
+  const descInput = el('input', {
+    class: 'input', placeholder: 'Description (optional)',
+    style: { fontSize: '11px' },
+  });
+  const tagsInput = el('input', {
+    class: 'input', placeholder: 'Tags (comma-separated)',
+    style: { fontSize: '11px' },
+  });
+
+  // Scope selector
+  const scopeSel = el('div', { class: 'scope-sel' });
+  let selectedScope = 'ticket';
+  Object.entries(SCOPE_CONFIG).forEach(([key, sc]) => {
+    const opt = el('div', {
+      class: `scope-opt ${key === selectedScope ? 'scope-opt-sel' : ''}`,
+      onclick: () => {
+        selectedScope = key;
+        scopeSel.querySelectorAll('.scope-opt').forEach(o => o.classList.remove('scope-opt-sel'));
+        opt.classList.add('scope-opt-sel');
+      },
+    }, [
+      el('span', { class: 'icon', style: { color: sc.color }, html: icon(sc.icon, 14) }),
+      el('span', {}, sc.label),
+    ]);
+    scopeSel.appendChild(opt);
+  });
+
+  const actions = el('div', { style: { display: 'flex', gap: '6px' } }, [
+    el('button', {
+      class: 'btn btn-primary btn-sm',
+      onclick: async () => {
+        const name = nameInput.value.trim();
+        if (!name) { nameInput.focus(); return; }
+        await createCatalogue({
+          name,
+          description: descInput.value.trim(),
+          scope: selectedScope,
+          tags: tagsInput.value.split(',').map(t => t.trim()).filter(Boolean),
+        });
+        form.remove();
+      },
+    }, [el('span', { class: 'icon', html: icon('check', 12) }), 'Create']),
+    el('button', {
+      class: 'btn btn-outline btn-sm',
+      onclick: () => form.remove(),
+    }, 'Cancel'),
+  ]);
+
+  form.appendChild(el('div', { class: 'field-label' }, 'New Data Catalogue'));
+  form.appendChild(nameInput);
+  form.appendChild(descInput);
+  form.appendChild(tagsInput);
+  form.appendChild(el('div', { class: 'field-label', style: { marginTop: '6px' } }, 'Scope'));
+  form.appendChild(scopeSel);
+  form.appendChild(actions);
+
+  // Insert after the header
+  const header = container.querySelector('.data-section-head');
+  if (header && header.nextSibling) {
+    container.insertBefore(form, header.nextSibling);
+  } else {
+    container.appendChild(form);
+  }
+  nameInput.focus();
+}
+
+function showNewSectionInline(body, catalogueId) {
+  // Remove existing inline form if any
+  const existing = body.querySelector('.sec-inline-form');
+  if (existing) existing.remove();
+
+  const form = el('div', { class: 'sec-inline-form' });
+
+  const nameInput = el('input', {
+    class: 'input', placeholder: 'Section name',
+    style: { fontSize: '12px', fontWeight: '600' },
+  });
+  const descInput = el('input', {
+    class: 'input', placeholder: 'Description (optional)',
+    style: { fontSize: '11px' },
+  });
+  const tagsInput = el('input', {
+    class: 'input', placeholder: 'Tags (comma-separated)',
+    style: { fontSize: '11px' },
+  });
+
+  const actions = el('div', { style: { display: 'flex', gap: '6px' } }, [
+    el('button', {
+      class: 'btn btn-primary btn-sm',
+      onclick: async () => {
+        const name = nameInput.value.trim();
+        if (!name) { nameInput.focus(); return; }
+        await createSection({
+          catalogueId,
+          name,
+          description: descInput.value.trim(),
+          tags: tagsInput.value.split(',').map(t => t.trim()).filter(Boolean),
+        });
+        form.remove();
+      },
+    }, [el('span', { class: 'icon', html: icon('check', 12) }), 'Add']),
+    el('button', {
+      class: 'btn btn-outline btn-sm',
+      onclick: () => form.remove(),
+    }, 'Cancel'),
+  ]);
+
+  nameInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') actions.querySelector('.btn-primary').click();
+    if (e.key === 'Escape') form.remove();
+  });
+
+  form.appendChild(nameInput);
+  form.appendChild(descInput);
+  form.appendChild(tagsInput);
+  form.appendChild(actions);
+
+  // Insert before the footer actions row (which contains the "Add section" button)
+  const footer = body.querySelector('.cat-footer-actions');
+  if (footer) body.insertBefore(form, footer);
+  else body.appendChild(form);
+  nameInput.focus();
+}
+
+// ─── Import trigger ─────────────────────────────────────────────────────
+
+function triggerImport() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.json';
+  input.style.display = 'none';
+  input.addEventListener('change', async () => {
+    if (!input.files || input.files.length === 0) return;
+    try {
+      const data = await readJsonFile(input.files[0]);
+      const results = await importCatalogue(data);
+      const total = results.reduce((s, r) => s + r.variableCount, 0);
+      alert(`Imported ${results.length} catalogue(s) with ${total} data set(s).`);
+    } catch (e) {
+      alert('Import failed: ' + e.message);
+    }
+    input.remove();
+  });
+  document.body.appendChild(input);
+  input.click();
+}
+
+// ─── Context menus ──────────────────────────────────────────────────────
+
+function showCatalogueMenu(catalogue, anchor) {
+  dismissMenus();
+  const menu = el('div', { class: 'ctx-menu', id: 'ctx-menu' });
+  const isReadonly = !!catalogue.readonly;
+
+  if (!isReadonly) {
+    menu.appendChild(menuItem('plus', 'New data set', () => {
+      dismissMenus();
+      wizState.catalogueId = catalogue.id;
+      state.set('dataView', 'new');
+    }));
+    menu.appendChild(el('div', { class: 'ctx-menu-sep' }));
+    menu.appendChild(menuItem('edit', 'Rename', () => {
+      dismissMenus();
+      startInlineEdit(catalogue.id, 'name', catalogue.name);
+    }));
+  }
+  menu.appendChild(menuItem('tag', 'Edit tags', () => {
+    dismissMenus();
+    startInlineEdit(catalogue.id, 'tags', (catalogue.tags || []).join(', '));
+  }));
+  if (!isReadonly) {
+    menu.appendChild(menuItem('arrowDown', 'Export as JSON', () => {
+      dismissMenus();
+      try {
+        const data = exportCatalogue(catalogue.id);
+        const filename = `${catalogue.name.replace(/\s+/g, '-').toLowerCase()}-catalogue.json`;
+        downloadJson(data, filename);
+      } catch (e) { showValidationDialog('Export failed', e.message, []); }
+    }));
+    menu.appendChild(el('div', { class: 'ctx-menu-sep' }));
+    menu.appendChild(menuItem('trash', 'Delete catalogue', () => {
+      dismissMenus();
+      const check = canDeleteCatalogue(catalogue.id);
+      if (!check.ok) {
+        showValidationDialog('Cannot delete catalogue', check.reason, check.details);
+        return;
+      }
+      showConfirmDialog(`Delete catalogue "${catalogue.name}"?`, 'This cannot be undone.', () => {
+        removeCatalogue(catalogue.id).catch(e => console.error('Delete failed:', e));
+      });
+    }, true));
+  }
+
+  positionMenu(menu, anchor);
+  document.body.appendChild(menu);
+  setTimeout(() => document.addEventListener('click', dismissMenus, { once: true }), 10);
+}
+
+function showSectionMenu(section, catalogue, anchor) {
+  dismissMenus();
+  const menu = el('div', { class: 'ctx-menu', id: 'ctx-menu' });
+  const isLocked = !!section.locked;
+
+  // Lock / Unlock toggle — always available
+  menu.appendChild(menuItem(
+    isLocked ? 'unlock' : 'lock',
+    isLocked ? 'Unlock section' : 'Lock section',
+    async () => {
+      dismissMenus();
+      if (isLocked) {
+        await updateSection(section.id, { locked: false });
+      } else {
+        showConfirmDialog(
+          `Lock section "${section.name}"?`,
+          'Data sets inside a locked section cannot be edited or deleted until the section is unlocked.',
+          async () => { await updateSection(section.id, { locked: true }); },
+          'Lock'
+        );
+      }
+    }
+  ));
+
+  // Edit options — only when not locked
+  if (!isLocked) {
+    menu.appendChild(el('div', { class: 'ctx-menu-sep' }));
+    menu.appendChild(menuItem('edit', 'Rename', () => {
+      dismissMenus();
+      startInlineEdit(section.id, 'name', section.name, 'section');
+    }));
+    menu.appendChild(menuItem('edit', 'Edit description', () => {
+      dismissMenus();
+      startInlineEdit(section.id, 'description', section.description || '', 'section');
+    }));
+    menu.appendChild(menuItem('tag', 'Edit tags', () => {
+      dismissMenus();
+      startInlineEdit(section.id, 'tags', (section.tags || []).join(', '), 'section');
+    }));
+    menu.appendChild(el('div', { class: 'ctx-menu-sep' }));
+    menu.appendChild(menuItem('trash', 'Delete section', () => {
+      dismissMenus();
+      const check = canDeleteSection(section.id);
+      if (!check.ok) {
+        showValidationDialog('Cannot delete section', check.reason, check.details);
+        return;
+      }
+      showConfirmDialog(`Delete section "${section.name}"?`, 'This cannot be undone.', () => {
+        removeSection(section.id).catch(e => console.error('Delete failed:', e));
+      });
+    }, true));
+  }
+
+  positionMenu(menu, anchor);
+  document.body.appendChild(menu);
+  setTimeout(() => document.addEventListener('click', dismissMenus, { once: true }), 10);
+}
+
+function menuItem(ic, label, onclick, danger = false) {
+  return el('div', {
+    class: `ctx-menu-item ${danger ? 'ctx-menu-danger' : ''}`,
+    onclick: (e) => { e.stopPropagation(); onclick(); },
+  }, [el('span', { class: 'icon', html: icon(ic, 12) }), label]);
+}
+
+function positionMenu(menu, anchor) {
+  const rect = anchor.getBoundingClientRect();
+  menu.style.top = `${rect.bottom + 4}px`;
+  // Align right edge of menu to right edge of anchor
+  menu.style.right = `${document.documentElement.clientWidth - rect.right}px`;
+  menu.style.left = 'auto';
+}
+
+function dismissMenus() {
+  const m = document.getElementById('ctx-menu');
+  if (m) m.remove();
+}
+
+// ─── Data set actions (inline) ───────────────────────────────────────
+
+function handleDeleteVariable(variable) {
+  const check = canDeleteVariable(variable.id);
+  if (!check.ok) {
+    const details = (check.usages || []).map(u => `${u.name} (${u.type})`);
+    showValidationDialog('Cannot delete data set', check.reason, details);
+    return;
+  }
+  showConfirmDialog(`Delete data set "${variable.name}"?`, 'This cannot be undone.', () => {
+    removeVariable(variable.id);
+  });
+}
+
+async function duplicateVariable(variable) {
+  let name = variable.name + '_copy';
+  const existing = (state.get('variables') || []).map(v => v.name);
+  let i = 1;
+  while (existing.includes(name)) { name = `${variable.name}_copy${++i}`; }
+
+  await createVariable({
+    purpose: variable.purpose || 'block',
+    type: variable.type || 'bom',
+    name,
+    description: variable.description || '',
+    source: variable.source || '',
+    filters: variable.filters ? JSON.parse(JSON.stringify(variable.filters)) : [],
+    filterLogic: variable.filterLogic || 'or',
+    transforms: variable.transforms ? JSON.parse(JSON.stringify(variable.transforms)) : [],
+    catchAll: false, // never duplicate catch-all
+    catalogueId: variable.catalogueId || null,
+    sectionId: variable.sectionId || null,
+  });
+}
+
+function showMoveMenu(variable, anchor) {
+  dismissMenus();
+  const catalogues = (state.get('catalogues') || []).filter(c => !c.readonly);
+  const sections = state.get('sections') || [];
+
+  if (catalogues.length === 0) {
+    alert('Create a data catalogue first to move data sets into it.');
+    return;
+  }
+
+  const menu = el('div', { class: 'ctx-menu', id: 'ctx-menu' });
+
+  // "Unassigned" option
+  menu.appendChild(menuItem('list', 'Unassigned', async () => {
+    dismissMenus();
+    await updateVariable(variable.id, { catalogueId: null, sectionId: null });
+  }));
+
+  menu.appendChild(el('div', { class: 'ctx-menu-sep' }));
+
+  for (const cat of catalogues) {
+    // Catalogue header (bold, non-clickable if it has sections)
+    const catSections = sections.filter(s => s.catalogueId === cat.id);
+
+    // Direct to catalogue (no section)
+    const isCurrent = variable.catalogueId === cat.id && !variable.sectionId;
+    menu.appendChild(el('div', {
+      class: `ctx-menu-item ${isCurrent ? 'ctx-menu-item-active' : ''}`,
+      onclick: async (e) => {
+        e.stopPropagation();
+        dismissMenus();
+        await updateVariable(variable.id, { catalogueId: cat.id, sectionId: null });
+      },
+    }, [
+      el('span', { class: 'icon', html: icon('folder', 12) }),
+      el('span', { style: { fontWeight: '600' } }, cat.name),
+      isCurrent ? el('span', { class: 'icon', style: { marginLeft: 'auto', color: 'var(--success)' }, html: icon('check', 12) }) : null,
+    ]));
+
+    // Sections within this catalogue
+    for (const sec of catSections) {
+      const isSecCurrent = variable.catalogueId === cat.id && variable.sectionId === sec.id;
+      menu.appendChild(el('div', {
+        class: `ctx-menu-item ${isSecCurrent ? 'ctx-menu-item-active' : ''}`,
+        style: { paddingLeft: '28px' },
+        onclick: async (e) => {
+          e.stopPropagation();
+          dismissMenus();
+          await updateVariable(variable.id, { catalogueId: cat.id, sectionId: sec.id });
+        },
+      }, [
+        el('span', { class: 'icon', html: icon('chevronRight', 10) }),
+        sec.name,
+        isSecCurrent ? el('span', { class: 'icon', style: { marginLeft: 'auto', color: 'var(--success)' }, html: icon('check', 12) }) : null,
+      ]));
+    }
+  }
+
+  positionMenu(menu, anchor);
+  document.body.appendChild(menu);
+  setTimeout(() => document.addEventListener('click', dismissMenus, { once: true }), 10);
+}
+
+// ─── Drag & drop zones ──────────────────────────────────────────────
+
+function makeDropZone(container, catalogueId, sectionId) {
+  container.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = e.dataTransfer.types.includes('application/x-docgen-cookbook-id') ? 'copy' : 'move';
+    container.classList.add('var-drop-target');
+  });
+  container.addEventListener('dragleave', (e) => {
+    // Only remove if actually leaving this container
+    if (!container.contains(e.relatedTarget)) {
+      container.classList.remove('var-drop-target');
+    }
+  });
+  container.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    container.classList.remove('var-drop-target');
+
+    // ── Cookbook drag → copy to this catalogue ──
+    const cookbookId = e.dataTransfer.getData('application/x-docgen-cookbook-id');
+    if (cookbookId) {
+      const allVars = state.get('variables') || [];
+      const srcVar = allVars.find(v => String(v.id) === cookbookId);
+      if (!srcVar) return;
+      // Copy into this catalogue (+ optional section) via copyToOwn logic
+      await copyToCatalogue(srcVar, catalogueId, sectionId);
+      return;
+    }
+
+    // ── Normal reorder drag ──
+    const varId = e.dataTransfer.getData('application/x-docgen-var-id');
+    if (!varId) return;
+
+    // Check if variable is coming from a locked section
+    const allVars = state.get('variables') || [];
+    const draggedVar = allVars.find(v => String(v.id) === varId);
+    if (draggedVar && draggedVar.sectionId) {
+      const allSections = state.get('sections') || [];
+      const srcSection = allSections.find(s => s.id === draggedVar.sectionId);
+      if (srcSection && srcSection.locked && srcSection.id !== sectionId) {
+        // Moving out of a locked section — confirm first
+        showConfirmDialog(
+          `Move out of locked section?`,
+          `"${draggedVar.name}" is in locked section "${srcSection.name}". Moving it out will remove its protection.`,
+          async () => { await performDrop(varId, catalogueId, sectionId, container); },
+          'Move'
+        );
+        return;
+      }
+    }
+
+    await performDrop(varId, catalogueId, sectionId, container);
+  });
+}
+
+async function performDrop(varId, catalogueId, sectionId, container) {
+    // Determine new order based on existing cards
+    const cards = container ? [...container.querySelectorAll('.var-card[data-var-id]')] : [];
+    let newOrder = cards.length; // append at end when dropped on section header
+
+    // Update variable's catalogue, section, and order
+    await updateVariable(varId, {
+      catalogueId: catalogueId,
+      sectionId: sectionId,
+      order: newOrder,
+    });
+
+    // Reorder siblings
+    const variables = state.get('variables') || [];
+    const siblings = variables
+      .filter(v => v.catalogueId === catalogueId && v.sectionId === sectionId && v.id !== varId)
+      .sort((a, b) => (a.order || 0) - (b.order || 0));
+    let idx = 0;
+    for (const sib of siblings) {
+      if (idx === newOrder) idx++; // skip the slot we just placed our var in
+      await updateVariable(sib.id, { order: idx });
+      idx++;
+    }
+}
+
+// ─── Section drag & drop reorder ─────────────────────────────────────
+
+function makeSectionDropZone(body, catalogueId) {
+  let _dropIndicator = null;
+
+  body.addEventListener('dragover', (e) => {
+    // Only handle section drags
+    if (!e.dataTransfer.types.includes('application/x-docgen-sec-id')) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+
+    // Find the section group we're hovering over
+    const secGroups = [...body.querySelectorAll('.sec-group[data-sec-id]')];
+    if (secGroups.length === 0) return;
+
+    // Remove old indicator
+    if (_dropIndicator) _dropIndicator.remove();
+    _dropIndicator = el('div', { class: 'sec-drop-indicator' });
+
+    // Determine insert position
+    let insertBefore = null;
+    for (const sg of secGroups) {
+      const rect = sg.getBoundingClientRect();
+      if (e.clientY < rect.top + rect.height / 2) {
+        insertBefore = sg;
+        break;
+      }
+    }
+
+    if (insertBefore) {
+      body.insertBefore(_dropIndicator, insertBefore);
+    } else {
+      // After the last section group
+      const lastSec = secGroups[secGroups.length - 1];
+      if (lastSec.nextSibling) {
+        body.insertBefore(_dropIndicator, lastSec.nextSibling);
+      } else {
+        body.appendChild(_dropIndicator);
+      }
+    }
+  });
+
+  body.addEventListener('dragleave', (e) => {
+    if (!body.contains(e.relatedTarget)) {
+      if (_dropIndicator) { _dropIndicator.remove(); _dropIndicator = null; }
+    }
+  });
+
+  body.addEventListener('drop', async (e) => {
+    if (_dropIndicator) { _dropIndicator.remove(); _dropIndicator = null; }
+
+    const secId = e.dataTransfer.getData('application/x-docgen-sec-id');
+    if (!secId) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    // Determine new order based on drop position
+    const secGroups = [...body.querySelectorAll('.sec-group[data-sec-id]')];
+    let newOrder = 0;
+    for (const sg of secGroups) {
+      if (sg.dataset.secId === secId) continue; // skip self
+      const rect = sg.getBoundingClientRect();
+      if (e.clientY < rect.top + rect.height / 2) break;
+      newOrder++;
+    }
+
+    // Update the dragged section's order
+    await updateSection(secId, { order: newOrder });
+
+    // Reorder siblings
+    const allSections = state.get('sections') || [];
+    const siblings = allSections
+      .filter(s => s.catalogueId === catalogueId && s.id !== secId)
+      .sort((a, b) => (a.order || 0) - (b.order || 0));
+    let idx = 0;
+    for (const sib of siblings) {
+      if (idx === newOrder) idx++;
+      await updateSection(sib.id, { order: idx });
+      idx++;
+    }
+  });
+}
+
+// ─── Validation dialog ───────────────────────────────────────────────
+
+function showValidationDialog(title, reason, details) {
+  const existing = document.getElementById('val-dialog-overlay');
+  if (existing) existing.remove();
+
+  const overlay = el('div', {
+    id: 'val-dialog-overlay',
+    style: {
+      position: 'fixed', inset: '0', background: 'rgba(0,0,0,.35)',
+      zIndex: '9999', display: 'flex', alignItems: 'center', justifyContent: 'center',
+    },
+    onclick: (e) => { if (e.target === overlay) overlay.remove(); },
+  });
+
+  const children = [
+    el('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' } }, [
+      el('span', { class: 'icon', style: { color: 'var(--danger, #CF222E)' }, html: icon('info', 18) }),
+      el('div', { style: { fontWeight: '700', fontSize: '13px' } }, title),
+    ]),
+    el('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '10px', lineHeight: '1.5' } }, reason),
+  ];
+
+  if (details && details.length > 0) {
+    const detailList = el('div', {
+      style: {
+        fontSize: '11px', color: 'var(--text-tertiary)', background: 'var(--bg)',
+        border: '1px solid var(--border-light)', borderRadius: 'var(--radius)',
+        padding: '8px 10px', marginBottom: '10px',
+      },
+    });
+    details.forEach(d => {
+      detailList.appendChild(el('div', { style: { marginBottom: '3px' } }, `• ${d}`));
+    });
+    children.push(detailList);
+  }
+
+  children.push(
+    el('div', { style: { display: 'flex', justifyContent: 'flex-end' } }, [
+      el('button', {
+        class: 'btn btn-primary btn-sm',
+        onclick: () => overlay.remove(),
+      }, 'OK'),
+    ])
+  );
+
+  overlay.appendChild(
+    el('div', {
+      style: {
+        background: 'var(--card, #fff)', border: '1px solid var(--border)',
+        borderRadius: '8px', padding: '16px 18px', maxWidth: '360px', width: '90%',
+        boxShadow: '0 8px 24px rgba(0,0,0,.18)',
+      },
+    }, children)
+  );
+
+  document.body.appendChild(overlay);
+}
+
+// ─── Inline editing (replaces prompt()) ─────────────────────────────────
+
+/**
+ * Show a small inline edit dialog overlay for renaming, editing tags, etc.
+ * @param {number} id - catalogue or section ID
+ * @param {string} field - 'name', 'tags', or 'description'
+ * @param {string} currentValue - current value as string
+ * @param {string} type - 'catalogue' (default) or 'section'
+ */
+function startInlineEdit(id, field, currentValue, type = 'catalogue') {
+  const existing = document.getElementById('inline-edit-overlay');
+  if (existing) existing.remove();
+
+  const labels = { name: 'Name', tags: 'Tags', description: 'Description' };
+  const isTagField = field === 'tags';
+
+  const overlay = el('div', {
+    id: 'inline-edit-overlay',
+    style: {
+      position: 'fixed', inset: '0', background: 'rgba(0,0,0,.35)',
+      zIndex: '9999', display: 'flex', alignItems: 'center', justifyContent: 'center',
+    },
+    onclick: (e) => { if (e.target === overlay) overlay.remove(); },
+  });
+
+  // ── Tag input mode ──
+  if (isTagField) {
+    const tags = currentValue ? currentValue.split(',').map(t => t.trim()).filter(Boolean) : [];
+    const chipWrap = el('div', { class: 'tag-chip-wrap' });
+    const tagInput = el('input', {
+      type: 'text',
+      class: 'tag-chip-input',
+      placeholder: tags.length ? 'Add tag\u2026' : 'Type a tag and press Space or Enter\u2026',
+    });
+
+    function renderChips() {
+      clear(chipWrap);
+      for (const t of tags) {
+        chipWrap.appendChild(el('span', { class: 'tag-chip-item' }, [
+          el('span', {}, t),
+          el('button', {
+            class: 'tag-chip-remove',
+            onclick: () => { tags.splice(tags.indexOf(t), 1); renderChips(); tagInput.focus(); },
+            html: icon('x', 8),
+          }),
+        ]));
+      }
+      chipWrap.appendChild(tagInput);
+    }
+
+    function commitTag() {
+      const val = tagInput.value.trim().replace(/,/g, '');
+      if (val && !tags.includes(val)) {
+        tags.push(val);
+        tagInput.value = '';
+        renderChips();
+      }
+      tagInput.value = '';
+    }
+
+    tagInput.addEventListener('keydown', (e) => {
+      if ((e.key === ' ' || e.key === 'Enter' || e.key === ',') && tagInput.value.trim()) {
+        e.preventDefault();
+        commitTag();
+      }
+      if (e.key === 'Backspace' && !tagInput.value && tags.length > 0) {
+        tags.pop();
+        renderChips();
+        tagInput.focus();
+      }
+      if (e.key === 'Escape') overlay.remove();
+    });
+
+    // Also commit on blur within the input
+    tagInput.addEventListener('blur', () => { if (tagInput.value.trim()) commitTag(); });
+
+    renderChips();
+
+    function saveTagField() {
+      if (tagInput.value.trim()) commitTag();
+      overlay.remove();
+      const fn = type === 'section' ? updateSection : updateCatalogue;
+      fn(id, { tags: [...tags] }).catch(e => console.error('Edit tags failed:', e));
+    }
+
+    overlay.appendChild(
+      el('div', {
+        style: {
+          background: 'var(--card, #fff)', border: '1px solid var(--border)',
+          borderRadius: '8px', padding: '16px 18px', maxWidth: '380px', width: '90%',
+          boxShadow: '0 8px 24px rgba(0,0,0,.18)',
+        },
+      }, [
+        el('div', { style: { fontWeight: '700', fontSize: '13px', marginBottom: '10px' } }, 'Edit Tags'),
+        el('div', { class: 'tag-chip-container', onclick: () => tagInput.focus() }, [chipWrap]),
+        el('div', { style: { fontSize: '10px', color: 'var(--text-tertiary)', margin: '4px 0 10px' } },
+          'Press Space or Enter to add a tag. Backspace to remove last.'),
+        el('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: '6px' } }, [
+          el('button', { class: 'btn btn-outline btn-sm', onclick: () => overlay.remove() }, 'Cancel'),
+          el('button', { class: 'btn btn-primary btn-sm', onclick: saveTagField }, 'Save'),
+        ]),
+      ])
+    );
+
+    document.body.appendChild(overlay);
+    requestAnimationFrame(() => tagInput.focus());
+    return;
+  }
+
+  // ── Simple text input mode (name, description) ──
+  const input = el('input', {
+    type: 'text',
+    class: 'data-search-input',
+    value: currentValue,
+    style: { width: '100%', marginBottom: '10px' },
+    placeholder: labels[field] || field,
+  });
+
+  function save() {
+    const val = input.value.trim();
+    overlay.remove();
+    if (!val) return;
+    const fn = type === 'section' ? updateSection : updateCatalogue;
+    fn(id, { [field]: val }).catch(e => console.error(`Edit ${field} failed:`, e));
+  }
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') save();
+    if (e.key === 'Escape') overlay.remove();
+  });
+
+  overlay.appendChild(
+    el('div', {
+      style: {
+        background: 'var(--card, #fff)', border: '1px solid var(--border)',
+        borderRadius: '8px', padding: '16px 18px', maxWidth: '340px', width: '90%',
+        boxShadow: '0 8px 24px rgba(0,0,0,.18)',
+      },
+    }, [
+      el('div', { style: { fontWeight: '700', fontSize: '13px', marginBottom: '10px' } },
+        `Edit ${labels[field] || field}`),
+      input,
+      el('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: '6px' } }, [
+        el('button', { class: 'btn btn-outline btn-sm', onclick: () => overlay.remove() }, 'Cancel'),
+        el('button', { class: 'btn btn-primary btn-sm', onclick: save }, 'Save'),
+      ]),
+    ])
+  );
+
+  document.body.appendChild(overlay);
+  requestAnimationFrame(() => { input.focus(); input.select(); });
+}
+
+/** Confirm dialog (replaces confirm()) */
+function showConfirmDialog(title, message, onConfirm, confirmLabel = 'Delete') {
+  const existing = document.getElementById('confirm-dialog-overlay');
+  if (existing) existing.remove();
+
+  const isDestructive = confirmLabel === 'Delete';
+  const btnBg = isDestructive ? 'var(--danger, #CF222E)' : 'var(--accent, #0969DA)';
+  const iconColor = isDestructive ? 'var(--danger, #CF222E)' : 'var(--accent, #0969DA)';
+
+  const overlay = el('div', {
+    id: 'confirm-dialog-overlay',
+    style: {
+      position: 'fixed', inset: '0', background: 'rgba(0,0,0,.35)',
+      zIndex: '9999', display: 'flex', alignItems: 'center', justifyContent: 'center',
+    },
+    onclick: (e) => { if (e.target === overlay) overlay.remove(); },
+  });
+
+  overlay.appendChild(
+    el('div', {
+      style: {
+        background: 'var(--card, #fff)', border: '1px solid var(--border)',
+        borderRadius: '8px', padding: '16px 18px', maxWidth: '340px', width: '90%',
+        boxShadow: '0 8px 24px rgba(0,0,0,.18)',
+      },
+    }, [
+      el('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' } }, [
+        el('span', { class: 'icon', style: { color: iconColor }, html: icon('info', 18) }),
+        el('div', { style: { fontWeight: '700', fontSize: '13px' } }, title),
+      ]),
+      el('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '14px' } }, message),
+      el('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: '6px' } }, [
+        el('button', { class: 'btn btn-outline btn-sm', onclick: () => overlay.remove() }, 'Cancel'),
+        el('button', { class: 'btn btn-sm', style: { background: btnBg, color: '#fff', border: 'none' }, onclick: () => { overlay.remove(); onConfirm(); } }, confirmLabel),
+      ]),
+    ])
+  );
+
+  document.body.appendChild(overlay);
+}
+
+// ─── Search & Filter ────────────────────────────────────────────────────
+
+/** Collect all unique tags from catalogues and sections. */
+function collectAllTags(catalogues, sections) {
+  const tags = new Set();
+  for (const c of catalogues) (c.tags || []).forEach(t => tags.add(t));
+  for (const s of sections) (s.tags || []).forEach(t => tags.add(t));
+  return [...tags].sort();
+}
+
+/** Render the search input + tag filter chips. */
+function renderSearchFilter(allTags) {
+  const wrap = el('div', { class: 'data-search-wrap' });
+
+  // Search input
+  const input = el('input', {
+    type: 'text',
+    class: 'data-search-input',
+    placeholder: 'Search data sets, catalogues\u2026',
+    value: searchQuery,
+  });
+  input.addEventListener('input', (e) => {
+    searchQuery = e.target.value;
+    rerender();
+    // Re-focus after rerender
+    requestAnimationFrame(() => {
+      const inp = qs('.data-search-input');
+      if (inp) { inp.focus(); inp.selectionStart = inp.selectionEnd = inp.value.length; }
+    });
+  });
+
+  const inputWrap = el('div', { class: 'data-search-input-wrap' }, [
+    el('span', { class: 'icon data-search-icon', html: icon('search', 14) }),
+    input,
+  ]);
+  if (searchQuery) {
+    inputWrap.appendChild(el('button', {
+      class: 'data-search-clear',
+      onclick: () => { searchQuery = ''; rerender(); },
+      html: icon('x', 12),
+    }));
+  }
+  // Expand-all toggle (checked = expanded, unchecked = collapsed)
+  const expandToggle = el('label', { class: 'data-collapse-toggle', title: 'Expand / collapse all catalogues' }, [
+    el('input', {
+      type: 'checkbox',
+      checked: expandAll ? 'checked' : undefined,
+      onchange: (e) => { setExpandAll(e.target.checked); rerender(); },
+    }),
+    el('span', { class: 'data-collapse-label' }, 'Expand all'),
+  ]);
+
+  // Show-expression toggle
+  const exprToggle = el('label', { class: 'data-collapse-toggle', title: 'Always show expressions' }, [
+    el('input', {
+      type: 'checkbox',
+      checked: showExpr ? 'checked' : undefined,
+      onchange: (e) => { setShowExpr(e.target.checked); rerender(); },
+    }),
+    el('span', { class: 'data-collapse-label' }, 'Show exp.'),
+  ]);
+
+  const searchRow = el('div', { class: 'data-search-row' }, [inputWrap, expandToggle, exprToggle]);
+  wrap.appendChild(searchRow);
+
+  // Tag chips
+  if (allTags.length > 0) {
+    const chipRow = el('div', { class: 'data-tag-chips' });
+    for (const tag of allTags) {
+      const active = activeTagFilters.has(tag);
+      chipRow.appendChild(el('button', {
+        class: `data-tag-chip ${active ? 'data-tag-chip-active' : ''}`,
+        onclick: () => {
+          if (active) activeTagFilters.delete(tag);
+          else activeTagFilters.add(tag);
+          rerender();
+        },
+      }, tag));
+    }
+    if (activeTagFilters.size > 0) {
+      chipRow.appendChild(el('button', {
+        class: 'data-tag-chip data-tag-chip-clear',
+        onclick: () => { activeTagFilters.clear(); rerender(); },
+      }, 'Clear'));
+    }
+    wrap.appendChild(chipRow);
+  }
+
+  return wrap;
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────
+
+function rerender() {
+  const zone = qs('#data-zone');
+  if (zone) { clear(zone); renderVariableList(zone); }
+}
+
+/** Copy a read-only variable to the user's own catalogue. */
+async function copyToOwn(variable) {
+  const catalogues = (state.get('catalogues') || []).filter(c => !c.readonly);
+  let targetCatId = null;
+
+  if (catalogues.length > 0) {
+    targetCatId = catalogues[0].id;
+  } else {
+    // Auto-create a "My Data" catalogue
+    const newCat = await createCatalogue({
+      name: 'My Data',
+      description: 'Your custom data definitions',
+      scope: 'ticket',
+    });
+    targetCatId = newCat.id;
+  }
+
+  // Check for name collision
+  const existing = (state.get('variables') || []).filter(v => !v.readonly);
+  let name = variable.name;
+  if (existing.find(v => v.name === name)) {
+    name = `${name}_copy`;
+  }
+
+  // Create a fresh copy via the same createVariable path
+  const { createVariable } = await import('../../services/variables.js');
+  await createVariable({
+    purpose: variable.purpose || 'block',
+    type: variable.type || 'bom',
+    name,
+    description: variable.description || '',
+    source: variable.source || '',
+    filters: variable.filters ? JSON.parse(JSON.stringify(variable.filters)) : [],
+    filterLogic: variable.filterLogic || 'or',
+    transforms: variable.transforms ? JSON.parse(JSON.stringify(variable.transforms)) : [],
+    catchAll: variable.catchAll || false,
+    catalogueId: targetCatId,
+    sectionId: null,
+  });
+}
+
+/** Copy a read-only variable into a specific catalogue (+ optional section). Used by drag-drop from cookbook. */
+async function copyToCatalogue(variable, catalogueId, sectionId) {
+  const existing = (state.get('variables') || []).filter(v => !v.readonly);
+  let name = variable.name;
+  if (existing.find(v => v.name === name)) {
+    name = `${name}_copy`;
+  }
+
+  await createVariable({
+    purpose: variable.purpose || 'block',
+    type: variable.type || 'bom',
+    name,
+    description: variable.description || '',
+    source: variable.source || '',
+    filters: variable.filters ? JSON.parse(JSON.stringify(variable.filters)) : [],
+    filterLogic: variable.filterLogic || 'or',
+    transforms: variable.transforms ? JSON.parse(JSON.stringify(variable.transforms)) : [],
+    catchAll: variable.catchAll || false,
+    catalogueId,
+    sectionId: sectionId || null,
+  });
+}
+
+// ─── Coverage bar ───────────────────────────────────────────────────────
+
+function renderCoverageBar(variables) {
+  const bomVars = variables.filter(v => v.type === 'bom');
+  const total = bomVars.reduce((sum, v) => sum + (v.matchCount || 0), 0) || 42;
+  const colors = ['#E8713A', '#D4A015', '#8250DF', '#0A6DC2', '#1A7F37', '#CF222E', '#6E40C9'];
+
+  const coverage = el('div', { class: 'coverage' });
+
+  const assigned = bomVars.reduce((s, v) => s + (v.matchCount || 0), 0);
+  coverage.appendChild(
+    el('div', { class: 'coverage-header' }, [
+      el('span', { style: { fontWeight: '700', fontSize: '12px' } }, 'BOM Coverage'),
+      el('span', {
+        style: { color: assigned >= total ? 'var(--success)' : 'var(--warning)', fontWeight: '600', fontSize: '12px' },
+      }, `${assigned}/${total} assigned`),
+    ])
+  );
+
+  const bar = el('div', { class: 'coverage-bar' });
+  bomVars.forEach((v, i) => {
+    const pct = total > 0 ? ((v.matchCount || 0) / total) * 100 : 0;
+    if (pct > 0) {
+      bar.appendChild(
+        el('div', {
+          class: 'coverage-seg',
+          style: { width: `${pct}%`, background: v.catchAll ? '#ABB4BD' : colors[i % colors.length] },
+        })
+      );
+    }
+  });
+  coverage.appendChild(bar);
+
+  const legend = el('div', { class: 'coverage-legend' });
+  bomVars.forEach((v, i) => {
+    legend.appendChild(
+      el('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '3px' } }, [
+        el('span', {
+          class: 'coverage-dot',
+          style: { background: v.catchAll ? '#ABB4BD' : colors[i % colors.length] },
+        }),
+        `${v.name} ${v.matchCount || 0}`,
+      ])
+    );
+  });
+  coverage.appendChild(legend);
+
+  return coverage;
+}

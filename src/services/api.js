@@ -13,7 +13,7 @@
  *   endpoints (see auth.js).
  */
 
-import { ensureAdminToken, getTicketToken } from './auth.js';
+import { ensureAdminToken, getTicketToken, clearTicketTokenCache } from './auth.js';
 import { apiUrl, proxyHeaders } from './proxy.js';
 
 // ─── Core Fetch Wrappers ────────────────────────────────────────────────
@@ -100,6 +100,25 @@ export async function ticketFetch(instance, ticketId, path, opts = {}) {
   }
 
   const res = await authFetch(instance.url, fullPath, token, fetchOpts);
+
+  // Auto-retry on 401: clear cached token and get a fresh one via refresh flow
+  if (res.status === 401 && !opts._retried) {
+    console.log('[api] 401 on ticket fetch — clearing cache and retrying…');
+    clearTicketTokenCache(ticketId);
+    const { token: freshToken } = await getTicketToken(instance, ticketId);
+    if (freshToken && freshToken !== token) {
+      const retryRes = await authFetch(instance.url, fullPath, freshToken, fetchOpts);
+      const retryBody = await retryRes.text();
+      return {
+        ok: retryRes.ok,
+        status: retryRes.status,
+        body: retryBody,
+        needsAuth: retryRes.status === 401,
+        diag: [...diag, '401 retry: ' + (retryRes.ok ? 'succeeded' : 'failed')],
+      };
+    }
+  }
+
   const body = await res.text();
 
   return {
@@ -143,31 +162,48 @@ export async function listTickets(instance) {
 export async function getModel(instance, ticketId) {
   const attempts = [];
 
-  // Helper: try a describe call
+  // Helper: try a describe call — returns { xml, status }
   async function tryDescribe(label, instanceUrl, path, token) {
     try {
       const res = await authFetch(instanceUrl, path, token);
       const body = await res.text();
       const isHtml = body.trimStart().startsWith('<!DOCTYPE') || body.trimStart().startsWith('<html');
       attempts.push(`${label}: ${res.status} (${body.length}b${isHtml ? ', HTML' : ''})`);
-      if (res.ok && !isHtml && body.includes('<resource')) return body;
+      if (res.ok && !isHtml && body.includes('<resource')) return { xml: body, status: res.status };
+      return { xml: null, status: res.status };
     } catch (e) {
       attempts.push(`${label}: ERROR ${e.message}`);
     }
-    return null;
+    return { xml: null, status: 0 };
   }
 
-  // 1. Ticket-scoped token
+  // 1. Ticket-scoped token (with 401 retry — only on 401, not 403)
   const { token: ttk, diag } = await getTicketToken(instance, ticketId);
   if (ttk) {
-    const xml = await tryDescribe(
+    let result = await tryDescribe(
       'ticket-token',
       instance.url,
       `/!tickets~${ticketId}/api-v2.2/describe`,
       ttk,
     );
-    if (xml) {
-      return { ok: true, objects: parseModelXml(xml), xml };
+    if (result.xml) {
+      return { ok: true, objects: parseModelXml(result.xml), xml: result.xml };
+    }
+    // Only retry with fresh token on 401 (Unauthorized), not 403 (Forbidden)
+    if (result.status === 401) {
+      clearTicketTokenCache(ticketId);
+      const { token: freshTtk } = await getTicketToken(instance, ticketId);
+      if (freshTtk && freshTtk !== ttk) {
+        result = await tryDescribe(
+          'ticket-token-retry',
+          instance.url,
+          `/!tickets~${ticketId}/api-v2.2/describe`,
+          freshTtk,
+        );
+        if (result.xml) {
+          return { ok: true, objects: parseModelXml(result.xml), xml: result.xml };
+        }
+      }
     }
   }
 
@@ -216,7 +252,6 @@ export async function listRecords(instance, ticketId, objectName, listUrl) {
 
   let path;
   if (listUrl && (listUrl.startsWith('http://') || listUrl.startsWith('https://'))) {
-    // Absolute URL — extract path portion relative to instance
     try {
       const parsed = new URL(listUrl);
       path = parsed.pathname + parsed.search;
@@ -230,7 +265,18 @@ export async function listRecords(instance, ticketId, objectName, listUrl) {
   }
 
   try {
-    const res = await authFetch(instance.url, path, token);
+    let res = await authFetch(instance.url, path, token);
+
+    // Auto-retry on 401: clear cache, get fresh token, retry once
+    if (res.status === 401) {
+      console.log('[api] 401 on listRecords — clearing cache and retrying…');
+      clearTicketTokenCache(ticketId);
+      const { token: freshToken } = await getTicketToken(instance, ticketId);
+      if (freshToken && freshToken !== token) {
+        res = await authFetch(instance.url, path, freshToken);
+      }
+    }
+
     if (!res.ok) {
       return { ok: false, error: `HTTP ${res.status}`, needsAuth: res.status === 401 };
     }
@@ -419,6 +465,173 @@ function extractAttr(str, name) {
   const re = new RegExp(`${name}="([^"]*)"`, 'i');
   const m = str.match(re);
   return m ? m[1] : null;
+}
+
+// ─── Configured Product (Solution API) ────────────────────────────────────
+
+/**
+ * Fetch the full configured-product XML from the Solution API.
+ * Tries solution-api, v1.3, v1.2 in order (different instances support different versions).
+ *
+ * @param {Object} instance
+ * @param {string} ticketId
+ * @param {string} cpId - ConfiguredProduct UUID (_uuid from v2.2 records)
+ * @returns {Promise<{ok: boolean, xml?: string, error?: string}>}
+ */
+export async function fetchConfiguredProduct(instance, ticketId, cpId) {
+  const apiVersions = ['solution-api-v1.3', 'solution-api', 'solution-api-v1.2'];
+
+  for (const ver of apiVersions) {
+    const res = await ticketFetch(instance, ticketId,
+      `${ver}/configured-product/${cpId}?include-actual-value=true`
+    );
+    if (res.ok && res.body && res.body.includes('<')) {
+      return { ok: true, xml: res.body };
+    }
+  }
+
+  return { ok: false, error: 'Failed to load configured product from solution API' };
+}
+
+/**
+ * Parse the configured-product XML into a structured tree.
+ *
+ * Returns:
+ * {
+ *   model: { name, id, attrs: [{id, name, value, type}], calcAttrs: [{id, name, value}],
+ *            positions: [{ id, name, attrs, assembly?, module? }] },
+ *   bom: [{ attrs: [{name, type, value}] }]
+ * }
+ *
+ * The position/assembly tree is the source for getConfigurationAttribute paths.
+ * E.g. getConfigurationAttribute("position-name.attrName")
+ */
+export function parseConfiguredProductXml(xml) {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(xml, 'application/xml');
+  const result = { model: null, bom: [] };
+
+  // ── Model (product-configuration > model) ──
+  const modelEl = doc.querySelector('product-configuration > model');
+  if (modelEl) {
+    result.model = {
+      id: modelEl.getAttribute('id') || '',
+      name: modelEl.getAttribute('name') || '',
+      origin: modelEl.getAttribute('origin') || '',
+      attrs: cpParseAttrs(modelEl),
+      calcAttrs: cpParseCalcAttrs(modelEl),
+      positions: cpParsePositions(modelEl),
+    };
+  }
+
+  // ── BOM ──
+  const bomItems = doc.querySelectorAll('bom > items > item');
+  for (const item of bomItems) {
+    const attrs = [];
+    const itemAttrs = item.querySelector('attributes');
+    if (itemAttrs) {
+      for (const a of itemAttrs.children) {
+        if (a.tagName === 'attribute') {
+          attrs.push({
+            name: a.getAttribute('name') || '',
+            type: a.getAttribute('type') || '',
+            value: a.getAttribute('value') || '',
+          });
+        }
+      }
+    }
+    result.bom.push({ attrs });
+  }
+
+  return result;
+}
+
+function cpParseAttrs(parentEl) {
+  const attrs = [];
+  const block = parentEl.querySelector(':scope > attributes');
+  if (!block) return attrs;
+  for (const a of block.children) {
+    if (a.tagName === 'attribute') {
+      attrs.push({
+        id: a.getAttribute('id') || '',
+        name: a.getAttribute('name') || '',
+        domainId: a.getAttribute('domainId') || '',
+        value: a.getAttribute('value') || '',
+        type: a.getAttribute('type') || '',
+      });
+    }
+  }
+  return attrs;
+}
+
+function cpParseCalcAttrs(parentEl) {
+  const attrs = [];
+  const block = parentEl.querySelector(':scope > calculated-attributes');
+  if (!block) return attrs;
+  for (const a of block.children) {
+    if (a.tagName === 'calculated-attribute') {
+      attrs.push({
+        id: a.getAttribute('id') || '',
+        name: a.getAttribute('name') || '',
+        value: a.getAttribute('value') || '',
+      });
+    }
+  }
+  return attrs;
+}
+
+function cpParsePositions(parentEl) {
+  const positions = [];
+  const posBlock = parentEl.querySelector(':scope > positions');
+  if (!posBlock) return positions;
+  for (const posEl of posBlock.children) {
+    if (posEl.tagName !== 'position') continue;
+    const pos = {
+      id: posEl.getAttribute('id') || '',
+      name: posEl.getAttribute('name') || '',
+      origin: posEl.getAttribute('origin') || '',
+      qty: posEl.getAttribute('qty') || '1',
+      attrs: cpParseAttrs(posEl),
+      assembly: null,
+      module: null,
+    };
+
+    // Assembly child (recursive positions)
+    const assyEl = posEl.querySelector(':scope > assembly');
+    if (assyEl) {
+      pos.assembly = {
+        id: assyEl.getAttribute('id') || '',
+        name: assyEl.getAttribute('name') || '',
+        origin: assyEl.getAttribute('origin') || '',
+        attrs: cpParseAttrs(assyEl),
+        calcAttrs: cpParseCalcAttrs(assyEl),
+        positions: cpParsePositions(assyEl),   // recursive
+      };
+    }
+
+    // Module child (leaf — contains variant with attrs)
+    const modEl = posEl.querySelector(':scope > module');
+    if (modEl) {
+      pos.module = {
+        id: modEl.getAttribute('id') || '',
+        name: modEl.getAttribute('name') || '',
+        origin: modEl.getAttribute('origin') || '',
+        variant: null,
+      };
+      const varEl = modEl.querySelector(':scope > variant');
+      if (varEl) {
+        pos.module.variant = {
+          id: varEl.getAttribute('id') || '',
+          name: varEl.getAttribute('name') || '',
+          attrs: cpParseAttrs(varEl),
+          calcAttrs: cpParseCalcAttrs(varEl),
+        };
+      }
+    }
+
+    positions.push(pos);
+  }
+  return positions;
 }
 
 // Export parsers for testing

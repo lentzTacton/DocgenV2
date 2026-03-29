@@ -15,11 +15,20 @@
 import { el, qs, clear } from '../../core/dom.js';
 import { iconEl, icon } from '../../components/icon.js';
 import state from '../../core/state.js';
-import { getSetting, setSetting, deleteSetting } from '../../core/storage.js';
+import { getSetting, setSetting, deleteSetting, getInstance } from '../../core/storage.js';
+import { hideSplash } from '../../components/splash.js';
 import { createConnectionCard } from './connection-card.js';
 import { createTicketCard } from './ticket-card.js';
 import { createStartingObjectCard } from './starting-object-card.js';
 import { createAiSettingsCard } from './ai-settings-card.js';
+import {
+  storeManualTicketToken,
+  tryAsRefreshToken,
+  exchangeTicketCode,
+  testTicketToken,
+  testAdminCredentials,
+} from '../../services/auth.js';
+import { ticketFetch, adminFetch } from '../../services/api.js';
 
 const STEPS = [
   { id: 'connection', label: 'Instance', icon: 'link', tip: 'Connect to your Tacton CPQ instance' },
@@ -36,6 +45,10 @@ const RING_CIRC = 2 * Math.PI * RING_RADIUS;
 
 let activeStep = 'connection';
 let lockWasReady = false;
+let progressCollapsed = true;
+
+// Collapse state for locked summary sections (in-memory)
+const summaryCollapseState = {};
 
 /**
  * Config lock schema — single source of truth for snapshot keys.
@@ -79,7 +92,29 @@ export function createSetupView(container) {
   container.appendChild(inner);
 
   // ── Progress area: ring + step list + config lock ──
-  const progressArea = el('div', { class: 'setup-progress-area' });
+  const progressArea = el('div', { class: 'setup-progress-area', id: 'setup-progress-area', style: { display: 'none' } });
+
+  // Collapsed bar (shown when progress area is collapsed)
+  const progressCollapsedBar = el('div', {
+    class: 'progress-collapsed-bar',
+    id: 'progress-collapsed-bar',
+  }, [
+    el('span', { class: 'icon', style: { color: 'var(--tacton-blue)' }, html: icon('link', 14) }),
+    el('span', { class: 'progress-bar-pct', id: 'progress-bar-pct' }, '0%'),
+    el('span', { class: 'progress-bar-badge-label', id: 'progress-bar-badge-label' }),
+    el('div', { class: 'progress-bar-dots', id: 'progress-bar-dots' }),
+    el('button', {
+      class: 'progress-bar-lock-btn',
+      id: 'progress-bar-lock-btn',
+      disabled: true,
+      title: 'Lock configuration',
+      onclick: (e) => { e.stopPropagation(); handleConfigLock(); },
+    }, [
+      el('span', { class: 'icon', id: 'progress-bar-lock-icon', html: icon('lock', 12) }),
+      el('span', { id: 'progress-bar-lock-label' }),
+    ]),
+  ]);
+  progressCollapsedBar.addEventListener('click', () => toggleProgressArea());
 
   // — Config lock (left of ring, icon + label stacked) —
   const configLockLabel = el('span', {
@@ -156,6 +191,16 @@ export function createSetupView(container) {
   });
   progressArea.appendChild(stepList);
 
+  // Collapse toggle — always visible button
+  const collapseBtn = el('button', {
+    class: 'progress-collapse-btn',
+    id: 'progress-collapse-btn',
+    title: 'Collapse status',
+    onclick: (e) => { e.stopPropagation(); toggleProgressArea(); },
+  }, [el('span', { class: 'icon', html: icon('chevronUp', 10) }), 'Hide']);
+  progressArea.appendChild(collapseBtn);
+
+  inner.appendChild(progressCollapsedBar);
   inner.appendChild(progressArea);
 
   // ── Locked summary (shown when config is locked) ──
@@ -183,6 +228,12 @@ export function createSetupView(container) {
   createStartingObjectCard(objectWrap);
   createAiSettingsCard(aiWrap);
 
+  // ── Add collapsed status bars to each step ──
+  addCollapsedBar(connWrap, 'connection');
+  addCollapsedBar(ticketWrap, 'ticket');
+  addCollapsedBar(objectWrap, 'starting-object');
+  addCollapsedBar(aiWrap, 'ai');
+
   // ── Add Proceed buttons to each step ──
   addProceedButton(connWrap,   'connection',      'ticket');
   addProceedButton(ticketWrap, 'ticket',          'starting-object');
@@ -191,6 +242,7 @@ export function createSetupView(container) {
 
   // ── Set initial state ──
   setActiveStep('connection');
+  refreshProgressBar(); // Populate collapsed bar on first render
 
   // ── Listen for completion events to advance steps ──
 
@@ -208,31 +260,37 @@ export function createSetupView(container) {
         setActiveStep('connection');
       }
     }
+    refreshCollapsedBars();
+    refreshProgressBar();
   });
 
   state.on('tickets.selected', (ticketId) => {
     if (ticketId) {
       unlockStep('starting-object');
-      // Don't auto-advance — let the user proceed when ready
     } else {
-      // Ticket deselected — re-lock starting object
       lockStep('starting-object');
       if (activeStep === 'starting-object') {
         setActiveStep('ticket');
       }
     }
+    refreshCollapsedBars();
+    refreshProgressBar();
   });
 
   state.on('startingObject.type', () => {
     updateStepperState();
+    refreshCollapsedBars();
+    refreshProgressBar();
   });
 
   state.on('config.locked', () => {
     updateStepperState();
+    refreshProgressBar();
   });
 
   state.on('ai.apiKeyValid', () => {
     updateStepperState();
+    refreshProgressBar();
   });
 
   // Re-render locked summary when ticket token health check completes
@@ -260,6 +318,9 @@ async function handleConfigLock() {
     await deleteSetting('config-locked');
     hideLockedSummary();
     setActiveStep('connection');
+    // Trigger auto-connect so the connection card re-validates credentials
+    // and ticket card loads tickets (connection.status may still be 'restoring')
+    state.set('config.autoConnectPending', true);
   }
 }
 
@@ -272,6 +333,14 @@ async function loadLockedConfig() {
 
   showLockedSummary();
   updateStepperState();
+
+  // Config is locked — skip the splash screen and go straight to Data tab.
+  // The splash normally gates entry, but with a saved config we bypass it.
+  hideSplash();
+  state.set('activeZone', 'data');
+
+  // Trigger auto-connect so credential health checks run in background
+  state.set('config.autoConnectPending', true);
 }
 
 function showLockedSummary() {
@@ -295,6 +364,13 @@ function renderLockedSummaryContent() {
 
   const summaryEl = qs('#config-summary');
   if (!summaryEl) return;
+
+  // Capture open/closed state before clearing DOM
+  const existingReauth = qs('#locked-reauth-section');
+  const reauthWasOpen = existingReauth && existingReauth.style.display !== 'none';
+  const existingDiagBody = qs('#locked-test-body');
+  const diagnosticsWasOpen = existingDiagBody ? existingDiagBody.style.display !== 'none' : false;
+
   clear(summaryEl);
 
   const url = state.get('connection.url') || '';
@@ -331,7 +407,7 @@ function renderLockedSummaryContent() {
       items: [
         { label: 'Ticket', value: ticketId, ok: true },
         { label: 'Object', value: objectType, ok: true },
-        { label: 'Ticket Token', value: tokenLabel, ok: tokenOk, hasTooltip: !!tokenHealth },
+        { label: 'Ticket Token', value: tokenLabel, ok: tokenOk, hasTooltip: !!tokenHealth, isToken: true },
       ],
     },
     {
@@ -346,12 +422,36 @@ function renderLockedSummaryContent() {
   const ICONS = { pass: '✓', fail: '✗', skip: '–', warn: '!' };
 
   for (const section of sections) {
-    summaryEl.appendChild(
-      el('div', { class: 'config-summary-section' }, [
+    const secKey = `summary-${section.title}`;
+    const collapsed = summaryCollapseState[secKey] === true;
+
+    // All items OK?
+    const allOk = section.items.every(i => i.ok);
+    const statusDot = el('span', {
+      class: `config-summary-dot ${allOk ? 'dot-ok' : 'dot-muted'}`,
+      style: { marginLeft: 'auto', flexShrink: '0' },
+    });
+
+    const header = el('div', {
+      class: 'config-summary-section config-summary-section-toggle',
+      onclick: () => {
+        summaryCollapseState[secKey] = !summaryCollapseState[secKey];
+        renderLockedSummaryContent();
+      },
+    }, [
+      el('span', {
+        class: 'icon config-summary-chevron',
+        html: icon(collapsed ? 'chevronRight' : 'chevronDown', 12),
+      }),
+      el('div', { style: { flex: '1' } }, [
         el('span', { class: 'config-summary-section-title' }, section.title),
         el('span', { class: 'config-summary-section-desc' }, section.desc),
-      ])
-    );
+      ]),
+      statusDot,
+    ]);
+    summaryEl.appendChild(header);
+
+    if (collapsed) continue;
 
     for (const item of section.items) {
       const dot = el('span', {
@@ -373,7 +473,6 @@ function renderLockedSummaryContent() {
           const rect = badge.getBoundingClientRect();
           tooltip.style.left = rect.left + 'px';
           tooltip.style.top = (rect.bottom + 6) + 'px';
-          // Flip upward if it would overflow the viewport
           document.body.appendChild(tooltip);
           tooltip.classList.add('is-visible');
           const ttRect = tooltip.getBoundingClientRect();
@@ -391,15 +490,361 @@ function renderLockedSummaryContent() {
         valueEl = el('span', { class: 'config-summary-value' }, item.value);
       }
 
-      summaryEl.appendChild(
-        el('div', { class: 'config-summary-row' }, [
-          dot,
-          el('span', { class: 'config-summary-label' }, item.label),
-          valueEl,
-        ])
-      );
+      const row = el('div', { class: 'config-summary-row' }, [
+        dot,
+        el('span', { class: 'config-summary-label' }, item.label),
+        valueEl,
+      ]);
+
+      // Add re-authorize link on the token row
+      if (item.isToken && ticketId !== '—') {
+        const reauthLink = el('button', {
+          class: 'locked-reauth-link',
+          onclick: () => toggleLockedReauth(),
+        }, tokenOk ? 'Re-authorize' : 'Authorize');
+        row.appendChild(reauthLink);
+      }
+
+      summaryEl.appendChild(row);
     }
   }
+
+  // ── Inline re-auth section (below the summary rows) ──
+  if (ticketId !== '—') {
+    const reauthStatus = el('div', {
+      class: 'locked-reauth-status',
+      id: 'locked-reauth-status',
+      style: { display: 'none' },
+    });
+
+    const reauthInput = el('input', {
+      class: 'input',
+      id: 'locked-reauth-input',
+      type: 'text',
+      placeholder: 'Paste token or auth code',
+    });
+
+    const reauthBtn = el('button', {
+      class: 'btn btn-sm btn-primary',
+      id: 'locked-reauth-btn',
+      onclick: () => handleLockedReauth(ticketId),
+    }, 'Authorize');
+
+    const reauthSection = el('div', {
+      class: 'locked-reauth-section',
+      id: 'locked-reauth-section',
+      style: { display: reauthWasOpen ? '' : 'none' },
+    }, [
+      el('div', { class: 'locked-reauth-header' }, [
+        el('span', { class: 'locked-reauth-title' }, `Authorize ${ticketId}`),
+      ]),
+      el('div', { class: 'locked-reauth-input-row' }, [
+        reauthInput,
+        reauthBtn,
+      ]),
+      reauthStatus,
+    ]);
+
+    summaryEl.appendChild(reauthSection);
+  }
+
+  // ── Diagnostics section — collapsible ──
+  const testStepsContainer = el('div', {
+    class: 'locked-test-steps',
+    id: 'locked-test-steps',
+  });
+
+  // Show previous results if we have token health data
+  if (tokenHealth?.steps) {
+    renderLockedTestSteps(testStepsContainer, tokenHealth.steps, 'ticket');
+  }
+
+  const testBtn = el('button', {
+    class: 'btn btn-sm btn-ghost locked-test-btn',
+    id: 'locked-test-btn',
+    html: `${icon('refresh', 12)} Run`,
+    onclick: (e) => { e.stopPropagation(); handleLockedDiagnostics(ticketId); },
+  });
+
+  const testBody = el('div', {
+    id: 'locked-test-body',
+    style: { display: diagnosticsWasOpen ? '' : 'none' },
+  }, [testStepsContainer]);
+
+  const chevron = el('span', {
+    class: `locked-test-chevron ${diagnosticsWasOpen ? 'open' : ''}`,
+    id: 'locked-test-chevron',
+  }, '›');
+
+  const testHeader = el('div', {
+    class: 'locked-test-header',
+    onclick: () => toggleLockedDiagnostics(),
+  }, [
+    chevron,
+    el('span', { class: 'locked-test-title' }, 'Diagnostics'),
+    testBtn,
+  ]);
+
+  const testSection = el('div', {
+    class: 'locked-test-section',
+    id: 'locked-test-section',
+  }, [testHeader, testBody]);
+
+  summaryEl.appendChild(testSection);
+}
+
+/** Render test steps into a container */
+function renderLockedTestSteps(container, steps, scope) {
+  const ICONS = { pass: '✓', fail: '✗', skip: '–', warn: '!', checking: '…' };
+  for (const step of steps) {
+    container.appendChild(el('div', { class: 'locked-test-step' }, [
+      el('span', { class: `locked-test-icon lt-${step.status}` }, ICONS[step.status] || '–'),
+      el('span', { class: 'locked-test-label' }, step.label),
+      el('span', { class: 'locked-test-detail' }, step.detail || ''),
+    ]));
+  }
+}
+
+/**
+ * Run full diagnostics: instance-level admin creds test + ticket token health.
+ * Results displayed inline on the locked summary — no need to unlock.
+ */
+async function handleLockedDiagnostics(ticketId) {
+  const btn = qs('#locked-test-btn');
+  const container = qs('#locked-test-steps');
+  if (!container) return;
+
+  if (btn) { btn.disabled = true; btn.innerHTML = `${icon('refresh', 12)} Testing…`; }
+  clear(container);
+
+  const instanceId = state.get('connection.instanceId');
+  const instance = await getInstance(instanceId);
+
+  if (!instance) {
+    container.appendChild(el('div', { class: 'locked-test-step' }, [
+      el('span', { class: 'locked-test-icon lt-fail' }, '✗'),
+      el('span', { class: 'locked-test-label' }, 'Instance'),
+      el('span', { class: 'locked-test-detail' }, 'Not found in storage'),
+    ]));
+    if (btn) { btn.disabled = false; btn.innerHTML = `${icon('refresh', 12)} Run Diagnostics`; }
+    return;
+  }
+
+  // ── Instance-level diagnostics ──
+  const instanceSteps = [];
+
+  // Step 1: Test admin token
+  container.appendChild(el('div', { class: 'locked-test-step', id: 'lt-admin-creds' }, [
+    el('span', { class: 'locked-test-icon lt-checking' }, '…'),
+    el('span', { class: 'locked-test-label' }, 'Admin Credentials'),
+    el('span', { class: 'locked-test-detail' }, 'Testing…'),
+  ]));
+
+  const adminResult = await testAdminCredentials(instance);
+  const adminStep = qs('#lt-admin-creds');
+  if (adminStep) {
+    clear(adminStep);
+    const status = adminResult.ok ? 'pass' : 'fail';
+    adminStep.appendChild(el('span', { class: `locked-test-icon lt-${status}` }, adminResult.ok ? '✓' : '✗'));
+    adminStep.appendChild(el('span', { class: 'locked-test-label' }, 'Admin Credentials'));
+    adminStep.appendChild(el('span', { class: 'locked-test-detail' }, adminResult.ok ? 'Valid' : adminResult.error));
+  }
+  instanceSteps.push({
+    label: 'Admin Credentials',
+    status: adminResult.ok ? 'pass' : 'fail',
+    detail: adminResult.ok ? 'Valid' : adminResult.error,
+  });
+
+  // Step 2: Test ticket list fetch
+  container.appendChild(el('div', { class: 'locked-test-step', id: 'lt-ticket-list' }, [
+    el('span', { class: 'locked-test-icon lt-checking' }, '…'),
+    el('span', { class: 'locked-test-label' }, 'Ticket List API'),
+    el('span', { class: 'locked-test-detail' }, 'Testing…'),
+  ]));
+
+  let ticketListOk = false;
+  try {
+    const res = await adminFetch(instance, '/api/ticket/list');
+    ticketListOk = res.ok;
+    const ticketListStep = qs('#lt-ticket-list');
+    if (ticketListStep) {
+      clear(ticketListStep);
+      const status = res.ok ? 'pass' : 'fail';
+      ticketListStep.appendChild(el('span', { class: `locked-test-icon lt-${status}` }, res.ok ? '✓' : '✗'));
+      ticketListStep.appendChild(el('span', { class: 'locked-test-label' }, 'Ticket List API'));
+      ticketListStep.appendChild(el('span', { class: 'locked-test-detail' }, res.ok ? `OK (${res.body.length}b)` : `HTTP ${res.status}`));
+    }
+  } catch (e) {
+    const ticketListStep = qs('#lt-ticket-list');
+    if (ticketListStep) {
+      clear(ticketListStep);
+      ticketListStep.appendChild(el('span', { class: 'locked-test-icon lt-fail' }, '✗'));
+      ticketListStep.appendChild(el('span', { class: 'locked-test-label' }, 'Ticket List API'));
+      ticketListStep.appendChild(el('span', { class: 'locked-test-detail' }, e.message));
+    }
+  }
+
+  // ── Ticket-level diagnostics (separator) ──
+  if (ticketId && ticketId !== '—') {
+    container.appendChild(el('div', { class: 'locked-test-step', style: { padding: '2px 0' } }, [
+      el('span', {
+        style: { fontSize: '10px', fontWeight: '700', color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.3px' },
+      }, `Ticket: ${ticketId}`),
+    ]));
+
+    // Run the full ticket token health check
+    container.appendChild(el('div', { class: 'locked-test-step', id: 'lt-ticket-token' }, [
+      el('span', { class: 'locked-test-icon lt-checking' }, '…'),
+      el('span', { class: 'locked-test-label' }, 'Token Health Check'),
+      el('span', { class: 'locked-test-detail' }, 'Running 5-step check…'),
+    ]));
+
+    try {
+      const result = await testTicketToken(instance, ticketId);
+
+      // Replace placeholder with actual steps
+      const placeholder = qs('#lt-ticket-token');
+      if (placeholder) placeholder.remove();
+
+      for (const step of result.steps) {
+        container.appendChild(el('div', { class: 'locked-test-step' }, [
+          el('span', { class: `locked-test-icon lt-${step.status}` }, step.status === 'pass' ? '✓' : step.status === 'fail' ? '✗' : '–'),
+          el('span', { class: 'locked-test-label' }, step.label),
+          el('span', { class: 'locked-test-detail' }, step.detail || ''),
+        ]));
+      }
+
+      // Update state so badge refreshes
+      state.set('tickets.tokenHealth', {
+        status: result.status,
+        steps: result.steps,
+        ticketId,
+      });
+    } catch (e) {
+      const placeholder = qs('#lt-ticket-token');
+      if (placeholder) {
+        clear(placeholder);
+        placeholder.appendChild(el('span', { class: 'locked-test-icon lt-fail' }, '✗'));
+        placeholder.appendChild(el('span', { class: 'locked-test-label' }, 'Token Health Check'));
+        placeholder.appendChild(el('span', { class: 'locked-test-detail' }, e.message));
+      }
+    }
+  }
+
+  if (btn) { btn.disabled = false; btn.innerHTML = `${icon('refresh', 12)} Run Diagnostics`; }
+}
+
+/** Toggle the inline re-auth section visibility */
+function toggleLockedReauth() {
+  const section = qs('#locked-reauth-section');
+  if (!section) return;
+  const isVisible = section.style.display !== 'none';
+  section.style.display = isVisible ? 'none' : '';
+  if (!isVisible) {
+    const input = qs('#locked-reauth-input');
+    if (input) { input.value = ''; input.focus(); }
+    const status = qs('#locked-reauth-status');
+    if (status) status.style.display = 'none';
+  }
+}
+
+/** Toggle the diagnostics section visibility */
+function toggleLockedDiagnostics() {
+  const body = qs('#locked-test-body');
+  const chevron = qs('#locked-test-chevron');
+  if (!body) return;
+  const isVisible = body.style.display !== 'none';
+  body.style.display = isVisible ? 'none' : '';
+  if (chevron) chevron.classList.toggle('open', !isVisible);
+}
+
+/**
+ * Handle token submission from the locked summary re-auth.
+ * Same 3-tier logic as ticket-card (access token → refresh token → auth code).
+ * Locked to the specified ticket — cannot change which ticket.
+ */
+async function handleLockedReauth(ticketId) {
+  const input = qs('#locked-reauth-input');
+  const raw = input?.value.trim();
+  if (!raw) {
+    showLockedReauthStatus('Please enter a token or auth code', 'error');
+    return;
+  }
+
+  const instanceId = state.get('connection.instanceId');
+  const instance = await getInstance(instanceId);
+  if (!instance) {
+    showLockedReauthStatus('No instance connected', 'error');
+    return;
+  }
+
+  const btn = qs('#locked-reauth-btn');
+  if (btn) { btn.textContent = 'Authorizing…'; btn.disabled = true; }
+
+  let authorized = false;
+  let authMethod = '';
+
+  // 1. Try as direct access token
+  await storeManualTicketToken(ticketId, raw);
+  const accessProbe = await ticketFetch(instance, ticketId, 'api-v2.2/describe');
+  if (accessProbe.ok) {
+    authMethod = 'access token';
+    authorized = true;
+    tryAsRefreshToken(instance, ticketId, raw).catch(() => {});
+  } else {
+    // 2. Try as refresh token
+    const refreshResult = await tryAsRefreshToken(instance, ticketId, raw);
+    if (refreshResult.ok) {
+      authMethod = 'refresh token';
+      authorized = true;
+    } else {
+      // 3. Try as authorization code
+      const codeResult = await exchangeTicketCode(instance, ticketId, raw);
+      if (codeResult.ok) {
+        const validation = await ticketFetch(instance, ticketId, 'api-v2.2/describe');
+        if (validation.ok) {
+          authMethod = 'auth code';
+          authorized = true;
+        } else {
+          showLockedReauthStatus('Token exchanged but validation failed', 'error');
+        }
+      } else {
+        showLockedReauthStatus('Not accepted as access token, refresh token, or auth code', 'error');
+      }
+    }
+  }
+
+  if (btn) { btn.textContent = 'Authorize'; btn.disabled = false; }
+  if (input) input.value = '';
+
+  if (authorized) {
+    showLockedReauthStatus(`Authorized via ${authMethod}`, 'success');
+
+    // Re-run token health check — this updates the badge and re-renders the summary
+    try {
+      const result = await testTicketToken(instance, ticketId);
+      state.set('tickets.tokenHealth', {
+        status: result.status,
+        steps: result.steps,
+        ticketId,
+      });
+    } catch (e) {
+      state.set('tickets.tokenHealth', {
+        status: 'error',
+        steps: [{ label: 'Token Test', status: 'fail', detail: e.message }],
+        ticketId,
+      });
+    }
+  }
+}
+
+function showLockedReauthStatus(msg, type) {
+  const el_ = qs('#locked-reauth-status');
+  if (!el_) return;
+  if (!msg) { el_.style.display = 'none'; return; }
+  el_.style.display = '';
+  el_.textContent = msg;
+  el_.className = `locked-reauth-status status-${type}`;
 }
 
 /** Build a detached tooltip element for ticket token health (appended to body on hover) */
@@ -448,6 +893,145 @@ function hideLockedSummary() {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
+// ─── Progress area collapse ─────────────────────────────────────────
+
+function toggleProgressArea() {
+  progressCollapsed = !progressCollapsed;
+  const area = qs('#setup-progress-area');
+  const bar = qs('#progress-collapsed-bar');
+  if (area) area.style.display = progressCollapsed ? 'none' : '';
+  if (bar) bar.style.display = progressCollapsed ? '' : 'none';
+  if (progressCollapsed) refreshProgressBar();
+}
+
+/** Refresh the collapsed progress bar content with current step status. */
+function refreshProgressBar() {
+  const pctEl = qs('#progress-bar-pct');
+  const dotsEl = qs('#progress-bar-dots');
+  const badgeEl = qs('#progress-bar-badge-label');
+  const lockBtn = qs('#progress-bar-lock-btn');
+  if (!pctEl || !dotsEl) return;
+
+  // Calculate percentage
+  const connected = state.get('connection.status') === 'connected' || state.get('connection.status') === 'restoring';
+  const hasTicket = !!state.get('tickets.selected');
+  const hasObject = !!state.get('startingObject.type');
+  const hasAi = !!state.get('ai.apiKeyValid');
+  const steps = [connected, hasTicket, hasObject]; // AI is optional
+  const done = steps.filter(Boolean).length + (hasAi ? 1 : 0);
+  const pct = Math.round((done / 4) * 100);
+  pctEl.textContent = `${pct}%`;
+
+  // Hide badge — percentage is sufficient
+  if (badgeEl) badgeEl.style.display = 'none';
+
+  // Lock button + bar styling
+  const isLocked = !!state.get('config.locked');
+  const allRequired = connected && hasTicket && hasObject;
+  if (lockBtn) {
+    lockBtn.disabled = !allRequired && !isLocked;
+    lockBtn.classList.toggle('lock-btn-ready', allRequired || isLocked);
+    lockBtn.classList.toggle('lock-btn-locked', isLocked);
+    lockBtn.title = isLocked ? 'Unlock to edit configuration' : allRequired ? 'Lock configuration' : 'Complete all steps to lock';
+    const iconEl = qs('#progress-bar-lock-icon');
+    const labelEl = qs('#progress-bar-lock-label');
+    if (iconEl) iconEl.innerHTML = icon(isLocked ? 'unlock' : 'lock', 12);
+    if (labelEl) labelEl.textContent = isLocked ? 'Unlock to edit' : 'Lock config';
+  }
+
+  // Toggle locked appearance on the entire bar
+  const barEl = qs('#progress-collapsed-bar');
+  if (barEl) barEl.classList.toggle('progress-bar-locked', isLocked);
+
+  // Build step indicators with checkmarks
+  clear(dotsEl);
+  const stepInfo = [
+    { label: 'Instance', ok: connected, stepId: 'connection' },
+    { label: 'Ticket', ok: hasTicket, stepId: 'ticket' },
+    { label: 'Object', ok: hasObject, stepId: 'starting-object' },
+    { label: 'AI', ok: hasAi, optional: true, stepId: 'ai' },
+  ];
+  for (const s of stepInfo) {
+    const indicator = s.ok
+      ? el('span', { class: 'progress-bar-check-icon ok', html: icon('check', 12) })
+      : el('span', { class: 'progress-bar-check-icon muted' }, '–');
+    const stepEl = el('span', {
+      class: `progress-bar-step ${isLocked ? '' : 'progress-bar-step-clickable'}`,
+      onclick: isLocked ? null : (e) => {
+        e.stopPropagation();
+        setActiveStep(s.stepId);
+      },
+    }, [
+      indicator,
+      el('span', { class: `progress-bar-step-label ${s.ok ? 'step-label-ok' : ''}` }, s.label),
+    ]);
+    dotsEl.appendChild(stepEl);
+  }
+}
+
+/**
+ * Add a collapsed status bar to a step card wrapper.
+ * When the step is collapsed (not active, not locked), this bar shows
+ * instead of the full card.
+ */
+function addCollapsedBar(wrap, stepId) {
+  const step = STEPS.find(s => s.id === stepId);
+  if (!step) return;
+
+  const bar = el('div', {
+    class: 'step-collapsed-bar',
+    id: `step-bar-${stepId}`,
+    onclick: () => setActiveStep(stepId),
+  }, [
+    el('span', { class: 'icon step-bar-icon', html: icon(step.icon, 14) }),
+    el('span', { class: 'step-bar-label' }, step.label),
+    el('span', { class: 'step-bar-value', id: `step-bar-val-${stepId}` }),
+    el('span', { class: 'step-bar-badge', id: `step-bar-badge-${stepId}` }),
+    el('span', { class: 'icon step-bar-chevron', html: icon('chevronDown', 12) }),
+  ]);
+
+  wrap.appendChild(bar);
+}
+
+/** Refresh the value/badge shown on each collapsed bar. */
+function refreshCollapsedBars() {
+  // Connection
+  const connStatus = state.get('connection.status');
+  const connUrl = state.get('connection.url') || '';
+  const connHostname = connUrl ? (() => { try { return new URL(connUrl).hostname; } catch { return connUrl; } })() : '—';
+  setBarContent('connection', connHostname,
+    connStatus === 'connected' ? 'CONNECTED' : connStatus === 'restoring' ? 'RESTORING' : '',
+    connStatus === 'connected');
+
+  // Ticket
+  const ticketId = state.get('tickets.selected');
+  setBarContent('ticket', ticketId || '—',
+    ticketId ? 'SELECTED' : '',
+    !!ticketId);
+
+  // Starting Object
+  const objType = state.get('startingObject.type');
+  setBarContent('starting-object', objType || '—',
+    objType ? 'SET' : '',
+    !!objType);
+
+  // AI
+  const hasAi = !!state.get('ai.apiKeyValid');
+  setBarContent('ai', hasAi ? 'Configured' : 'Not set',
+    hasAi ? 'READY' : 'OPTIONAL',
+    hasAi);
+}
+
+function setBarContent(stepId, value, badgeText, isOk) {
+  const valEl = qs(`#step-bar-val-${stepId}`);
+  const badgeEl = qs(`#step-bar-badge-${stepId}`);
+  if (valEl) valEl.textContent = value;
+  if (badgeEl) {
+    badgeEl.textContent = badgeText;
+    badgeEl.className = `step-bar-badge ${isOk ? 'step-bar-badge-ok' : 'step-bar-badge-muted'}`;
+  }
+}
+
 function handleStepClick(stepId) {
   const marker = qs(`#marker-${stepId}`);
   if (!marker || marker.classList.contains('marker-locked')) return;
@@ -460,17 +1044,23 @@ function setActiveStep(stepId) {
   STEPS.forEach(s => {
     const wrap = qs(`#step-${s.id}`);
     if (!wrap) return;
+    const card = wrap.querySelector('.card');
+    const bar = wrap.querySelector('.step-collapsed-bar');
+
     if (s.id === stepId) {
       wrap.classList.add('step-active');
       wrap.classList.remove('step-collapsed');
+      if (card) card.style.display = '';
+      if (bar) bar.style.display = 'none';
     } else {
       wrap.classList.remove('step-active');
-      if (!wrap.classList.contains('step-locked')) {
-        wrap.classList.add('step-collapsed');
-      }
+      wrap.classList.add('step-collapsed');
+      if (card) card.style.display = 'none';
+      if (bar) bar.style.display = '';
     }
   });
 
+  refreshCollapsedBars();
   updateStepperState();
 }
 
@@ -486,8 +1076,12 @@ function unlockStep(stepId) {
 function lockStep(stepId) {
   const wrap = qs(`#step-${stepId}`);
   if (wrap) {
-    wrap.classList.remove('step-active', 'step-collapsed');
-    wrap.classList.add('step-locked');
+    wrap.classList.remove('step-active');
+    wrap.classList.add('step-locked', 'step-collapsed');
+    const card = wrap.querySelector('.card');
+    const bar = wrap.querySelector('.step-collapsed-bar');
+    if (card) card.style.display = 'none';
+    if (bar) bar.style.display = '';
   }
   updateStepperState();
 }
@@ -579,9 +1173,9 @@ function updateStepperState() {
     ringFill.style.strokeDashoffset = offset;
   }
 
-  // Update center text — shows 110% when AI is configured
+  // Update center text — cap display at 100%
   const pctEl = qs('#progress-ring-pct');
-  if (pctEl) pctEl.textContent = pct + '%';
+  if (pctEl) pctEl.textContent = Math.min(pct, 100) + '%';
 
   // Update center: show intro at 0%, percentage otherwise
   const centerEl = qs('#progress-ring-center');

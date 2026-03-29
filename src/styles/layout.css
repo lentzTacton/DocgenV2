@@ -10,7 +10,8 @@
   display: flex;
   flex-direction: column;
   background-color: var(--card);
-  overflow: auto;
+  overflow-y: scroll;
+  overflow-x: hidden;
 }
 
 /* ===== HEADER ===== */

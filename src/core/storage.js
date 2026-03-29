@@ -34,6 +34,28 @@ db.version(2).stores({
   settings:   'key',
 });
 
+db.version(3).stores({
+  instances:  '++id, name, url',
+  tokens:     'key',
+  projects:   'id, documentId, instanceId, updatedAt',
+  tickets:    '[projectId+ticketId], projectId',
+  variables:  '++id, projectId, name, type, order, sectionId, catalogueId',
+  settings:   'key',
+  catalogues: '++id, projectId, scope, name, order',
+  sections:   '++id, catalogueId, projectId, name, order',
+});
+
+// NOTE: Dexie doesn't support changing primary keys, so we keep ++id (auto-increment)
+// but always supply a UUID string as the id for new records. Dexie accepts user-supplied
+// ids even with ++id schema — auto-increment only kicks in when id is absent.
+// Old records retain their integer ids; new records get UUID strings.
+// All ID comparisons should use String() coercion for safety.
+
+/** Generate a UUID for new entities. */
+export function generateId() {
+  return crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 // ─── Instance CRUD ───────────────────────────────────────────────────────
 
 export async function getInstances() {
@@ -141,12 +163,9 @@ export async function getVariable(id) {
 export async function saveVariable(variable) {
   variable.updatedAt = Date.now();
   if (!variable.createdAt) variable.createdAt = Date.now();
-  if (variable.id) {
-    await db.variables.put(variable);
-    return variable;
-  }
-  const id = await db.variables.add(variable);
-  return { ...variable, id };
+  if (!variable.id) variable.id = generateId();
+  await db.variables.put(variable);
+  return variable;
 }
 
 export async function deleteVariable(id) {
@@ -158,6 +177,57 @@ export async function reorderVariables(projectId, orderedIds) {
     for (let i = 0; i < orderedIds.length; i++) {
       await db.variables.update(orderedIds[i], { order: i });
     }
+  });
+}
+
+// ─── Catalogues (Phase 3 — scoped data catalogues) ──────────────────────
+
+export async function getCatalogues(projectId) {
+  return db.catalogues.where('projectId').equals(projectId).sortBy('order');
+}
+
+export async function saveCatalogue(catalogue) {
+  catalogue.updatedAt = Date.now();
+  if (!catalogue.createdAt) catalogue.createdAt = Date.now();
+  if (!catalogue.id) catalogue.id = generateId();
+  await db.catalogues.put(catalogue);
+  return catalogue;
+}
+
+export async function deleteCatalogue(id) {
+  return db.transaction('rw', [db.catalogues, db.sections, db.variables], async () => {
+    await db.variables.where('catalogueId').equals(id).delete();
+    await db.sections.where('catalogueId').equals(id).delete();
+    await db.catalogues.delete(id);
+  });
+}
+
+// ─── Sections (within catalogues) ───────────────────────────────────────
+
+export async function getSections(catalogueId) {
+  return db.sections.where('catalogueId').equals(catalogueId).sortBy('order');
+}
+
+export async function getAllSections(projectId) {
+  return db.sections.where('projectId').equals(projectId).sortBy('order');
+}
+
+export async function saveSection(section) {
+  section.updatedAt = Date.now();
+  if (!section.createdAt) section.createdAt = Date.now();
+  if (!section.id) section.id = generateId();
+  await db.sections.put(section);
+  return section;
+}
+
+export async function deleteSection(id) {
+  return db.transaction('rw', [db.sections, db.variables], async () => {
+    // Unassign variables from this section (set sectionId to null)
+    const vars = await db.variables.where('sectionId').equals(id).toArray();
+    for (const v of vars) {
+      await db.variables.update(v.id, { sectionId: null });
+    }
+    await db.sections.delete(id);
   });
 }
 
@@ -174,6 +244,27 @@ export async function setSetting(key, value) {
 
 export async function deleteSetting(key) {
   return db.settings.delete(key);
+}
+
+/**
+ * Clear all data catalogue records (variables, sections, catalogues) and reset
+ * the cookbook seed flag so it regenerates on next load.
+ * Does NOT touch instances, projects, tickets, or tokens.
+ */
+export async function clearAllDataRecords() {
+  await db.transaction('rw', [db.variables, db.sections, db.catalogues, db.settings], async () => {
+    await db.variables.clear();
+    await db.sections.clear();
+    await db.catalogues.clear();
+    // Remove all cookbook-seeded-* settings so they re-seed
+    const allSettings = await db.settings.toArray();
+    for (const s of allSettings) {
+      if (s.key.startsWith('cookbook-seeded-')) {
+        await db.settings.delete(s.key);
+      }
+    }
+  });
+  console.log('[storage] Cleared all variables, sections, catalogues, and cookbook seed flags');
 }
 
 /**

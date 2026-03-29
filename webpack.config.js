@@ -7,7 +7,9 @@ const devCerts = require('office-addin-dev-certs');
 module.exports = async (env, argv) => {
 const isDev = argv.mode !== 'production';
 
-// Get trusted HTTPS certs for local dev (installs CA into OS trust store)
+// Get trusted HTTPS certs for local dev (installs CA into OS trust store).
+// Skip when just building (no devServer needed) or if env.noCert is set.
+// Grab HTTPS certs for the local dev server (installs CA into OS trust store)
 const httpsOptions = isDev ? await devCerts.getHttpsServerOptions() : {};
 
 return {

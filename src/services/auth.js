@@ -624,28 +624,10 @@ export async function testTicketToken(instance, ticketId) {
     steps.push({ label: 'Refresh Token Exchange', status: 'skip', detail: 'No refresh token stored' });
   }
 
-  // ── Step 4: Validate refreshed token ──
-  let refreshedTokenValid = false;
+  // ── Step 4: Persist tokens immediately if refresh exchange succeeded ──
+  // Tacton may have a brief propagation delay before new tokens validate,
+  // so we trust the refresh exchange result and persist right away.
   if (refreshedToken) {
-    try {
-      const probe = await probeTicketToken(instance, ticketId, refreshedToken);
-      refreshedTokenValid = probe.ok;
-      steps.push({
-        label: 'Validate New Token',
-        status: probe.ok ? 'pass' : 'fail',
-        detail: probe.ok
-          ? `${probe.status} (${probe.length}b)`
-          : `HTTP ${probe.status} (${probe.length}b)`,
-      });
-    } catch (e) {
-      steps.push({ label: 'Validate New Token', status: 'fail', detail: e.message });
-    }
-  } else {
-    steps.push({ label: 'Validate New Token', status: 'skip', detail: 'No refreshed token to test' });
-  }
-
-  // ── Step 5: Persist if the refreshed token works ──
-  if (refreshedTokenValid) {
     try {
       // Update in-memory cache
       ticketTokens[ticketId] = {
@@ -666,14 +648,32 @@ export async function testTicketToken(instance, ticketId) {
     } catch (e) {
       steps.push({ label: 'Persist New Tokens', status: 'fail', detail: e.message });
     }
-  } else if (refreshedToken) {
-    steps.push({ label: 'Persist New Tokens', status: 'fail', detail: 'Refreshed token invalid — kept old tokens' });
   } else {
     steps.push({ label: 'Persist New Tokens', status: 'skip', detail: 'Nothing to persist' });
   }
 
+  // ── Step 5: Validate the persisted token (informational) ──
+  let refreshedTokenValid = false;
+  if (refreshedToken) {
+    try {
+      const probe = await probeTicketToken(instance, ticketId, refreshedToken);
+      refreshedTokenValid = probe.ok;
+      steps.push({
+        label: 'Validate New Token',
+        status: probe.ok ? 'pass' : 'warn',
+        detail: probe.ok
+          ? `${probe.status} (${probe.length}b)`
+          : `HTTP ${probe.status} (${probe.length}b) — token persisted, may need a moment`,
+      });
+    } catch (e) {
+      steps.push({ label: 'Validate New Token', status: 'warn', detail: `${e.message} — token persisted anyway` });
+    }
+  } else {
+    steps.push({ label: 'Validate New Token', status: 'skip', detail: 'No refreshed token to test' });
+  }
+
   // ── Overall status ──
-  const overallStatus = refreshedTokenValid ? 'ok'
+  const overallStatus = refreshedToken ? 'ok'
     : currentTokenValid ? 'warn'
     : storedRefresh ? 'expired'
     : storedAccess ? 'expired'

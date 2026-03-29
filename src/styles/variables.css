@@ -39,6 +39,7 @@
   --orange-bg: #FFF1E5;
 
   /* ===== BORDER RADIUS ===== */
+  --radius-sm: 4px;
   --radius: 6px;
   --radius-lg: 10px;
 

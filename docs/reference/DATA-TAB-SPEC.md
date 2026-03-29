@@ -214,9 +214,23 @@ Each variable in the list view renders as a compact card:
 | `{"val1","val2"}` | List | Static enumeration |
 
 ### BOM Variable
-- **Source**: Always `#this.flatbom` (or variant like `flatbom`)
+- **Source**: BOM data is **per ConfiguredProduct**, not per Solution. The real pattern is:
+  ```
+  $for{#cp in solution.related('ConfiguredProduct','solution')}$
+    $rowgroup{#cp.flatbom}$  ← BOM is scoped to each CP
+  $endfor$
+  ```
+- **Source variants**: `#cp.flatbom` (flat BOM), `#cp.bom` (hierarchical BOM), `#cp.bomItems` (line items)
+- **Source discovery**: The wizard discovers sources from the model by:
+  1. Finding ConfiguredProduct via reverse-ref scan on the starting object
+  2. Scanning CP's related objects for BOM-like collections
+  3. Also discovering Solution-level related collections (non-BOM)
+- **Instance selection**: When a source returns multiple instances (e.g., 3 ConfiguredProducts), the user can:
+  - **Iterate all**: Generate `$for{#cp in solution.related('ConfiguredProduct','solution')}$` pattern
+  - **Pick one**: Select a specific instance by identifying field to scope the expression
 - **Filters**: One or more conditions on BOM item fields
-- **Output**: Array of matching BOM line items
+- **Transforms**: Optional chain of `.groupBy()`, `.flatten()`, `.sum()`, `.size()`, `.sort()`, `.{field}` extract
+- **Output**: Array of matching BOM line items (or aggregated result after transforms)
 - **Downstream use**: `$for{#item in #pump}$`, row groups, sum/count aggregations
 - **Fields available**: Depend on the ConfiguredProduct model (discovered via describe API)
 - **Common fields** (from Pentair): `jdeSegmentGroup`, `jdePartNumber`, `material`, `description`, `positionPath`, `name`
@@ -551,11 +565,33 @@ When browsing a path with multiple records, the prototype offers a filter builde
 
 ## Data Transforms
 
+There are two distinct levels of transforms in DocGen:
+
+### 1. Pipeline Transforms (Data Tab — Built into Variable Definition)
+
+These transforms are part of the `$define{}$` expression itself. They shape the *data structure* before it's used in templates. The wizard presents these as a visual chain after source + filter.
+
+| Transform | Syntax | Purpose | Needs Field |
+|-----------|--------|---------|-------------|
+| Extract field | `.{field}` | Pick a single field from each item | Yes |
+| Group by | `.groupBy('field')` | Group items by field value | Yes |
+| Flatten | `.flatten()` | Flatten nested collections | No |
+| Sum | `.sum()` | Sum numeric values | No |
+| Count | `.size()` | Count items | No |
+| Sort | `.sort('field')` | Sort by field | Yes |
+
+**Chaining example:**
+```
+$define{#segmentTotals = #cp.flatbom.{?qty>0}.groupBy('segmentGroup').{netPrice}.sum()}$
+```
+
+The pipeline is visually rendered as numbered steps: Source → Filter → Transform₁ → Transform₂ → Result. Each step shows its syntax and can be removed independently.
+
+### 2. Display Transforms (Builder Tab — Applied at Render Time)
+
 > Ported from prototype `transforms.js` — 40+ transforms that modify how values display.
 
-Transforms append to expressions: `${#pump.price.price(0)}$`, `${#item.date.date("SHORT")}$`
-
-### Transform Library
+These append to `${}$` inline expressions: `${#pump.price.price(0)}$`, `${#item.date.date("SHORT")}$`
 
 | Category | Transforms | Applies To |
 |----------|-----------|------------|
@@ -573,7 +609,9 @@ Transforms append to expressions: `${#pump.price.price(0)}$`, `${#item.date.date
 
 ### Integration with Data Tab
 
-The expression generator should append selected transforms to the generated expression. The variable detail panel should offer a "Format" section where the user can pick transforms appropriate to the variable's detected field type.
+Pipeline transforms are generated as part of the `$define{}$` expression by `generateExpression()` in variables.js. The transform chain is stored as an array on the variable object: `transforms: [{ type: 'groupBy', field: 'segmentGroup' }, { type: 'sum' }]`.
+
+Display transforms are a Builder/Preview concern — they modify output formatting, not data structure.
 
 ---
 
@@ -584,19 +622,25 @@ The expression generator should append selected transforms to the generated expr
 The Data tab should offer a "Quick Start" or "From Template" option when creating a new variable, seeded with common patterns:
 
 ### BOM Patterns
-- **Flat BOM filter**: `#this.flatbom.{?field=="value"}`
+- **Flat BOM per CP**: `#cp.flatbom.{?field=="value"}` (within a `$for{#cp in ...}$`)
+- **Legacy flat BOM**: `#this.flatbom.{?field=="value"}` (when starting object is CP)
 - **Nested BOM** (sub-items): `#var.subItems`
-- **Catch-all**: `#this.flatbom.{?NOT IN #var1, #var2}`
+- **Catch-all**: `#cp.flatbom.{?NOT IN #pump, #motor}`
 
 ### Object Patterns
 - **Account name**: `solution.opportunity.account.name`
-- **Related entities**: `solution.related('ConfiguredProduct','solution')`
+- **All ConfiguredProducts**: `solution.related('ConfiguredProduct','solution')`
+- **Related entities**: `solution.opportunity.account.related("Contact","account")`
 - **Config attribute**: `getConfigurationAttribute("node.field").value`
 
-### Collection Operations
+### Collection Operations (Transform Pipeline)
 - **Sum**: `#bomVar.{price}.sum()`
 - **Filter + project**: `#bomVar.{?qty>0}.{description}`
 - **Sort**: `#bomVar.sort("name")`
+- **Group by**: `#bomVar.groupBy('segmentGroup')`
+- **Flatten**: `#grouped.flatten()`
+- **Count**: `#bomVar.size()`
+- **Chained**: `#cp.flatbom.{?qty>0}.groupBy('segmentGroup').flatten().sum()`
 
 ### Null Safety
 - **Ternary**: `#v != null ? #v.value : "N/A"`

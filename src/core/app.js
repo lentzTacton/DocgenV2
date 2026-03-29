@@ -7,7 +7,9 @@ import { createSetupView } from '../views/setup/setup-view.js';
 import { createDataView } from '../views/data/data-view.js';
 import { createBuilderView } from '../views/builder/builder-view.js';
 import { createPreviewView } from '../views/preview/preview-view.js';
-import { loadAiSettings } from './storage.js';
+import { loadAiSettings, clearAllDataRecords, getSetting, setSetting } from './storage.js';
+import { startSelectionListener } from '../services/word-api.js';
+import { initSelectionPanel } from '../views/data/selection-panel.js';
 
 function createHeader() {
   return el('div', { class: 'header' }, [
@@ -78,7 +80,17 @@ function updateModeToggleState() {
   }
 }
 
-export function initApp() {
+export async function initApp() {
+  // ── One-time data reset (remove this block after it has run once) ──
+  const resetDone = await getSetting('_uuid_reset_v2');
+  if (!resetDone) {
+    console.log('[app] One-time data reset: clearing old records for UUID migration…');
+    await clearAllDataRecords();
+    await setSetting('_uuid_reset_v2', { doneAt: Date.now() });
+    console.log('[app] Reset complete — cookbook will re-seed with UUID IDs.');
+  }
+  // ── End one-time reset ──
+
   const appContainer = qs('#app');
 
   // Main app wrapper (header + tabs + zones) — hidden until splash dismissed
@@ -147,4 +159,8 @@ export function initApp() {
 
   // Initial toggle state
   updateModeToggleState();
+
+  // Selection panel + Word listener
+  initSelectionPanel();
+  startSelectionListener();
 }
