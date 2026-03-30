@@ -817,6 +817,19 @@ select.input {
   gap: 8px;
 }
 
+/* Ticket rows with a main+actions layout use column direction */
+.ticket-row:has(.ticket-row-main) {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+}
+
+.ticket-row-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .ticket-row:last-child {
   border-bottom: none;
 }
@@ -953,6 +966,130 @@ select.input {
 @keyframes token-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
+}
+
+/* ── Inline actions row (below main row in selected ticket) ── */
+.ticket-inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0 2px 22px; /* left-align with text (past star) */
+  margin-top: 4px;
+}
+
+.ticket-inline-hint {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+
+.ticket-inline-btn {
+  background: none;
+  border: none;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border-radius: 3px;
+  transition: color 0.15s, background 0.15s;
+}
+
+.ticket-inline-btn:hover {
+  color: var(--tacton-blue);
+  background: var(--tacton-light);
+}
+
+.ticket-inline-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.ticket-inline-btn-primary {
+  color: var(--tacton-blue);
+  font-weight: 600;
+}
+
+/* ── Token badge in list row (with hover tooltip) ── */
+.ticket-token-badge-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.ticket-token-badge-wrap .badge-sm {
+  font-size: 9px;
+  padding: 1px 6px;
+  line-height: 1.4;
+}
+
+.ticket-token-badge-wrap .conn-tooltip {
+  display: none;
+  position: fixed;
+  z-index: 9999;
+  min-width: 260px;
+  pointer-events: auto;
+}
+
+/* Show tooltip via JS class (not :hover) so mouse can enter the tooltip */
+.ticket-token-badge-wrap.tooltip-visible .conn-tooltip {
+  display: block;
+}
+
+/* "Get token" icon button next to badge */
+.ticket-get-token-icon {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  padding: 1px 2px;
+  display: inline-flex;
+  align-items: center;
+  margin-left: 2px;
+  border-radius: 3px;
+  transition: color 0.15s, background 0.15s;
+}
+.ticket-get-token-icon:hover {
+  color: var(--tacton-blue);
+  background: var(--tacton-light);
+}
+
+/* Scrollable tooltip steps */
+.ticket-badge-tooltip .conn-tooltip-steps {
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+/* Action buttons inside the tooltip */
+.tooltip-actions {
+  display: flex;
+  gap: 8px;
+  padding: 8px 10px 6px;
+  border-top: 1px solid var(--border-light);
+  margin-top: 4px;
+}
+.tooltip-action-btn {
+  background: none;
+  border: none;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 3px 6px;
+  border-radius: 3px;
+  transition: color 0.15s, background 0.15s;
+}
+.tooltip-action-btn:hover {
+  color: var(--tacton-blue);
+  background: var(--tacton-light);
+}
+
+/* Small btn variant */
+.btn-xs {
+  font-size: 11px;
+  padding: 3px 8px;
+  line-height: 1.3;
 }
 
 /* ===== EMPTY / LOADING / ERROR STATES ===== */
@@ -1495,11 +1632,7 @@ select.input {
 .locked-reauth-link:hover {
   text-decoration: underline;
 }
-.locked-reauth-section {
-  padding: 10px 16px 12px;
-  border-top: 1px solid var(--border-light);
-  background: var(--bg);
-}
+/* .locked-reauth-section removed — now using shared .ticket-auth-section */
 .locked-reauth-header {
   display: flex;
   align-items: center;
@@ -1577,36 +1710,7 @@ select.input {
 #locked-test-body {
   margin-top: 8px;
 }
-.locked-test-steps {
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-}
-.locked-test-step {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 0;
-  font-size: 12px;
-}
-.locked-test-step + .locked-test-step {
-  border-top: 1px solid var(--border-light);
-}
-.locked-test-icon {
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 10px;
-  font-weight: 700;
-  flex-shrink: 0;
-}
-.locked-test-icon.lt-pass { background: var(--success-bg); color: var(--success); }
-.locked-test-icon.lt-fail { background: var(--danger-bg, rgba(220,53,69,0.08)); color: var(--danger); }
-.locked-test-icon.lt-skip { background: var(--bg); color: var(--text-tertiary); }
-.locked-test-icon.lt-checking { background: var(--bg); color: var(--text-tertiary); }
+/* .locked-test-steps/.locked-test-step/.locked-test-icon removed — now using shared .conn-tooltip-step */
 .locked-test-label {
   font-weight: 500;
   color: var(--text);
@@ -1963,9 +2067,64 @@ select.input {
   text-decoration: underline;
 }
 
+/* Auth field layout — stacked access + refresh inputs */
+.ticket-auth-fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.ticket-auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.input-with-toggle {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.input-with-toggle .input {
+  flex: 1;
+  padding-right: 30px;
+}
+.token-visibility-toggle {
+  position: absolute;
+  right: 4px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 4px;
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  border-radius: 3px;
+}
+.token-visibility-toggle:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.ticket-auth-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.ticket-auth-label-hint {
+  font-weight: 400;
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
 .ticket-auth-input-row {
   display: flex;
   gap: var(--space-xs);
+  margin-top: var(--space-sm);
 }
 
 .ticket-auth-input-row .input {
@@ -1977,7 +2136,8 @@ select.input {
   flex-shrink: 0;
 }
 
-/* Authorized state: hide input row, show compact status */
+/* Authorized state: hide fields + button row, show compact status */
+.ticket-auth-section.is-authorized .ticket-auth-fields,
 .ticket-auth-section.is-authorized .ticket-auth-input-row {
   display: none;
 }
@@ -3952,6 +4112,14 @@ select.input {
 }
 .obj-selected-progress .icon { color: var(--accent, #0969DA); }
 .obj-selected-progress .obj-selected-expr { color: var(--accent, #0969DA); }
+
+.obj-selected-warn {
+  background: linear-gradient(135deg, #FFF8E1 0%, #FFECB3 100%);
+  border: 1px solid #FFD54F;
+  border-radius: 6px;
+}
+.obj-selected-warn .icon { color: #F57F17; }
+.obj-selected-warn .obj-selected-expr { color: #E65100; }
 
 /* ─── Transform cards (Transformation tab sections) ──────────────── */
 .wiz-transform-card {

@@ -227,13 +227,10 @@ export async function getBomSources() {
   const startObj = getStartingObject(); // typically 'Solution'
 
   // ── 1. Find ConfiguredProduct relationship ──────────────────────────
-  //    Pattern: solution.related('ConfiguredProduct','solution') → #cp
-  //    Then from each CP: #cp.flatbom, #cp.bom, #cp.subItems, etc.
   const startObjDef = objects.find(o => o.name === startObj);
   let cpObjectName = null;
   let cpRefAttr = null;
 
-  // Check reverse refs: look for objects that reference the starting object
   for (const obj of objects) {
     for (const attr of obj.attributes) {
       if (attr.refType === startObj) {
@@ -246,7 +243,6 @@ export async function getBomSources() {
     }
   }
 
-  // Fallback: look for any object with 'configured' or 'product' in the name
   if (!cpObjectName) {
     cpObjectName = allNames.find(n =>
       n.toLowerCase().includes('configuredproduct') ||
@@ -254,119 +250,50 @@ export async function getBomSources() {
     ) || null;
   }
 
+  // ── Collect all objects we need records for, then fetch in parallel ──
+  // Each entry: { obj, category, meta } — we batch fetchRecords calls
+  const fetchJobs = [];
+
   // ── 2. BOM sources (per ConfiguredProduct) ──────────────────────────
   if (cpObjectName) {
     const cpObj = objects.find(o => o.name === cpObjectName);
     if (cpObj) {
-      // Look at CP's attributes for BOM-like collections
       const bomCandidates = ['flatbom', 'bom', 'bomitems', 'subitems', 'flatbomitem', 'bomlineitem'];
 
-      // Check reverse refs pointing TO ConfiguredProduct (objects that have a ref to CP)
       for (const obj of objects) {
         const lower = obj.name.toLowerCase();
         const isBomLike = bomCandidates.some(c => lower.includes(c)) ||
                           lower.includes('bom') || lower.includes('lineitem');
         if (!isBomLike) continue;
-
-        // Check if this object references CP
         const hasRefToCP = obj.attributes.some(a => a.refType === cpObjectName);
         if (hasRefToCP || isBomLike) {
-          const records = await fetchRecords(obj.name).catch(() => []);
-
-          // Determine the expression name
           let exprName;
           if (lower.includes('flatbom') || lower === 'flatbomitem') exprName = 'flatbom';
           else if (lower === 'bomitem' || lower === 'bomlineitem') exprName = 'bomItems';
           else if (lower === 'bom' || lower.endsWith('bom')) exprName = 'bom';
           else exprName = obj.name;
-
-          const expression = `#cp.${exprName}`;
-          const description = exprName === 'flatbom' ? 'Flat BOM — all items at one level'
-            : exprName === 'bom' ? 'Hierarchical BOM — nested levels'
-            : exprName === 'bomItems' ? 'BOM line items'
-            : `${obj.name} items`;
-
-          sources.push({
-            name: exprName,
-            expression,
-            count: records.length,
-            objectName: obj.name,
-            category: 'bom',
-            description,
-            cpContext: {
-              objectName: cpObjectName,
-              refAttr: cpRefAttr,
-              expression: `${startObj.toLowerCase()}.related('${cpObjectName}','${cpRefAttr}')`,
-            },
-          });
+          fetchJobs.push({ objectName: obj.name, category: 'bom', exprName });
         }
-      }
-
-      // Also check for well-known collection attributes on CP itself
-      // (some models expose .flatbom / .bom as virtual attributes)
-      const cpCtx = {
-        objectName: cpObjectName,
-        refAttr: cpRefAttr,
-        expression: `${startObj.toLowerCase()}.related('${cpObjectName}','${cpRefAttr}')`,
-      };
-      if (sources.length === 0) {
-        sources.push({
-          name: 'flatbom',
-          expression: '#cp.flatbom',
-          count: '?',
-          objectName: null,
-          category: 'bom',
-          description: 'Flat BOM — all items at one level',
-          cpContext: cpCtx,
-        });
-        sources.push({
-          name: 'bom',
-          expression: '#cp.bom',
-          count: '?',
-          objectName: null,
-          category: 'bom',
-          description: 'Hierarchical BOM — nested levels',
-          cpContext: cpCtx,
-        });
       }
     }
   } else {
-    // No CP found — fall back to #this patterns
     for (const obj of objects) {
       const lower = obj.name.toLowerCase();
       if (lower.includes('bom') || lower.includes('flatbom') || lower.includes('lineitem')) {
-        const records = await fetchRecords(obj.name).catch(() => []);
-        let exprName = lower.includes('flatbom') ? 'flatbom' : lower.includes('bom') ? 'bom' : obj.name;
-        sources.push({
-          name: exprName,
-          expression: `#this.${exprName}`,
-          count: records.length,
-          objectName: obj.name,
-          category: 'bom',
-          description: `${obj.name} items`,
-        });
+        const exprName = lower.includes('flatbom') ? 'flatbom' : lower.includes('bom') ? 'bom' : obj.name;
+        fetchJobs.push({ objectName: obj.name, category: 'bom-noCp', exprName });
       }
     }
   }
 
   // ── 3. Related object collections (per Solution) ────────────────────
-  //    Pattern: solution.related('ObjectType','refAttr')
   if (startObjDef) {
-    // Find objects that reference the starting object (reverse refs = related collections)
     for (const obj of objects) {
       if (obj.name === startObj) continue;
-      if (obj.name === cpObjectName) continue; // CP already handled above
+      if (obj.name === cpObjectName) continue;
       for (const attr of obj.attributes) {
         if (attr.refType === startObj) {
-          const records = await fetchRecords(obj.name).catch(() => []);
-          sources.push({
-            name: obj.name,
-            expression: `${startObj.toLowerCase()}.related('${obj.name}','${attr.name}')`,
-            count: records.length,
-            objectName: obj.name,
-            category: 'related',
-            description: `${obj.name} linked to ${startObj}`,
-          });
+          fetchJobs.push({ objectName: obj.name, category: 'related', attr: attr.name });
         }
       }
     }
@@ -374,14 +301,86 @@ export async function getBomSources() {
 
   // ── 4. ConfiguredProduct itself as a source ─────────────────────────
   if (cpObjectName && cpRefAttr) {
-    const cpRecords = await fetchRecords(cpObjectName).catch(() => []);
+    fetchJobs.push({ objectName: cpObjectName, category: 'cp-self' });
+  }
+
+  // ── Parallel fetch all records at once ──────────────────────────────
+  const recordResults = await Promise.all(
+    fetchJobs.map(job => fetchRecords(job.objectName).catch(() => []))
+  );
+
+  // ── Build sources from results ──────────────────────────────────────
+  const cpCtx = cpObjectName && cpRefAttr ? {
+    objectName: cpObjectName,
+    refAttr: cpRefAttr,
+    expression: `${startObj.toLowerCase()}.related('${cpObjectName}','${cpRefAttr}')`,
+  } : null;
+
+  fetchJobs.forEach((job, i) => {
+    const records = recordResults[i];
+    if (job.category === 'bom') {
+      const description = job.exprName === 'flatbom' ? 'Flat BOM — all items at one level'
+        : job.exprName === 'bom' ? 'Hierarchical BOM — nested levels'
+        : job.exprName === 'bomItems' ? 'BOM line items'
+        : `${job.objectName} items`;
+      sources.push({
+        name: job.exprName,
+        expression: `#cp.${job.exprName}`,
+        count: records.length,
+        objectName: job.objectName,
+        category: 'bom',
+        description,
+        cpContext: cpCtx,
+      });
+    } else if (job.category === 'bom-noCp') {
+      sources.push({
+        name: job.exprName,
+        expression: `#this.${job.exprName}`,
+        count: records.length,
+        objectName: job.objectName,
+        category: 'bom',
+        description: `${job.objectName} items`,
+      });
+    } else if (job.category === 'related') {
+      sources.push({
+        name: job.objectName,
+        expression: `${startObj.toLowerCase()}.related('${job.objectName}','${job.attr}')`,
+        count: records.length,
+        objectName: job.objectName,
+        category: 'related',
+        description: `${job.objectName} linked to ${startObj}`,
+      });
+    } else if (job.category === 'cp-self') {
+      sources.push({
+        name: cpObjectName,
+        expression: `${startObj.toLowerCase()}.related('${cpObjectName}','${cpRefAttr}')`,
+        count: records.length,
+        objectName: cpObjectName,
+        category: 'related',
+        description: 'Configured products on this solution',
+      });
+    }
+  });
+
+  // Well-known fallback if no BOM objects found with CP context
+  if (cpObjectName && cpRefAttr && !sources.some(s => s.category === 'bom')) {
     sources.push({
-      name: cpObjectName,
-      expression: `${startObj.toLowerCase()}.related('${cpObjectName}','${cpRefAttr}')`,
-      count: cpRecords.length,
-      objectName: cpObjectName,
-      category: 'related',
-      description: 'Configured products on this solution',
+      name: 'flatbom',
+      expression: '#cp.flatbom',
+      count: '?',
+      objectName: null,
+      category: 'bom',
+      description: 'Flat BOM — all items at one level',
+      cpContext: cpCtx,
+    });
+    sources.push({
+      name: 'bom',
+      expression: '#cp.bom',
+      count: '?',
+      objectName: null,
+      category: 'bom',
+      description: 'Hierarchical BOM — nested levels',
+      cpContext: cpCtx,
     });
   }
 

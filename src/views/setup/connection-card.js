@@ -15,6 +15,7 @@
 
 import { el, qs, clear, show, hide } from '../../core/dom.js';
 import { iconEl, icon } from '../../components/icon.js';
+import { renderDiagnosticSteps } from '../../components/diagnostic-steps.js';
 import state from '../../core/state.js';
 import {
   getInstances,
@@ -23,6 +24,7 @@ import {
   getInstance,
   loadFavorites,
   saveFavorites,
+  getSetting,
 } from '../../core/storage.js';
 import { testAdminCredentials, clearAdminTokenCache } from '../../services/auth.js';
 
@@ -240,6 +242,12 @@ async function initInstances() {
   allInstances = await getInstances();
   renderInstanceList();
 
+  // Skip auto-connect when config is locked — the boot() function in
+  // setup-view handles the connect sequence explicitly and predictably.
+  // initInstances still loads the list so the form is ready if the user unlocks.
+  const hasLockedConfig = await getSetting('config-locked');
+  if (hasLockedConfig) return;
+
   // Auto-select first favorite, or first instance if none favorited
   if (allInstances.length > 0) {
     const firstFav = allInstances.find(i => instanceFavs.has(String(i.id)));
@@ -311,10 +319,9 @@ async function handleTestConnection() {
   // Clear any previous error
   showStatus('', '');
 
-  // Clear cached token so we actually re-test
+  // Force a fresh client_credentials grant for explicit user test
   clearAdminTokenCache(instance.url);
-
-  const result = await testAdminCredentials(instance);
+  const result = await testAdminCredentials(instance, { forceRefresh: true });
 
   btn.textContent = 'Test Connection';
   btn.disabled = false;
@@ -354,7 +361,11 @@ async function handleSaveInstance() {
   btn.disabled = true;
 
   try {
-    // Normalize URL: strip trailing slash
+    // Normalize URL: add https:// if no protocol, strip trailing slash
+    instance.url = instance.url.trim();
+    if (instance.url && !/^https?:\/\//i.test(instance.url)) {
+      instance.url = 'https://' + instance.url;
+    }
     instance.url = instance.url.replace(/\/+$/, '');
 
     // Auto-generate name from URL if empty
@@ -370,10 +381,10 @@ async function handleSaveInstance() {
     const saved = await saveInstance(instance);
     selectedInstanceId = saved.id;
 
-    // Clear cached token to force fresh test
-    clearAdminTokenCache(saved.url);
-
-    // Test credentials
+    // Test admin credentials — uses Dexie-persisted token when available
+    // to avoid a fresh client_credentials grant that can invalidate
+    // ticket-scoped tokens sharing the same OAuth clientId.
+    // Only the explicit "Test Connection" button forces a fresh grant.
     const test = await testAdminCredentials(saved);
 
     updateValidationSteps(saved, test);
@@ -763,8 +774,6 @@ function updateBadge() {
 
   // Build tooltip
   const tooltip = el('div', { class: 'conn-tooltip' });
-  const ICONS = { pass: '✓', fail: '✗', skip: '–', warn: '!' };
-
   // Admin connection section
   const adminBadge = (status === 'connected' || testPassed) ? 'ok' : status === 'error' ? 'error' : 'warn';
   const adminLabel = (status === 'connected' || testPassed) ? 'All Good' : status === 'error' ? 'Error' : 'Pending';
@@ -776,15 +785,7 @@ function updateBadge() {
   tooltip.appendChild(header);
 
   const stepsEl = el('div', { class: 'conn-tooltip-steps' });
-  for (const step of validationSteps) {
-    stepsEl.appendChild(el('div', { class: 'conn-tooltip-step' }, [
-      el('span', { class: `conn-tooltip-icon tt-${step.status}` }, ICONS[step.status] || '–'),
-      el('div', { class: 'conn-tooltip-body' }, [
-        el('div', { class: 'conn-tooltip-label' }, step.label),
-        el('div', { class: 'conn-tooltip-detail' }, step.detail),
-      ]),
-    ]));
-  }
+  renderDiagnosticSteps(stepsEl, validationSteps);
   tooltip.appendChild(stepsEl);
 
   badge.appendChild(tooltip);

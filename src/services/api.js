@@ -101,9 +101,10 @@ export async function ticketFetch(instance, ticketId, path, opts = {}) {
 
   const res = await authFetch(instance.url, fullPath, token, fetchOpts);
 
-  // Auto-retry on 401: clear cached token and get a fresh one via refresh flow
-  if (res.status === 401 && !opts._retried) {
-    console.log('[api] 401 on ticket fetch — clearing cache and retrying…');
+  // Auto-retry on 401/403: clear cached token and get a fresh one via refresh flow
+  // Tacton returns 403 (not just 401) for expired/invalid tokens
+  if ((res.status === 401 || res.status === 403) && !opts._retried) {
+    console.log(`[api] ${res.status} on ticket fetch — clearing cache and retrying…`);
     clearTicketTokenCache(ticketId);
     const { token: freshToken } = await getTicketToken(instance, ticketId);
     if (freshToken && freshToken !== token) {
@@ -113,8 +114,8 @@ export async function ticketFetch(instance, ticketId, path, opts = {}) {
         ok: retryRes.ok,
         status: retryRes.status,
         body: retryBody,
-        needsAuth: retryRes.status === 401,
-        diag: [...diag, '401 retry: ' + (retryRes.ok ? 'succeeded' : 'failed')],
+        needsAuth: retryRes.status === 401 || retryRes.status === 403,
+        diag: [...diag, `${res.status} retry: ` + (retryRes.ok ? 'succeeded' : 'failed')],
       };
     }
   }
@@ -125,7 +126,7 @@ export async function ticketFetch(instance, ticketId, path, opts = {}) {
     ok: res.ok,
     status: res.status,
     body,
-    needsAuth: res.status === 401,
+    needsAuth: res.status === 401 || res.status === 403,
     diag,
   };
 }
@@ -151,7 +152,7 @@ export async function listTickets(instance) {
 /**
  * Fetch the object model (describe) for a ticket.
  * Tries multiple token/endpoint combinations like TactonUtil:
- *   1. Ticket token → ticket-scoped describe
+ *   1. Ticket token → ticket-scoped describe (via ticketFetch, with built-in 403 retry)
  *   2. Admin token → unscoped describe
  *   3. Admin token → ticket-scoped describe
  *
@@ -162,70 +163,44 @@ export async function listTickets(instance) {
 export async function getModel(instance, ticketId) {
   const attempts = [];
 
-  // Helper: try a describe call — returns { xml, status }
-  async function tryDescribe(label, instanceUrl, path, token) {
+  // Helper for admin-token attempts (no retry needed — admin tokens don't expire as fast)
+  async function tryAdminDescribe(label, path, token) {
     try {
-      const res = await authFetch(instanceUrl, path, token);
+      const res = await authFetch(instance.url, path, token);
       const body = await res.text();
       const isHtml = body.trimStart().startsWith('<!DOCTYPE') || body.trimStart().startsWith('<html');
       attempts.push(`${label}: ${res.status} (${body.length}b${isHtml ? ', HTML' : ''})`);
-      if (res.ok && !isHtml && body.includes('<resource')) return { xml: body, status: res.status };
-      return { xml: null, status: res.status };
+      if (res.ok && !isHtml && body.includes('<resource')) return body;
+      return null;
     } catch (e) {
       attempts.push(`${label}: ERROR ${e.message}`);
+      return null;
     }
-    return { xml: null, status: 0 };
   }
 
-  // 1. Ticket-scoped token (with 401 retry — only on 401, not 403)
-  const { token: ttk, diag } = await getTicketToken(instance, ticketId);
-  if (ttk) {
-    let result = await tryDescribe(
-      'ticket-token',
-      instance.url,
-      `/!tickets~${ticketId}/api-v2.2/describe`,
-      ttk,
-    );
-    if (result.xml) {
-      return { ok: true, objects: parseModelXml(result.xml), xml: result.xml };
+  // 1. Ticket-scoped token — delegates retry to ticketFetch
+  const res = await ticketFetch(instance, ticketId, 'api-v2.2/describe');
+  if (res.ok && res.body) {
+    const isHtml = res.body.trimStart().startsWith('<!DOCTYPE') || res.body.trimStart().startsWith('<html');
+    if (!isHtml && res.body.includes('<resource')) {
+      return { ok: true, objects: parseModelXml(res.body), xml: res.body };
     }
-    // Only retry with fresh token on 401 (Unauthorized), not 403 (Forbidden)
-    if (result.status === 401) {
-      clearTicketTokenCache(ticketId);
-      const { token: freshTtk } = await getTicketToken(instance, ticketId);
-      if (freshTtk && freshTtk !== ttk) {
-        result = await tryDescribe(
-          'ticket-token-retry',
-          instance.url,
-          `/!tickets~${ticketId}/api-v2.2/describe`,
-          freshTtk,
-        );
-        if (result.xml) {
-          return { ok: true, objects: parseModelXml(result.xml), xml: result.xml };
-        }
-      }
-    }
+    attempts.push(`ticket-token: ${res.status} (${res.body.length}b${isHtml ? ', HTML' : ''})`);
+  } else if (res.needsAuth) {
+    attempts.push(`ticket-token: needs auth`);
+  } else {
+    attempts.push(`ticket-token: ${res.status}`);
   }
 
   // 2. Admin token — unscoped
   try {
     const adminToken = await ensureAdminToken(instance);
-    let xml = await tryDescribe(
-      'admin-unscoped',
-      instance.url,
-      '/api-v2.2/describe',
-      adminToken,
-    );
+    const xml = await tryAdminDescribe('admin-unscoped', '/api-v2.2/describe', adminToken);
     if (xml) return { ok: true, objects: parseModelXml(xml), xml };
 
     // 3. Admin token — ticket-scoped
-    xml = await tryDescribe(
-      'admin-ticket',
-      instance.url,
-      `/!tickets~${ticketId}/api-v2.2/describe`,
-      adminToken,
-    );
-    if (xml) return { ok: true, objects: parseModelXml(xml), xml };
+    const xml2 = await tryAdminDescribe('admin-ticket', `/!tickets~${ticketId}/api-v2.2/describe`, adminToken);
+    if (xml2) return { ok: true, objects: parseModelXml(xml2), xml: xml2 };
   } catch (e) {
     attempts.push(`admin: ${e.message}`);
   }
@@ -247,41 +222,50 @@ export async function getModel(instance, ticketId) {
  * @returns {Promise<{ok: boolean, records?: Array, error?: string, needsAuth?: boolean}>}
  */
 export async function listRecords(instance, ticketId, objectName, listUrl) {
-  const { token } = await getTicketToken(instance, ticketId);
-  if (!token) return { ok: false, needsAuth: true, error: 'No token for this ticket' };
+  // Build the relative path (after /!tickets~{id}/) for ticketFetch.
+  // listUrl from the model may be:
+  //   - Full URL: "https://instance.com/!tickets~T-00001/api-v2.2/solution/list"
+  //   - Ticket-prefixed path: "/!tickets~T-00001/api-v2.2/solution/list"
+  //   - URL-encoded prefix: "/!tickets%7ET-00001/api-v2.2/solution/list"
+  //   - Bare relative path: "/api-v2.2/solution/list"
+  //   - null/empty → construct from objectName
+  // ticketFetch always prepends /!tickets~{id}/, so we must strip that prefix.
 
-  let path;
+  /**
+   * Strip the ticket path prefix from a URL/path string.
+   * Handles both unencoded (~) and URL-encoded (%7E/%7e) tilde variants.
+   */
+  function stripTicketPrefix(path) {
+    // Match /!tickets~{id}/ or /!tickets%7E{id}/ (case-insensitive %7e)
+    const re = new RegExp(`/!tickets(?:~|%7[Ee])${ticketId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/`);
+    const match = path.match(re);
+    if (match) {
+      return path.slice(match.index + match[0].length);
+    }
+    // No ticket prefix found — strip leading slash only
+    return path.replace(/^\//, '');
+  }
+
+  let relPath;
   if (listUrl && (listUrl.startsWith('http://') || listUrl.startsWith('https://'))) {
     try {
       const parsed = new URL(listUrl);
-      path = parsed.pathname + parsed.search;
+      relPath = stripTicketPrefix(parsed.pathname + parsed.search);
     } catch {
-      path = `/!tickets~${ticketId}/api-v2.2/${encodeURIComponent(objectName)}/list`;
+      relPath = `api-v2.2/${encodeURIComponent(objectName)}/list`;
     }
   } else if (listUrl) {
-    path = `/!tickets~${ticketId}${listUrl}`;
+    relPath = stripTicketPrefix(listUrl);
   } else {
-    path = `/!tickets~${ticketId}/api-v2.2/${encodeURIComponent(objectName)}/list`;
+    relPath = `api-v2.2/${encodeURIComponent(objectName)}/list`;
   }
 
   try {
-    let res = await authFetch(instance.url, path, token);
-
-    // Auto-retry on 401: clear cache, get fresh token, retry once
-    if (res.status === 401) {
-      console.log('[api] 401 on listRecords — clearing cache and retrying…');
-      clearTicketTokenCache(ticketId);
-      const { token: freshToken } = await getTicketToken(instance, ticketId);
-      if (freshToken && freshToken !== token) {
-        res = await authFetch(instance.url, path, freshToken);
-      }
-    }
-
+    const res = await ticketFetch(instance, ticketId, relPath);
     if (!res.ok) {
-      return { ok: false, error: `HTTP ${res.status}`, needsAuth: res.status === 401 };
+      return { ok: false, error: `HTTP ${res.status}`, needsAuth: res.needsAuth };
     }
-    const body = await res.text();
-    const records = parseRecordsXml(body);
+    const records = parseRecordsXml(res.body);
     return { ok: true, records };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -298,24 +282,22 @@ export async function listRecords(instance, ticketId, objectName, listUrl) {
  */
 export async function getRelated(instance, ticketId, params) {
   const { fromObject, toObject, via, direction = 'forward', recordId } = params;
-  const { token } = await getTicketToken(instance, ticketId);
-  if (!token) return { ok: false, needsAuth: true, error: 'No token' };
 
   try {
-    const fromPath = `/!tickets~${ticketId}/api-v2.2/${encodeURIComponent(fromObject)}/list`;
-    const toPath = `/!tickets~${ticketId}/api-v2.2/${encodeURIComponent(toObject)}/list`;
-
     const [fromRes, toRes] = await Promise.all([
-      authFetch(instance.url, fromPath, token),
-      authFetch(instance.url, toPath, token),
+      ticketFetch(instance, ticketId, `api-v2.2/${encodeURIComponent(fromObject)}/list`),
+      ticketFetch(instance, ticketId, `api-v2.2/${encodeURIComponent(toObject)}/list`),
     ]);
 
+    if (fromRes.needsAuth || toRes.needsAuth) {
+      return { ok: false, needsAuth: true, error: 'No token' };
+    }
     if (!fromRes.ok || !toRes.ok) {
       return { ok: false, error: 'HTTP error loading records' };
     }
 
-    const fromRecords = parseRecordsXml(await fromRes.text());
-    const toRecords = parseRecordsXml(await toRes.text());
+    const fromRecords = parseRecordsXml(fromRes.body);
+    const toRecords = parseRecordsXml(toRes.body);
 
     let result;
     if (direction === 'forward') {

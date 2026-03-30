@@ -27,8 +27,11 @@ import {
   exchangeTicketCode,
   testTicketToken,
   testAdminCredentials,
+  authorizeTicket,
 } from '../../services/auth.js';
 import { ticketFetch, adminFetch } from '../../services/api.js';
+import { renderDiagnosticSteps, STEP_ICONS } from '../../components/diagnostic-steps.js';
+import { buildAuthForm } from '../../components/auth-form.js';
 
 const STEPS = [
   { id: 'connection', label: 'Instance', icon: 'link', tip: 'Connect to your Tacton CPQ instance' },
@@ -46,6 +49,12 @@ const RING_CIRC = 2 * Math.PI * RING_RADIUS;
 let activeStep = 'connection';
 let lockWasReady = false;
 let progressCollapsed = true;
+
+/** Shared auth form instance for locked summary re-auth */
+let lockedAuthForm = null;
+
+/** Guard: true while handleLockedDiagnostics is running (prevents re-render mid-flight) */
+let _diagnosticsRunning = false;
 
 // Collapse state for locked summary sections (in-memory)
 const summaryCollapseState = {};
@@ -294,8 +303,9 @@ export function createSetupView(container) {
   });
 
   // Re-render locked summary when ticket token health check completes
+  // (but NOT when diagnostics panel is driving the update itself)
   state.on('tickets.tokenHealth', () => {
-    if (state.get('config.locked')) {
+    if (state.get('config.locked') && !_diagnosticsRunning) {
       renderLockedSummaryContent();
     }
   });
@@ -324,23 +334,69 @@ async function handleConfigLock() {
   }
 }
 
+/**
+ * Boot sequence for locked config — explicit, predictable, sequential.
+ *
+ * Replaces the old state-listener cascade:
+ *   loadLockedConfig → autoConnectPending → selectInstance → handleSaveInstance
+ *   → connection.status listener → handleRefreshTickets → health check
+ *
+ * Now:
+ *   1. Restore state from saved snapshot
+ *   2. Show locked summary, skip splash, switch to Data tab
+ *   3. Test admin credentials directly
+ *   4. Set connection.status = 'connected'
+ *      (this triggers the ticket-card listener which sequentially:
+ *       loads tickets → checks tokens → runs health check)
+ *
+ * State listeners remain for user-initiated actions (manual connect,
+ * ticket select, unlock). Only the boot path is explicit.
+ */
 async function loadLockedConfig() {
   const saved = await getSetting('config-locked');
   if (!saved) return;
 
-  // Restore all state from the saved snapshot
+  // ── Step 1: Restore state ──
   state.batch(applyConfigSnapshot(saved));
 
+  // ── Step 2: UI setup ──
   showLockedSummary();
   updateStepperState();
-
-  // Config is locked — skip the splash screen and go straight to Data tab.
-  // The splash normally gates entry, but with a saved config we bypass it.
   hideSplash();
   state.set('activeZone', 'data');
 
-  // Trigger auto-connect so credential health checks run in background
-  state.set('config.autoConnectPending', true);
+  // ── Step 3: Test admin credentials ──
+  const instanceId = saved.instanceId;
+  if (!instanceId) return;
+
+  const instance = await getInstance(instanceId);
+  if (!instance) return;
+
+  // Uses Dexie-persisted admin token when available (no fresh grant)
+  const test = await testAdminCredentials(instance);
+
+  if (!test.ok) {
+    console.warn('[boot] Admin credentials failed:', test.error);
+    state.batch({
+      'connection.instanceId': instanceId,
+      'connection.url': saved.url || '',
+      'connection.status': 'error',
+      'connection.error': test.error,
+    });
+    return;
+  }
+
+  // ── Step 4: Set connected ──
+  // The ticket-card's connection.status listener handles the rest:
+  //   await handleRefreshTickets()  →  checkAllTokens()
+  //   await runTicketTokenHealthCheck(preSelected)
+  // These are properly serialized (see ticket-card.js guards).
+  state.batch({
+    'connection.instanceId': instanceId,
+    'connection.url': saved.url || '',
+    'connection.status': 'connected',
+    'connection.error': null,
+  });
 }
 
 function showLockedSummary() {
@@ -419,8 +475,6 @@ function renderLockedSummaryContent() {
     },
   ];
 
-  const ICONS = { pass: '✓', fail: '✗', skip: '–', warn: '!' };
-
   for (const section of sections) {
     const secKey = `summary-${section.title}`;
     const collapsed = summaryCollapseState[secKey] === true;
@@ -467,7 +521,7 @@ function renderLockedSummaryContent() {
         }, item.value);
 
         // Build tooltip (appended to body to escape overflow:hidden parents)
-        const tooltip = buildTokenHealthTooltip(tokenHealth, tokenLabel, item.ok, ICONS);
+        const tooltip = buildTokenHealthTooltip(tokenHealth, tokenLabel, item.ok);
 
         badge.addEventListener('mouseenter', () => {
           const rect = badge.getBoundingClientRect();
@@ -509,54 +563,31 @@ function renderLockedSummaryContent() {
     }
   }
 
-  // ── Inline re-auth section (below the summary rows) ──
+  // ── Inline re-auth section (using shared auth form) ──
   if (ticketId !== '—') {
-    const reauthStatus = el('div', {
-      class: 'locked-reauth-status',
-      id: 'locked-reauth-status',
-      style: { display: 'none' },
+    lockedAuthForm = buildAuthForm({
+      idPrefix: 'locked-reauth',
+      title: `Authorize ${ticketId}`,
+      onSubmit: () => handleLockedReauth(ticketId),
+      onCancel: () => toggleLockedReauth(),
+      showRefreshToken: true,
     });
 
-    const reauthInput = el('input', {
-      class: 'input',
-      id: 'locked-reauth-input',
-      type: 'text',
-      placeholder: 'Paste token or auth code',
-    });
+    // Restore open/closed state
+    if (reauthWasOpen) lockedAuthForm.show();
 
-    const reauthBtn = el('button', {
-      class: 'btn btn-sm btn-primary',
-      id: 'locked-reauth-btn',
-      onclick: () => handleLockedReauth(ticketId),
-    }, 'Authorize');
-
-    const reauthSection = el('div', {
-      class: 'locked-reauth-section',
-      id: 'locked-reauth-section',
-      style: { display: reauthWasOpen ? '' : 'none' },
-    }, [
-      el('div', { class: 'locked-reauth-header' }, [
-        el('span', { class: 'locked-reauth-title' }, `Authorize ${ticketId}`),
-      ]),
-      el('div', { class: 'locked-reauth-input-row' }, [
-        reauthInput,
-        reauthBtn,
-      ]),
-      reauthStatus,
-    ]);
-
-    summaryEl.appendChild(reauthSection);
+    summaryEl.appendChild(lockedAuthForm.section);
   }
 
-  // ── Diagnostics section — collapsible ──
+  // ── Diagnostics section — collapsible (using shared diagnostic steps) ──
   const testStepsContainer = el('div', {
-    class: 'locked-test-steps',
+    class: 'conn-tooltip-steps',
     id: 'locked-test-steps',
   });
 
   // Show previous results if we have token health data
   if (tokenHealth?.steps) {
-    renderLockedTestSteps(testStepsContainer, tokenHealth.steps, 'ticket');
+    renderDiagnosticSteps(testStepsContainer, tokenHealth.steps);
   }
 
   const testBtn = el('button', {
@@ -593,17 +624,7 @@ function renderLockedSummaryContent() {
   summaryEl.appendChild(testSection);
 }
 
-/** Render test steps into a container */
-function renderLockedTestSteps(container, steps, scope) {
-  const ICONS = { pass: '✓', fail: '✗', skip: '–', warn: '!', checking: '…' };
-  for (const step of steps) {
-    container.appendChild(el('div', { class: 'locked-test-step' }, [
-      el('span', { class: `locked-test-icon lt-${step.status}` }, ICONS[step.status] || '–'),
-      el('span', { class: 'locked-test-label' }, step.label),
-      el('span', { class: 'locked-test-detail' }, step.detail || ''),
-    ]));
-  }
-}
+/* renderLockedTestSteps — removed, now using shared renderDiagnosticSteps() */
 
 /**
  * Run full diagnostics: instance-level admin creds test + ticket token health.
@@ -614,6 +635,7 @@ async function handleLockedDiagnostics(ticketId) {
   const container = qs('#locked-test-steps');
   if (!container) return;
 
+  _diagnosticsRunning = true;
   if (btn) { btn.disabled = true; btn.innerHTML = `${icon('refresh', 12)} Testing…`; }
   clear(container);
 
@@ -621,98 +643,78 @@ async function handleLockedDiagnostics(ticketId) {
   const instance = await getInstance(instanceId);
 
   if (!instance) {
-    container.appendChild(el('div', { class: 'locked-test-step' }, [
-      el('span', { class: 'locked-test-icon lt-fail' }, '✗'),
-      el('span', { class: 'locked-test-label' }, 'Instance'),
-      el('span', { class: 'locked-test-detail' }, 'Not found in storage'),
-    ]));
+    renderDiagnosticSteps(container, [
+      { label: 'Instance', status: 'fail', detail: 'Not found in storage' },
+    ]);
     if (btn) { btn.disabled = false; btn.innerHTML = `${icon('refresh', 12)} Run Diagnostics`; }
     return;
   }
 
   // ── Instance-level diagnostics ──
-  const instanceSteps = [];
 
-  // Step 1: Test admin token
-  container.appendChild(el('div', { class: 'locked-test-step', id: 'lt-admin-creds' }, [
-    el('span', { class: 'locked-test-icon lt-checking' }, '…'),
-    el('span', { class: 'locked-test-label' }, 'Admin Credentials'),
-    el('span', { class: 'locked-test-detail' }, 'Testing…'),
-  ]));
+  // Step 1: Test admin token (show checking state)
+  renderDiagnosticSteps(container, [
+    { label: 'Admin Credentials', status: 'checking', detail: 'Testing…' },
+  ]);
 
   const adminResult = await testAdminCredentials(instance);
-  const adminStep = qs('#lt-admin-creds');
-  if (adminStep) {
-    clear(adminStep);
-    const status = adminResult.ok ? 'pass' : 'fail';
-    adminStep.appendChild(el('span', { class: `locked-test-icon lt-${status}` }, adminResult.ok ? '✓' : '✗'));
-    adminStep.appendChild(el('span', { class: 'locked-test-label' }, 'Admin Credentials'));
-    adminStep.appendChild(el('span', { class: 'locked-test-detail' }, adminResult.ok ? 'Valid' : adminResult.error));
-  }
-  instanceSteps.push({
+  // Replace checking step with result
+  clear(container);
+  const allSteps = [{
     label: 'Admin Credentials',
     status: adminResult.ok ? 'pass' : 'fail',
     detail: adminResult.ok ? 'Valid' : adminResult.error,
-  });
+  }];
+  renderDiagnosticSteps(container, allSteps);
 
-  // Step 2: Test ticket list fetch
-  container.appendChild(el('div', { class: 'locked-test-step', id: 'lt-ticket-list' }, [
-    el('span', { class: 'locked-test-icon lt-checking' }, '…'),
-    el('span', { class: 'locked-test-label' }, 'Ticket List API'),
-    el('span', { class: 'locked-test-detail' }, 'Testing…'),
-  ]));
+  // Step 2: Test ticket list fetch (append checking state)
+  renderDiagnosticSteps(container, [
+    { label: 'Ticket List API', status: 'checking', detail: 'Testing…' },
+  ]);
 
   let ticketListOk = false;
   try {
     const res = await adminFetch(instance, '/api/ticket/list');
     ticketListOk = res.ok;
-    const ticketListStep = qs('#lt-ticket-list');
-    if (ticketListStep) {
-      clear(ticketListStep);
-      const status = res.ok ? 'pass' : 'fail';
-      ticketListStep.appendChild(el('span', { class: `locked-test-icon lt-${status}` }, res.ok ? '✓' : '✗'));
-      ticketListStep.appendChild(el('span', { class: 'locked-test-label' }, 'Ticket List API'));
-      ticketListStep.appendChild(el('span', { class: 'locked-test-detail' }, res.ok ? `OK (${res.body.length}b)` : `HTTP ${res.status}`));
-    }
+    allSteps.push({
+      label: 'Ticket List API',
+      status: res.ok ? 'pass' : 'fail',
+      detail: res.ok ? `OK (${res.body.length}b)` : `HTTP ${res.status}`,
+    });
   } catch (e) {
-    const ticketListStep = qs('#lt-ticket-list');
-    if (ticketListStep) {
-      clear(ticketListStep);
-      ticketListStep.appendChild(el('span', { class: 'locked-test-icon lt-fail' }, '✗'));
-      ticketListStep.appendChild(el('span', { class: 'locked-test-label' }, 'Ticket List API'));
-      ticketListStep.appendChild(el('span', { class: 'locked-test-detail' }, e.message));
-    }
+    allSteps.push({
+      label: 'Ticket List API',
+      status: 'fail',
+      detail: e.message,
+    });
   }
 
-  // ── Ticket-level diagnostics (separator) ──
+  // Re-render with completed steps
+  clear(container);
+  renderDiagnosticSteps(container, allSteps);
+
+  // ── Ticket-level diagnostics ──
   if (ticketId && ticketId !== '—') {
-    container.appendChild(el('div', { class: 'locked-test-step', style: { padding: '2px 0' } }, [
+    // Separator
+    container.appendChild(el('div', { class: 'conn-tooltip-step', style: { padding: '2px 0' } }, [
       el('span', {
         style: { fontSize: '10px', fontWeight: '700', color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.3px' },
       }, `Ticket: ${ticketId}`),
     ]));
 
-    // Run the full ticket token health check
-    container.appendChild(el('div', { class: 'locked-test-step', id: 'lt-ticket-token' }, [
-      el('span', { class: 'locked-test-icon lt-checking' }, '…'),
-      el('span', { class: 'locked-test-label' }, 'Token Health Check'),
-      el('span', { class: 'locked-test-detail' }, 'Running 5-step check…'),
-    ]));
+    // Show checking placeholder
+    renderDiagnosticSteps(container, [
+      { label: 'Token Health Check', status: 'checking', detail: 'Running 5-step check…' },
+    ]);
 
     try {
       const result = await testTicketToken(instance, ticketId);
 
-      // Replace placeholder with actual steps
-      const placeholder = qs('#lt-ticket-token');
-      if (placeholder) placeholder.remove();
+      // Remove the checking placeholder (last child) and render actual steps
+      const lastChild = container.lastElementChild;
+      if (lastChild) lastChild.remove();
 
-      for (const step of result.steps) {
-        container.appendChild(el('div', { class: 'locked-test-step' }, [
-          el('span', { class: `locked-test-icon lt-${step.status}` }, step.status === 'pass' ? '✓' : step.status === 'fail' ? '✗' : '–'),
-          el('span', { class: 'locked-test-label' }, step.label),
-          el('span', { class: 'locked-test-detail' }, step.detail || ''),
-        ]));
-      }
+      renderDiagnosticSteps(container, result.steps);
 
       // Update state so badge refreshes
       state.set('tickets.tokenHealth', {
@@ -721,30 +723,30 @@ async function handleLockedDiagnostics(ticketId) {
         ticketId,
       });
     } catch (e) {
-      const placeholder = qs('#lt-ticket-token');
-      if (placeholder) {
-        clear(placeholder);
-        placeholder.appendChild(el('span', { class: 'locked-test-icon lt-fail' }, '✗'));
-        placeholder.appendChild(el('span', { class: 'locked-test-label' }, 'Token Health Check'));
-        placeholder.appendChild(el('span', { class: 'locked-test-detail' }, e.message));
-      }
+      // Remove checking placeholder and show error
+      const lastChild = container.lastElementChild;
+      if (lastChild) lastChild.remove();
+
+      renderDiagnosticSteps(container, [
+        { label: 'Token Health Check', status: 'fail', detail: e.message },
+      ]);
     }
   }
 
+  _diagnosticsRunning = false;
   if (btn) { btn.disabled = false; btn.innerHTML = `${icon('refresh', 12)} Run Diagnostics`; }
 }
 
 /** Toggle the inline re-auth section visibility */
 function toggleLockedReauth() {
-  const section = qs('#locked-reauth-section');
-  if (!section) return;
-  const isVisible = section.style.display !== 'none';
-  section.style.display = isVisible ? 'none' : '';
-  if (!isVisible) {
-    const input = qs('#locked-reauth-input');
-    if (input) { input.value = ''; input.focus(); }
-    const status = qs('#locked-reauth-status');
-    if (status) status.style.display = 'none';
+  if (!lockedAuthForm) return;
+  if (lockedAuthForm.isVisible()) {
+    lockedAuthForm.hide();
+  } else {
+    lockedAuthForm.clearInputs();
+    lockedAuthForm.showStatus('', '');
+    lockedAuthForm.show();
+    lockedAuthForm.focusAccess();
   }
 }
 
@@ -764,68 +766,41 @@ function toggleLockedDiagnostics() {
  * Locked to the specified ticket — cannot change which ticket.
  */
 async function handleLockedReauth(ticketId) {
-  const input = qs('#locked-reauth-input');
-  const raw = input?.value.trim();
-  if (!raw) {
-    showLockedReauthStatus('Please enter a token or auth code', 'error');
+  if (!lockedAuthForm) return;
+
+  const accessToken = lockedAuthForm.getAccessValue();
+  const refreshToken = lockedAuthForm.getRefreshValue();
+
+  if (!accessToken && !refreshToken) {
+    lockedAuthForm.showStatus('Please enter an access or refresh token', 'error');
     return;
   }
 
   const instanceId = state.get('connection.instanceId');
   const instance = await getInstance(instanceId);
   if (!instance) {
-    showLockedReauthStatus('No instance connected', 'error');
+    lockedAuthForm.showStatus('No instance connected', 'error');
     return;
   }
 
-  const btn = qs('#locked-reauth-btn');
-  if (btn) { btn.textContent = 'Authorizing…'; btn.disabled = true; }
+  lockedAuthForm.setSubmitLoading(true);
+  lockedAuthForm.showStatus('', '');
 
-  let authorized = false;
-  let authMethod = '';
+  // ── Use shared authorization flow (validates before storing) ──
+  const result = await authorizeTicket(instance, ticketId, accessToken, refreshToken);
 
-  // 1. Try as direct access token
-  await storeManualTicketToken(ticketId, raw);
-  const accessProbe = await ticketFetch(instance, ticketId, 'api-v2.2/describe');
-  if (accessProbe.ok) {
-    authMethod = 'access token';
-    authorized = true;
-    tryAsRefreshToken(instance, ticketId, raw).catch(() => {});
-  } else {
-    // 2. Try as refresh token
-    const refreshResult = await tryAsRefreshToken(instance, ticketId, raw);
-    if (refreshResult.ok) {
-      authMethod = 'refresh token';
-      authorized = true;
-    } else {
-      // 3. Try as authorization code
-      const codeResult = await exchangeTicketCode(instance, ticketId, raw);
-      if (codeResult.ok) {
-        const validation = await ticketFetch(instance, ticketId, 'api-v2.2/describe');
-        if (validation.ok) {
-          authMethod = 'auth code';
-          authorized = true;
-        } else {
-          showLockedReauthStatus('Token exchanged but validation failed', 'error');
-        }
-      } else {
-        showLockedReauthStatus('Not accepted as access token, refresh token, or auth code', 'error');
-      }
-    }
-  }
+  lockedAuthForm.setSubmitLoading(false);
 
-  if (btn) { btn.textContent = 'Authorize'; btn.disabled = false; }
-  if (input) input.value = '';
-
-  if (authorized) {
-    showLockedReauthStatus(`Authorized via ${authMethod}`, 'success');
+  if (result.ok) {
+    lockedAuthForm.clearInputs();
+    lockedAuthForm.showStatus(`Authorized via ${result.method}`, 'success');
 
     // Re-run token health check — this updates the badge and re-renders the summary
     try {
-      const result = await testTicketToken(instance, ticketId);
+      const health = await testTicketToken(instance, ticketId);
       state.set('tickets.tokenHealth', {
-        status: result.status,
-        steps: result.steps,
+        status: health.status,
+        steps: health.steps,
         ticketId,
       });
     } catch (e) {
@@ -835,20 +810,13 @@ async function handleLockedReauth(ticketId) {
         ticketId,
       });
     }
+  } else {
+    lockedAuthForm.showStatus(result.error, 'error');
   }
 }
 
-function showLockedReauthStatus(msg, type) {
-  const el_ = qs('#locked-reauth-status');
-  if (!el_) return;
-  if (!msg) { el_.style.display = 'none'; return; }
-  el_.style.display = '';
-  el_.textContent = msg;
-  el_.className = `locked-reauth-status status-${type}`;
-}
-
 /** Build a detached tooltip element for ticket token health (appended to body on hover) */
-function buildTokenHealthTooltip(tokenHealth, tokenLabel, isOk, ICONS) {
+function buildTokenHealthTooltip(tokenHealth, tokenLabel, isOk) {
   const tooltip = el('div', { class: 'token-health-tooltip' });
 
   const tooltipHeader = el('div', { class: 'conn-tooltip-header' }, [
@@ -860,15 +828,7 @@ function buildTokenHealthTooltip(tokenHealth, tokenLabel, isOk, ICONS) {
   tooltip.appendChild(tooltipHeader);
 
   const stepsEl = el('div', { class: 'conn-tooltip-steps' });
-  for (const step of tokenHealth.steps) {
-    stepsEl.appendChild(el('div', { class: 'conn-tooltip-step' }, [
-      el('span', { class: `conn-tooltip-icon tt-${step.status}` }, ICONS[step.status] || '–'),
-      el('div', { class: 'conn-tooltip-body' }, [
-        el('div', { class: 'conn-tooltip-label' }, step.label),
-        el('div', { class: 'conn-tooltip-detail' }, step.detail),
-      ]),
-    ]));
-  }
+  renderDiagnosticSteps(stepsEl, tokenHealth.steps);
   tooltip.appendChild(stepsEl);
 
   return tooltip;
@@ -932,11 +892,11 @@ function refreshProgressBar() {
     lockBtn.disabled = !allRequired && !isLocked;
     lockBtn.classList.toggle('lock-btn-ready', allRequired || isLocked);
     lockBtn.classList.toggle('lock-btn-locked', isLocked);
-    lockBtn.title = isLocked ? 'Unlock to edit configuration' : allRequired ? 'Lock configuration' : 'Complete all steps to lock';
+    lockBtn.title = isLocked ? 'Unlock configuration' : allRequired ? 'Lock configuration' : 'Complete all steps to lock';
     const iconEl = qs('#progress-bar-lock-icon');
     const labelEl = qs('#progress-bar-lock-label');
     if (iconEl) iconEl.innerHTML = icon(isLocked ? 'unlock' : 'lock', 12);
-    if (labelEl) labelEl.textContent = isLocked ? 'Unlock to edit' : 'Lock config';
+    if (labelEl) labelEl.textContent = isLocked ? 'Unlock' : 'Lock config';
   }
 
   // Toggle locked appearance on the entire bar

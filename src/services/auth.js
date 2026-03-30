@@ -30,6 +30,32 @@ const adminTokens = {};
 /** @type {Object.<string, {token: string, expiry: number}>} keyed by ticketId */
 const ticketTokens = {};
 
+/**
+ * Per-ticket refresh mutex — prevents concurrent refresh token exchanges.
+ * Tacton rotates refresh tokens (single-use), so if two callers both read
+ * the same stored refresh token and try to exchange it, the second gets 400.
+ * This map stores an in-flight refresh promise keyed by ticketId; concurrent
+ * callers await the same promise instead of making a duplicate request.
+ * @type {Map<string, Promise<{token: string, refreshToken: string|null, expiry: number}|null>>}
+ */
+const refreshInFlight = new Map();
+
+/**
+ * Per-ticket token resolution mutex — prevents concurrent callers from
+ * each probing/refreshing independently. Multiple concurrent getTicketToken
+ * calls for the same ticket piggyback on the same resolution promise.
+ * @type {Map<string, Promise<{token: string|null, diag: string[]}>>}
+ */
+const resolveInFlight = new Map();
+
+/**
+ * Admin token resolution mutex — prevents concurrent ensureAdminToken calls
+ * from each fetching a new client_credentials grant independently.
+ * Keyed by instance URL.
+ * @type {Map<string, Promise<string>>}
+ */
+const adminInFlight = new Map();
+
 // ─── Admin Token (Client Credentials Grant) ─────────────────────────────
 
 /**
@@ -104,38 +130,96 @@ async function getAdminTokenDirect(instance) {
 
 /**
  * Get an admin-level token for an instance.
- * Caches in memory; refreshes automatically when expired.
- * In dev, routes through server-side endpoint to avoid CORS.
+ *
+ * Resolution order (avoids unnecessary client_credentials grants that
+ * can invalidate ticket tokens on Tacton's side when both share the
+ * same OAuth clientId):
+ *
+ *   1. In-memory cache (fastest)
+ *   2. Stored token in Dexie (survives page reloads)
+ *   3. Fresh client_credentials grant (last resort)
+ *
+ * Uses a per-instance mutex so concurrent callers piggyback on the same
+ * resolution instead of each fetching independently.
  *
  * @param {Object} instance - { url, admin: { clientId, clientSecret } }
+ * @param {Object} [opts]
+ * @param {boolean} [opts.forceRefresh] - Skip cache/stored and do fresh grant
  * @returns {Promise<string>} Access token
  */
-export async function ensureAdminToken(instance) {
-  const cached = adminTokens[instance.url];
-  if (cached && Date.now() < cached.expiry) {
-    return cached.token;
+export async function ensureAdminToken(instance, opts = {}) {
+  // ── Tier 1: In-memory cache ──
+  if (!opts.forceRefresh) {
+    const cached = adminTokens[instance.url];
+    if (cached && Date.now() < cached.expiry) {
+      return cached.token;
+    }
   }
 
+  // ── Tiers 2+3 require async work — serialize per instance ──
+  if (adminInFlight.has(instance.url)) {
+    return adminInFlight.get(instance.url);
+  }
+
+  const promise = _resolveAdminToken(instance, opts)
+    .finally(() => adminInFlight.delete(instance.url));
+  adminInFlight.set(instance.url, promise);
+  return promise;
+}
+
+/**
+ * Internal admin token resolution — called once per instance via mutex.
+ */
+async function _resolveAdminToken(instance, opts = {}) {
   if (!instance.admin?.clientId || !instance.admin?.clientSecret) {
     throw new Error('No admin credentials configured for this instance');
   }
 
+  // ── Tier 2: Stored token in Dexie (survives page reloads) ──
+  // Avoids a fresh client_credentials grant which can invalidate
+  // ticket-scoped tokens when sharing the same OAuth clientId.
+  if (!opts.forceRefresh) {
+    const storageKey = `admin:${instance.url}`;
+    const storedToken = await getToken(storageKey);
+    const storedExpiry = await getToken(`${storageKey}:expiry`);
+    if (storedToken && storedExpiry) {
+      const expiry = Number(storedExpiry);
+      if (Date.now() < expiry) {
+        console.log('[auth] Admin token restored from Dexie (skipping client_credentials grant)');
+        adminTokens[instance.url] = { token: storedToken, expiry };
+        return storedToken;
+      }
+      console.log('[auth] Stored admin token expired — fetching fresh one');
+    }
+  }
+
+  // ── Tier 3: Fresh client_credentials grant ──
+  console.log('[auth] Fetching fresh admin token via client_credentials grant');
   const result = isDevMode()
     ? await getAdminTokenViaServer(instance)
     : await getAdminTokenDirect(instance);
 
+  // Cache in memory
   adminTokens[instance.url] = result;
+
+  // Persist to Dexie so we survive page reloads without re-granting
+  const storageKey = `admin:${instance.url}`;
+  await setToken(storageKey, result.token);
+  await setToken(`${storageKey}:expiry`, String(result.expiry));
+
   return result.token;
 }
 
 /**
  * Test whether admin credentials are valid by attempting a token exchange.
  * @param {Object} instance
+ * @param {Object} [opts]
+ * @param {boolean} [opts.forceRefresh] - Force a fresh client_credentials grant
  * @returns {Promise<{ok: boolean, error?: string}>}
  */
-export async function testAdminCredentials(instance) {
+export async function testAdminCredentials(instance, opts = {}) {
   try {
-    await ensureAdminToken(instance);
+    await ensureAdminToken(instance, opts);
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -280,33 +364,32 @@ async function refreshTicketTokenDirect(instance, ticketId, savedRefresh) {
 }
 
 /**
- * Resolve a ticket-scoped access token using 3-tier fallback.
+ * Serialized refresh token exchange — ensures only one refresh call per ticket
+ * is in-flight at a time. Concurrent callers get the same result.
  *
- * Tier 1: In-memory cache (fastest, survives taskpane lifetime)
- * Tier 2: Refresh token exchange (persistent via Dexie)
- * Tier 3: Stored access token fallback (may be expired server-side)
+ * Tacton rotates refresh tokens on exchange (single-use), so concurrent
+ * exchange attempts with the same token cause 400 errors. This function
+ * deduplicates them: the first caller starts the exchange, subsequent callers
+ * await the same promise.
  *
- * @param {Object} instance - { url, admin, frontend? }
- * @param {string} ticketId - e.g. "T-00001"
- * @returns {Promise<{token: string|null, diag: string[]}>}
+ * On success, caches in memory AND persists both access + refresh to Dexie
+ * so all callers get consistent state.
+ *
+ * @param {Object} instance
+ * @param {string} ticketId
+ * @returns {Promise<{token: string, refreshToken: string|null, expiry: number}|null>}
  */
-export async function getTicketToken(instance, ticketId) {
-  const diag = [];
-
-  // ── Tier 1: In-memory cache ──
-  const cached = ticketTokens[ticketId];
-  if (cached && Date.now() < cached.expiry) {
-    diag.push('In-memory cache hit');
-    return { token: cached.token, diag };
+async function refreshTicketTokenSerialized(instance, ticketId) {
+  // If a refresh is already in-flight for this ticket, piggyback on it
+  if (refreshInFlight.has(ticketId)) {
+    return refreshInFlight.get(ticketId);
   }
-  diag.push('No valid in-memory token');
 
-  // ── Tier 2: Refresh token exchange ──
-  const refreshKey = `refresh:${ticketId}`;
-  const savedRefresh = await getToken(refreshKey);
+  const doRefresh = async () => {
+    const refreshKey = `refresh:${ticketId}`;
+    const savedRefresh = await getToken(refreshKey);
+    if (!savedRefresh) return null;
 
-  if (savedRefresh) {
-    diag.push('Attempting refresh token exchange…');
     try {
       const result = isDevMode()
         ? await refreshTicketTokenViaServer(instance, ticketId, savedRefresh)
@@ -321,27 +404,168 @@ export async function getTicketToken(instance, ticketId) {
         await setToken(refreshKey, result.refreshToken);
       }
 
-      diag.push('Refresh token exchange succeeded');
-      return { token: result.token, diag };
+      return result;
     } catch (e) {
-      diag.push(`Refresh failed: ${e.message}`);
+      console.warn(`[auth] refresh failed for ${ticketId}:`, e.message);
+      // Delete the consumed/invalid refresh token so we don't keep retrying it
+      await deleteToken(refreshKey).catch(() => {});
+      return null;
+    }
+  };
+
+  const promise = doRefresh().finally(() => refreshInFlight.delete(ticketId));
+  refreshInFlight.set(ticketId, promise);
+  return promise;
+}
+
+/**
+ * Resolve a ticket-scoped access token.
+ *
+ * Resolution order (critical — refresh MUST NOT run before validating
+ * the stored token, because refresh invalidates the old token on
+ * Tacton's side, causing 403s for any concurrent callers using it):
+ *
+ *   Tier 1: In-memory cache (fastest, survives taskpane lifetime)
+ *   Tier 2: Stored access token — validate before trusting
+ *   Tier 3: Refresh token exchange — only if stored token is invalid/missing
+ *
+ * @param {Object} instance - { url, admin, frontend? }
+ * @param {string} ticketId - e.g. "T-00001"
+ * @returns {Promise<{token: string|null, diag: string[]}>}
+ */
+export async function getTicketToken(instance, ticketId) {
+  // ── Tier 1: In-memory cache (no mutex needed) ──
+  const cached = ticketTokens[ticketId];
+  if (cached && Date.now() < cached.expiry) {
+    return {
+      token: cached.token,
+      diag: [{ key: 'cache-hit', status: 'pass', detail: 'Recently validated (in-memory cache)' }],
+    };
+  }
+
+  // ── Tiers 2+3 require network — serialize per ticket ──
+  // Multiple concurrent callers piggyback on the same resolution promise
+  // to avoid duplicate probes/refreshes that would fight each other.
+  if (resolveInFlight.has(ticketId)) {
+    return resolveInFlight.get(ticketId);
+  }
+
+  const promise = _resolveTicketToken(instance, ticketId)
+    .finally(() => resolveInFlight.delete(ticketId));
+  resolveInFlight.set(ticketId, promise);
+  return promise;
+}
+
+/**
+ * Internal token resolution — called once per ticket via the mutex above.
+ *
+ * Returns structured `diag` entries that carry enough information for
+ * `testTicketToken` to convert them into UI-friendly steps without
+ * duplicating any probe/refresh logic.
+ *
+ * Each diag entry is either a plain string (for simple messages) or an
+ * object: { key, status, detail, [extra] }
+ */
+async function _resolveTicketToken(instance, ticketId) {
+  const diag = [];
+  const hasFrontend = !!(instance.frontend?.clientId && instance.frontend?.clientSecret);
+
+  // ── Check what's stored ──
+  const storedAccess = await getToken(`access:${ticketId}`);
+  const storedRefresh = await getToken(`refresh:${ticketId}`);
+
+  diag.push({
+    key: 'stored-access',
+    status: storedAccess ? 'pass' : 'fail',
+    detail: storedAccess ? storedAccess.substring(0, 12) + '…' : 'None stored',
+  });
+  diag.push({
+    key: 'stored-refresh',
+    status: storedRefresh ? 'pass' : 'fail',
+    detail: storedRefresh ? storedRefresh.substring(0, 12) + '…' : 'None stored',
+  });
+  diag.push({
+    key: 'frontend-creds',
+    status: hasFrontend ? 'pass' : 'skip',
+    detail: hasFrontend
+      ? `Client ID: ${instance.frontend.clientId.substring(0, 12)}…`
+      : 'Not configured (using admin)',
+  });
+
+  // ── Tier 2: Stored access token — validate before trusting ──
+  if (storedAccess) {
+    try {
+      const probe = await probeTicketToken(instance, ticketId, storedAccess);
+      if (probe.ok) {
+        ticketTokens[ticketId] = {
+          token: storedAccess,
+          expiry: Date.now() + 55 * 60 * 1000,
+        };
+        diag.push({
+          key: 'validate',
+          status: 'pass',
+          detail: `${probe.status} (${probe.length}b)`,
+        });
+        return { token: storedAccess, diag };
+      }
+      diag.push({
+        key: 'validate',
+        status: 'fail',
+        detail: `HTTP ${probe.status} (${probe.length}b${probe.isHtml ? ', HTML redirect' : ''})`,
+      });
+    } catch (e) {
+      diag.push({ key: 'validate', status: 'fail', detail: e.message });
     }
   } else {
-    diag.push('No refresh token stored');
+    diag.push({ key: 'validate', status: 'skip', detail: 'No token to test' });
   }
 
-  // ── Tier 3: Stored access token ──
-  const storedAccess = await getToken(`access:${ticketId}`);
+  // ── Tier 3: Refresh token exchange — only if stored token is invalid/missing ──
+  if (storedRefresh) {
+    const result = await refreshTicketTokenSerialized(instance, ticketId);
+    if (result) {
+      const expiryMin = Math.round((result.expiry - Date.now()) / 60000);
+      const rotated = !!(result.refreshToken);
+      diag.push({
+        key: 'refresh',
+        status: 'pass',
+        detail: `New access token (expires: ${expiryMin}min)${rotated ? ', refresh rotated' : ''}`,
+      });
+      diag.push({
+        key: 'persist',
+        status: 'pass',
+        detail: `Access token updated${rotated ? ', refresh token rotated' : ''}`,
+      });
+      // Validate the refreshed token (informational)
+      try {
+        const probe = await probeTicketToken(instance, ticketId, result.token);
+        diag.push({
+          key: 'validate-new',
+          status: probe.ok ? 'pass' : 'warn',
+          detail: probe.ok
+            ? `${probe.status} (${probe.length}b)`
+            : `HTTP ${probe.status} (${probe.length}b) — token persisted, may need a moment`,
+        });
+      } catch (e) {
+        diag.push({ key: 'validate-new', status: 'warn', detail: `${e.message} — token persisted anyway` });
+      }
+      return { token: result.token, diag };
+    }
+    diag.push({ key: 'refresh', status: 'fail', detail: 'Refresh exchange returned no result' });
+    diag.push({ key: 'persist', status: 'skip', detail: 'Nothing to persist' });
+    diag.push({ key: 'validate-new', status: 'skip', detail: 'No refreshed token to test' });
+  } else {
+    diag.push({ key: 'refresh', status: 'skip', detail: 'No refresh token stored' });
+    diag.push({ key: 'persist', status: 'skip', detail: 'Nothing to persist' });
+    diag.push({ key: 'validate-new', status: 'skip', detail: 'No refreshed token to test' });
+  }
+
+  // ── All tiers exhausted — clean up dead tokens ──
   if (storedAccess) {
-    diag.push('Using stored access token (may be expired)');
-    ticketTokens[ticketId] = {
-      token: storedAccess,
-      expiry: Date.now() + 5 * 60 * 1000, // Re-check in 5 min
-    };
-    return { token: storedAccess, diag };
+    await deleteToken(`access:${ticketId}`).catch(() => {});
+    delete ticketTokens[ticketId];
   }
 
-  diag.push('No token available — authorization required');
   return { token: null, diag };
 }
 
@@ -498,11 +722,9 @@ export async function tryAsRefreshToken(instance, ticketId, rawToken) {
       ? await refreshTicketTokenViaServer(instance, ticketId, rawToken)
       : await refreshTicketTokenDirect(instance, ticketId, rawToken);
 
-    // Verify the new access token actually works
-    const probe = await probeTicketToken(instance, ticketId, result.token);
-    if (!probe.ok) {
-      return { ok: false, error: 'Refreshed token failed validation' };
-    }
+    // Trust the exchange result — Tacton may have a brief propagation delay
+    // before the new token validates, so persist immediately (same approach
+    // as testTicketToken step 4).
 
     // Cache in memory
     ticketTokens[ticketId] = { token: result.token, expiry: result.expiry };
@@ -541,145 +763,149 @@ async function probeTicketToken(instance, ticketId, bearerToken) {
 }
 
 /**
- * Full 5-step ticket token health check — mirrors TactonUtil TEST_TICKET_TOKEN.
+ * Diag key → UI-friendly step label mapping.
+ * @type {Object.<string, string>}
+ */
+const DIAG_LABELS = {
+  'cache-hit':       'Validate Current Token',
+  'stored-access':   'Stored Access Token',
+  'stored-refresh':  'Stored Refresh Token',
+  'frontend-creds':  'Frontend Credentials',
+  'validate':        'Validate Current Token',
+  'refresh':         'Refresh Token Exchange',
+  'persist':         'Persist New Tokens',
+  'validate-new':    'Validate New Token',
+};
+
+/**
+ * Full ticket token health check — thin wrapper around getTicketToken.
  *
- * Steps:
- *   1. Check stored tokens (access + refresh)
- *   2. Validate current access token against describe endpoint
- *   3. Refresh token exchange
- *   4. Validate refreshed token
- *   5. Persist new tokens if valid
+ * Delegates ALL probe/refresh/cache logic to getTicketToken (single source
+ * of truth), then converts its structured `diag` entries into the UI-friendly
+ * `steps` array format for rendering by diagnostic-steps.js.
  *
  * @param {Object} instance - { url, admin, frontend? }
  * @param {string} ticketId
  * @returns {Promise<{status: string, steps: Array<{label: string, status: string, detail: string}>}>}
  */
 export async function testTicketToken(instance, ticketId) {
+  const { token, diag } = await getTicketToken(instance, ticketId);
+
+  // Convert structured diag entries to UI steps
   const steps = [];
+  let hasValidToken = false;
+  let hasRefreshed = false;
+  let hasStoredAccess = false;
+  let hasStoredRefresh = false;
 
-  // ── Step 1: Check stored tokens ──
-  const storedAccess = await getToken(`access:${ticketId}`);
-  const storedRefresh = await getToken(`refresh:${ticketId}`);
-  const hasFrontend = !!(instance.frontend?.clientId && instance.frontend?.clientSecret);
+  for (const entry of diag) {
+    if (typeof entry === 'string') continue; // Skip legacy plain strings
 
-  steps.push({
-    label: 'Stored Access Token',
-    status: storedAccess ? 'pass' : 'fail',
-    detail: storedAccess ? storedAccess.substring(0, 12) + '…' : 'None stored',
-  });
-  steps.push({
-    label: 'Stored Refresh Token',
-    status: storedRefresh ? 'pass' : 'fail',
-    detail: storedRefresh ? storedRefresh.substring(0, 12) + '…' : 'None stored',
-  });
-  steps.push({
-    label: 'Frontend Credentials',
-    status: hasFrontend ? 'pass' : 'skip',
-    detail: hasFrontend
-      ? `Client ID: ${instance.frontend.clientId.substring(0, 12)}…`
-      : 'Not configured (using admin)',
-  });
+    const label = DIAG_LABELS[entry.key] || entry.key;
+    steps.push({ label, status: entry.status, detail: entry.detail });
 
-  // ── Step 2: Validate current access token ──
-  let currentTokenValid = false;
-  if (storedAccess) {
-    try {
-      const probe = await probeTicketToken(instance, ticketId, storedAccess);
-      currentTokenValid = probe.ok;
-      steps.push({
-        label: 'Validate Current Token',
-        status: probe.ok ? 'pass' : 'fail',
-        detail: probe.ok
-          ? `${probe.status} (${probe.length}b)`
-          : `HTTP ${probe.status} (${probe.length}b${probe.isHtml ? ', HTML redirect' : ''})`,
-      });
-    } catch (e) {
-      steps.push({ label: 'Validate Current Token', status: 'fail', detail: e.message });
-    }
-  } else {
-    steps.push({ label: 'Validate Current Token', status: 'skip', detail: 'No token to test' });
+    // Track state for overall status
+    if (entry.key === 'stored-access' && entry.status === 'pass') hasStoredAccess = true;
+    if (entry.key === 'stored-refresh' && entry.status === 'pass') hasStoredRefresh = true;
+    if (entry.key === 'validate' && entry.status === 'pass') hasValidToken = true;
+    if (entry.key === 'cache-hit' && entry.status === 'pass') hasValidToken = true;
+    if (entry.key === 'refresh' && entry.status === 'pass') hasRefreshed = true;
   }
 
-  // ── Step 3: Refresh token exchange ──
-  let refreshedToken = null;
-  let newRefreshToken = null;
-  if (storedRefresh) {
-    try {
-      const result = isDevMode()
-        ? await refreshTicketTokenViaServer(instance, ticketId, storedRefresh)
-        : await refreshTicketTokenDirect(instance, ticketId, storedRefresh);
-
-      refreshedToken = result.token;
-      newRefreshToken = result.refreshToken || null;
-      const expiryMin = Math.round((result.expiry - Date.now()) / 60000);
-      steps.push({
-        label: 'Refresh Token Exchange',
-        status: 'pass',
-        detail: `New access token (expires: ${expiryMin}min)${newRefreshToken ? ', refresh rotated' : ''}`,
-      });
-    } catch (e) {
-      steps.push({ label: 'Refresh Token Exchange', status: 'fail', detail: e.message });
-    }
-  } else {
-    steps.push({ label: 'Refresh Token Exchange', status: 'skip', detail: 'No refresh token stored' });
+  // If we got a cache hit, the diag only has the cache-hit entry.
+  // Backfill the skipped steps so the UI still shows the full picture.
+  if (diag.length === 1 && diag[0].key === 'cache-hit') {
+    steps.push({ label: 'Refresh Token Exchange', status: 'skip', detail: 'Current token valid — skipping to avoid invalidating active token' });
+    steps.push({ label: 'Persist New Tokens', status: 'skip', detail: 'No refresh needed' });
+    steps.push({ label: 'Validate New Token', status: 'skip', detail: 'Current token already valid' });
   }
 
-  // ── Step 4: Persist tokens immediately if refresh exchange succeeded ──
-  // Tacton may have a brief propagation delay before new tokens validate,
-  // so we trust the refresh exchange result and persist right away.
-  if (refreshedToken) {
-    try {
-      // Update in-memory cache
-      ticketTokens[ticketId] = {
-        token: refreshedToken,
-        expiry: Date.now() + 3500000, // ~58 min
-      };
-      // Persist access token
-      await setToken(`access:${ticketId}`, refreshedToken);
-      // Persist new refresh token if rotated
-      if (newRefreshToken) {
-        await setToken(`refresh:${ticketId}`, newRefreshToken);
-      }
-      steps.push({
-        label: 'Persist New Tokens',
-        status: 'pass',
-        detail: `Access token updated${newRefreshToken ? ', refresh token rotated' : ''}`,
-      });
-    } catch (e) {
-      steps.push({ label: 'Persist New Tokens', status: 'fail', detail: e.message });
+  // If validation passed, backfill the skipped refresh/persist/validate-new steps
+  if (hasValidToken && !diag.some(e => e.key === 'cache-hit')) {
+    if (!diag.some(e => e.key === 'refresh')) {
+      steps.push({ label: 'Refresh Token Exchange', status: 'skip', detail: 'Current token valid — skipping to avoid invalidating active token' });
     }
-  } else {
-    steps.push({ label: 'Persist New Tokens', status: 'skip', detail: 'Nothing to persist' });
-  }
-
-  // ── Step 5: Validate the persisted token (informational) ──
-  let refreshedTokenValid = false;
-  if (refreshedToken) {
-    try {
-      const probe = await probeTicketToken(instance, ticketId, refreshedToken);
-      refreshedTokenValid = probe.ok;
-      steps.push({
-        label: 'Validate New Token',
-        status: probe.ok ? 'pass' : 'warn',
-        detail: probe.ok
-          ? `${probe.status} (${probe.length}b)`
-          : `HTTP ${probe.status} (${probe.length}b) — token persisted, may need a moment`,
-      });
-    } catch (e) {
-      steps.push({ label: 'Validate New Token', status: 'warn', detail: `${e.message} — token persisted anyway` });
+    if (!diag.some(e => e.key === 'persist')) {
+      steps.push({ label: 'Persist New Tokens', status: 'skip', detail: 'No refresh needed' });
     }
-  } else {
-    steps.push({ label: 'Validate New Token', status: 'skip', detail: 'No refreshed token to test' });
+    if (!diag.some(e => e.key === 'validate-new')) {
+      steps.push({ label: 'Validate New Token', status: 'skip', detail: 'Current token already valid' });
+    }
   }
 
   // ── Overall status ──
-  const overallStatus = refreshedToken ? 'ok'
-    : currentTokenValid ? 'warn'
-    : storedRefresh ? 'expired'
-    : storedAccess ? 'expired'
+  const overallStatus = (hasValidToken || hasRefreshed) ? 'ok'
+    : hasStoredRefresh ? 'expired'
+    : hasStoredAccess ? 'expired'
     : 'none';
 
   return { status: overallStatus, steps };
+}
+
+// ─── Shared Authorization Flow ─────────────────────────────────────────
+
+/**
+ * Unified ticket authorization — 3-tier attempt:
+ *   1. Try raw value as direct access token
+ *   2. Try as refresh token (dedicated field value, or fall back to raw)
+ *   3. Try as authorization code
+ *
+ * Does NOT overwrite the existing working token until validation succeeds.
+ * Both ticket-card and locked-summary auth forms should call this.
+ *
+ * @param {Object}  instance      - { url, admin, frontend? }
+ * @param {string}  ticketId
+ * @param {string}  accessValue   - Value from the access token input
+ * @param {string}  [refreshValue] - Value from the dedicated refresh token input (optional)
+ * @returns {Promise<{ok: boolean, method?: string, error?: string}>}
+ */
+export async function authorizeTicket(instance, ticketId, accessValue, refreshValue) {
+  const raw = accessValue || refreshValue;
+  if (!raw) {
+    return { ok: false, error: 'No token or code provided' };
+  }
+
+  // ── 1. Try as direct access token (without clobbering existing stored token) ──
+  // Probe using the raw value directly instead of storing first
+  try {
+    const probe = await probeTicketToken(instance, ticketId, raw);
+    if (probe.ok) {
+      // Validated — now persist
+      await storeManualTicketToken(ticketId, raw);
+      // If a separate refresh token was provided, store it; otherwise
+      // try the raw value as a refresh token in the background
+      const rt = refreshValue || raw;
+      tryAsRefreshToken(instance, ticketId, rt).catch(() => {});
+      return { ok: true, method: 'access token' };
+    }
+  } catch {
+    // probe failed — continue to next tier
+  }
+
+  // ── 2. Try as refresh token ──
+  const rtValue = refreshValue || raw;
+  const refreshResult = await tryAsRefreshToken(instance, ticketId, rtValue);
+  if (refreshResult.ok) {
+    return { ok: true, method: 'refresh token' };
+  }
+
+  // ── 3. Try as authorization code ──
+  const codeResult = await exchangeTicketCode(instance, ticketId, raw);
+  if (codeResult.ok) {
+    // Code exchange stores the tokens internally — validate
+    const storedAccess = await getToken(`access:${ticketId}`);
+    if (storedAccess) {
+      const validation = await probeTicketToken(instance, ticketId, storedAccess);
+      if (validation.ok) {
+        return { ok: true, method: 'auth code' };
+      }
+      return { ok: false, error: 'Code exchanged but validation failed' };
+    }
+    // exchangeTicketCode succeeded and stored the token, trust it
+    return { ok: true, method: 'auth code' };
+  }
+
+  return { ok: false, error: 'Not accepted as access token, refresh token, or auth code' };
 }
 
 // ─── Cache Management ───────────────────────────────────────────────────
@@ -691,8 +917,15 @@ export async function testTicketToken(instance, ticketId) {
 export function clearAdminTokenCache(instanceUrl) {
   if (instanceUrl) {
     delete adminTokens[instanceUrl];
+    // Also clear persisted tokens in Dexie
+    deleteToken(`admin:${instanceUrl}`).catch(() => {});
+    deleteToken(`admin:${instanceUrl}:expiry`).catch(() => {});
   } else {
-    Object.keys(adminTokens).forEach(k => delete adminTokens[k]);
+    Object.keys(adminTokens).forEach(k => {
+      deleteToken(`admin:${k}`).catch(() => {});
+      deleteToken(`admin:${k}:expiry`).catch(() => {});
+      delete adminTokens[k];
+    });
   }
 }
 

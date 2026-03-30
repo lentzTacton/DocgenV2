@@ -21,12 +21,13 @@ import {
   canDeleteCatalogue, canDeleteSection, canDeleteVariable,
   validateDataSet, getDependents,
 } from '../../services/variables.js';
-import { isConnected, getBomSources, getBomFields, fetchBomRecords, fetchModel, getConfiguredProductList, fetchConfiguredProductData, indexConfigAttributes } from '../../services/data-api.js';
+import { isConnected, getBomSources, getBomFields, fetchBomRecords, fetchModel } from '../../services/data-api.js';
 import {
   exportCatalogue, downloadJson, importCatalogue, readJsonFile,
 } from '../../services/catalogue-io.js';
 import { handleInsertIntoDoc, handleInsertSectionIntoDoc, buildSectionExpression } from '../../services/word-api.js';
 import { wizState } from './wizard-state.js';
+import { createTagPicker } from '../../components/tag-picker.js';
 
 // ─── Constants ──────────────────────────────────────────────────────────
 
@@ -86,33 +87,40 @@ let validationCtxLoaded = false;
 async function ensureValidationCtx() {
   if (validationCtxLoaded || !isConnected()) return;
   try {
-    const [sources, fields, records, model] = await Promise.all([
-      getBomSources(), getBomFields(), fetchBomRecords(), fetchModel(),
-    ]);
+    // Only fetch the model — one API call, fast.
+    // BOM sources/fields/records are expensive (many listRecords calls)
+    // and only needed when validating BOM-type variables.
+    // Config attr paths load on-demand in the wizard config explorer.
+    const model = await fetchModel();
     validationCtx = {
-      bomSources: sources || [],
-      bomFields: fields || [],
-      bomRecords: records || [],
+      bomSources: [],
+      bomFields: [],
+      bomRecords: [],
       modelObjects: model || [],
       configAttrPaths: new Set(),
     };
 
-    // Load config attribute paths from all configured products (non-blocking)
-    try {
-      const cpList = await getConfiguredProductList();
-      for (const cp of cpList) {
-        const tree = await fetchConfiguredProductData(cp.id);
-        if (tree) {
-          const idx = indexConfigAttributes(tree);
-          for (const entry of idx) validationCtx.configAttrPaths.add(entry.path);
-        }
-      }
-    } catch (e) { console.warn('[validation] Config attr index load failed:', e); }
-
     validationCtxLoaded = true;
-    // Re-render to show validation badges now that data is loaded
-    rerender();
+
+    // Load BOM data in background only if there are BOM variables
+    const variables = state.get('variables') || [];
+    if (variables.some(v => v.type === 'bom')) {
+      loadBomValidationInBackground();
+    }
   } catch (e) { console.warn('[validation] Failed to load context:', e); }
+}
+
+/** Load BOM validation data in background — only when BOM variables exist */
+async function loadBomValidationInBackground() {
+  try {
+    const [sources, fields, records] = await Promise.all([
+      getBomSources(), getBomFields(), fetchBomRecords(),
+    ]);
+    validationCtx.bomSources = sources || [];
+    validationCtx.bomFields = fields || [];
+    validationCtx.bomRecords = records || [];
+    rerender();
+  } catch (e) { console.warn('[validation] BOM data load failed:', e); }
 }
 
 // Map of variable id → { status, issues }
@@ -282,11 +290,7 @@ export function renderVariableList(container) {
     container.appendChild(renderCatalogue(cat, catSections, catVars));
   }
 
-  // Coverage bar (only if BOM variables exist)
-  const bomVars = variables.filter(v => v.type === 'bom');
-  if (bomVars.length > 0) {
-    container.appendChild(renderCoverageBar(variables));
-  }
+  // Coverage bar removed — BOM type not in use
 }
 
 // ─── Unassigned block ───────────────────────────────────────────────────
@@ -773,7 +777,7 @@ function renderVarCard(variable, isReadonly = false, sectionLocked = false) {
     ]),
     // Expression preview row — background tinted by validation status
     variable.expression
-      ? el('div', { class: `var-expr ${exprStatusClass}${showExpr ? ' var-expr-visible' : ''}` }, [
+      ? el('div', { class: `var-expr ${exprStatusClass}${showExpr ? ' var-expr-visible' : ''}`, title: variable.expression }, [
           el('span', { class: 'var-expr-text' }, variable.expression),
           // Show warning/error icon with hover tooltip when not valid
           valResult && valResult.status !== 'valid'
@@ -827,14 +831,15 @@ function showNewCatalogueInline(container) {
     class: 'input', placeholder: 'Description (optional)',
     style: { fontSize: '11px' },
   });
-  const tagsInput = el('input', {
-    class: 'input', placeholder: 'Tags (comma-separated)',
-    style: { fontSize: '11px' },
-  });
 
-  // Scope selector
-  const scopeSel = el('div', { class: 'scope-sel' });
+  // Tag picker (shared component with autocomplete)
+  const tagPicker = createTagPicker({ placeholder: 'Add tags...' });
+
+  // Scope selector (collapsible)
   let selectedScope = 'ticket';
+  let scopeCollapsed = true;
+
+  const scopeSel = el('div', { class: 'scope-sel' });
   Object.entries(SCOPE_CONFIG).forEach(([key, sc]) => {
     const opt = el('div', {
       class: `scope-opt ${key === selectedScope ? 'scope-opt-sel' : ''}`,
@@ -850,7 +855,27 @@ function showNewCatalogueInline(container) {
     scopeSel.appendChild(opt);
   });
 
-  const actions = el('div', { style: { display: 'flex', gap: '6px' } }, [
+  const scopeBody = el('div', {
+    style: { display: 'none' },
+  }, [scopeSel]);
+
+  const scopeChevron = el('span', {
+    class: 'icon',
+    html: icon('chevronRight', 10),
+    style: { transition: 'transform 0.15s', display: 'inline-flex' },
+  });
+
+  const scopeHeader = el('div', {
+    class: 'field-label cat-form-section-toggle',
+    style: { marginTop: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', userSelect: 'none' },
+    onclick: () => {
+      scopeCollapsed = !scopeCollapsed;
+      scopeBody.style.display = scopeCollapsed ? 'none' : '';
+      scopeChevron.innerHTML = icon(scopeCollapsed ? 'chevronRight' : 'chevronDown', 10);
+    },
+  }, [scopeChevron, 'Scope']);
+
+  const actions = el('div', { style: { display: 'flex', gap: '6px', justifyContent: 'flex-end' } }, [
     el('button', {
       class: 'btn btn-primary btn-sm',
       onclick: async () => {
@@ -860,7 +885,7 @@ function showNewCatalogueInline(container) {
           name,
           description: descInput.value.trim(),
           scope: selectedScope,
-          tags: tagsInput.value.split(',').map(t => t.trim()).filter(Boolean),
+          tags: tagPicker.getTags(),
         });
         form.remove();
       },
@@ -874,9 +899,9 @@ function showNewCatalogueInline(container) {
   form.appendChild(el('div', { class: 'field-label' }, 'New Data Catalogue'));
   form.appendChild(nameInput);
   form.appendChild(descInput);
-  form.appendChild(tagsInput);
-  form.appendChild(el('div', { class: 'field-label', style: { marginTop: '6px' } }, 'Scope'));
-  form.appendChild(scopeSel);
+  form.appendChild(tagPicker.element);
+  form.appendChild(scopeHeader);
+  form.appendChild(scopeBody);
   form.appendChild(actions);
 
   // Insert after the header
@@ -904,12 +929,11 @@ function showNewSectionInline(body, catalogueId) {
     class: 'input', placeholder: 'Description (optional)',
     style: { fontSize: '11px' },
   });
-  const tagsInput = el('input', {
-    class: 'input', placeholder: 'Tags (comma-separated)',
-    style: { fontSize: '11px' },
-  });
 
-  const actions = el('div', { style: { display: 'flex', gap: '6px' } }, [
+  // Tag picker (shared component with autocomplete)
+  const tagPicker = createTagPicker({ placeholder: 'Add tags...' });
+
+  const actions = el('div', { style: { display: 'flex', gap: '6px', justifyContent: 'flex-end' } }, [
     el('button', {
       class: 'btn btn-primary btn-sm',
       onclick: async () => {
@@ -919,7 +943,7 @@ function showNewSectionInline(body, catalogueId) {
           catalogueId,
           name,
           description: descInput.value.trim(),
-          tags: tagsInput.value.split(',').map(t => t.trim()).filter(Boolean),
+          tags: tagPicker.getTags(),
         });
         form.remove();
       },
@@ -937,7 +961,7 @@ function showNewSectionInline(body, catalogueId) {
 
   form.appendChild(nameInput);
   form.appendChild(descInput);
-  form.appendChild(tagsInput);
+  form.appendChild(tagPicker.element);
   form.appendChild(actions);
 
   // Insert before the footer actions row (which contains the "Add section" button)
@@ -1025,6 +1049,17 @@ function showSectionMenu(section, catalogue, anchor) {
   dismissMenus();
   const menu = el('div', { class: 'ctx-menu', id: 'ctx-menu' });
   const isLocked = !!section.locked;
+
+  // New data set — pre-target this section + catalogue
+  if (!isLocked && !catalogue.readonly) {
+    menu.appendChild(menuItem('plus', 'New data set', () => {
+      dismissMenus();
+      wizState.catalogueId = catalogue.id;
+      wizState.sectionId = section.id;
+      state.set('dataView', 'new');
+    }));
+    menu.appendChild(el('div', { class: 'ctx-menu-sep' }));
+  }
 
   // Lock / Unlock toggle — always available
   menu.appendChild(menuItem(
@@ -1707,6 +1742,9 @@ function renderSearchFilter(allTags) {
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 function rerender() {
+  // Only re-render if the user is still on the list view.
+  // If they've navigated into a wizard (detail/new), don't blow it away.
+  if (state.get('dataView') && state.get('dataView') !== 'list') return;
   const zone = qs('#data-zone');
   if (zone) { clear(zone); renderVariableList(zone); }
 }
@@ -1777,6 +1815,9 @@ async function copyToCatalogue(variable, catalogueId, sectionId) {
 
 // ─── Coverage bar ───────────────────────────────────────────────────────
 
+// Coverage bar collapse state (in-memory)
+let coverageCollapsed = true;
+
 function renderCoverageBar(variables) {
   const bomVars = variables.filter(v => v.type === 'bom');
   const total = bomVars.reduce((sum, v) => sum + (v.matchCount || 0), 0) || 42;
@@ -1785,14 +1826,36 @@ function renderCoverageBar(variables) {
   const coverage = el('div', { class: 'coverage' });
 
   const assigned = bomVars.reduce((s, v) => s + (v.matchCount || 0), 0);
-  coverage.appendChild(
-    el('div', { class: 'coverage-header' }, [
-      el('span', { style: { fontWeight: '700', fontSize: '12px' } }, 'BOM Coverage'),
-      el('span', {
-        style: { color: assigned >= total ? 'var(--success)' : 'var(--warning)', fontWeight: '600', fontSize: '12px' },
-      }, `${assigned}/${total} assigned`),
-    ])
-  );
+
+  const chevron = el('span', {
+    class: 'icon',
+    html: icon(coverageCollapsed ? 'chevronRight' : 'chevronDown', 10),
+    style: { transition: 'transform 0.15s', display: 'inline-flex', flexShrink: '0' },
+  });
+
+  const body = el('div', {
+    class: 'coverage-body',
+    style: { display: coverageCollapsed ? 'none' : '' },
+  });
+
+  const header = el('div', {
+    class: 'coverage-header',
+    style: { cursor: 'pointer', userSelect: 'none' },
+    onclick: () => {
+      coverageCollapsed = !coverageCollapsed;
+      body.style.display = coverageCollapsed ? 'none' : '';
+      chevron.innerHTML = icon(coverageCollapsed ? 'chevronRight' : 'chevronDown', 10);
+    },
+  }, [
+    el('span', { style: { display: 'flex', alignItems: 'center', gap: '4px', fontWeight: '700', fontSize: '12px' } }, [
+      chevron,
+      'BOM Coverage',
+    ]),
+    el('span', {
+      style: { color: assigned >= total ? 'var(--success)' : 'var(--warning)', fontWeight: '600', fontSize: '12px' },
+    }, `${assigned}/${total} assigned`),
+  ]);
+  coverage.appendChild(header);
 
   const bar = el('div', { class: 'coverage-bar' });
   bomVars.forEach((v, i) => {
@@ -1806,7 +1869,7 @@ function renderCoverageBar(variables) {
       );
     }
   });
-  coverage.appendChild(bar);
+  body.appendChild(bar);
 
   const legend = el('div', { class: 'coverage-legend' });
   bomVars.forEach((v, i) => {
@@ -1820,7 +1883,8 @@ function renderCoverageBar(variables) {
       ])
     );
   });
-  coverage.appendChild(legend);
+  body.appendChild(legend);
+  coverage.appendChild(body);
 
   return coverage;
 }

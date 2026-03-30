@@ -341,8 +341,14 @@ async function toggleObjFav(name) {
   }
   await saveFavorites('starting-objects', objFavs);
 
-  const searchInput = qs('#so-search');
-  renderObjectList(cachedModel || [], searchInput?.value || '');
+  // Favoriting also selects the object
+  const obj = (cachedModel || []).find(o => o.name === name);
+  if (obj && highlightedType !== name) {
+    handleSelectObject(obj);
+  } else {
+    const searchInput = qs('#so-search');
+    renderObjectList(cachedModel || [], searchInput?.value || '');
+  }
 }
 
 function showAttributePreview(typeName) {

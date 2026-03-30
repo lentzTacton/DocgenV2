@@ -36,9 +36,15 @@ return {
     ],
   },
   plugins: [
+    // Word Add-in loads taskpane.html (manifest SourceLocation)
     new HtmlWebpackPlugin({
       template: './src/index.html',
       filename: 'taskpane.html',
+    }),
+    // Browser dev loads index.html at localhost:3000/ (no Office.js)
+    new HtmlWebpackPlugin({
+      template: './src/browser.html',
+      filename: 'index.html',
     }),
     new MiniCssExtractPlugin({
       filename: 'styles.[contenthash:8].css',

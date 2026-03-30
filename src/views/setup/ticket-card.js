@@ -5,12 +5,15 @@
  *   - Search / filter tickets by ID, summary, or owner
  *   - Star favorites — persisted to Dexie, always sorted to top
  *   - Status badges with "In Progress" priority sorting
- *   - Token status dot per ticket (green = token, gray = none)
- *   - Clicking a ticket shows the auth input for that ticket
+ *   - Inline token badge per selected row (with hover diagnostics tooltip)
+ *   - Inline actions: Get token, Test, Re-authorize
+ *   - Re-authorize opens auth form below the list
  */
 
 import { el, qs, clear } from '../../core/dom.js';
 import { iconEl, icon } from '../../components/icon.js';
+import { STEP_ICONS, renderDiagnosticSteps } from '../../components/diagnostic-steps.js';
+import { toggleTokenVisibility } from '../../components/auth-form.js';
 import state from '../../core/state.js';
 import events from '../../core/events.js';
 import { listTickets } from '../../services/api.js';
@@ -22,9 +25,10 @@ import {
   tryAsRefreshToken,
   testTicketToken,
   hasStoredToken,
+  authorizeTicket,
 } from '../../services/auth.js';
 import { ticketFetch } from '../../services/api.js';
-import { getInstance, loadFavorites, saveFavorites } from '../../core/storage.js';
+import { getInstance, loadFavorites, saveFavorites, setToken } from '../../core/storage.js';
 
 let favs = new Set();
 
@@ -33,6 +37,9 @@ let tokenStatus = {};
 
 // Visually highlighted ticket (not yet confirmed via token)
 let highlightedTicketId = null;
+
+// Whether the auth form below the list is showing
+let authFormOpen = false;
 
 // Map raw API status → display label + badge class
 const STATUS_MAP = {
@@ -54,12 +61,13 @@ function resolveStatus(raw) {
 
 const INACTIVE = new Set(['committed', 'done', 'discarded', 'closed']);
 
+// STEP_ICONS imported from shared diagnostic-steps.js
+
 /**
  * Create the ticket management card.
  * @param {HTMLElement} container
  */
 export function createTicketCard(container) {
-  // ── Search input ──
   const searchInput = el('input', {
     class: 'input ticket-search-input',
     id: 'ticket-search',
@@ -89,13 +97,7 @@ export function createTicketCard(container) {
     style: { display: 'none' },
   });
 
-  const statusMsg = el('div', {
-    class: 'status-message',
-    id: 'ticket-status',
-    style: { display: 'none' },
-  });
-
-  // Auth flow section (hidden until a ticket is clicked)
+  // Auth form section (below list — shown on re-auth or first auth)
   const authSection = el('div', {
     id: 'ticket-auth-section',
     class: 'ticket-auth-section',
@@ -104,30 +106,69 @@ export function createTicketCard(container) {
     el('div', { class: 'ticket-auth-header' }, [
       el('span', { class: 'ticket-auth-title', id: 'ticket-auth-title' }, 'Authorize Ticket'),
       el('button', {
-        class: 'ticket-auth-link',
+        class: 'ticket-inline-btn',
         id: 'ticket-auth-open-btn',
-        html: `Get token ${icon('externalLink', 12)}`,
+        html: `Get token ${icon('externalLink', 10)}`,
         onclick: handleOpenAuthUrl,
       }),
     ]),
+    el('div', { class: 'ticket-auth-fields' }, [
+      el('div', { class: 'ticket-auth-field' }, [
+        el('label', { class: 'ticket-auth-label', for: 'ticket-auth-code' }, 'Access Token'),
+        el('div', { class: 'input-with-toggle' }, [
+          el('input', {
+            class: 'input',
+            id: 'ticket-auth-code',
+            type: 'password',
+            placeholder: 'Paste access token',
+          }),
+          el('button', {
+            class: 'token-visibility-toggle',
+            type: 'button',
+            title: 'Show / hide token',
+            html: icon('eye', 14),
+            onclick: (e) => toggleTokenVisibility(e.currentTarget),
+          }),
+        ]),
+      ]),
+      el('div', { class: 'ticket-auth-field' }, [
+        el('label', { class: 'ticket-auth-label', for: 'ticket-auth-refresh' }, [
+          'Refresh Token',
+          el('span', { class: 'ticket-auth-label-hint' }, '(for auto-renewal)'),
+        ]),
+        el('div', { class: 'input-with-toggle' }, [
+          el('input', {
+            class: 'input',
+            id: 'ticket-auth-refresh',
+            type: 'password',
+            placeholder: 'Paste refresh token',
+          }),
+          el('button', {
+            class: 'token-visibility-toggle',
+            type: 'button',
+            title: 'Show / hide token',
+            html: icon('eye', 14),
+            onclick: (e) => toggleTokenVisibility(e.currentTarget),
+          }),
+        ]),
+      ]),
+    ]),
     el('div', { class: 'ticket-auth-input-row' }, [
-      el('input', {
-        class: 'input',
-        id: 'ticket-auth-code',
-        type: 'text',
-        placeholder: 'Paste token or auth code',
-      }),
       el('button', {
         class: 'btn btn-sm btn-primary',
         id: 'ticket-auth-submit-btn',
         onclick: handleSubmitAuth,
       }, 'Authorize'),
+      el('button', {
+        class: 'btn btn-sm btn-ghost',
+        onclick: () => hideAuthSection(),
+      }, 'Cancel'),
     ]),
   ]);
 
-  const ticketBadgeWrap = el('div', {
-    class: 'card-header-right conn-badge-wrap',
-    id: 'ticket-token-badge',
+  const statusMsg = el('div', {
+    class: 'status-message',
+    id: 'ticket-status',
     style: { display: 'none' },
   });
 
@@ -140,7 +181,6 @@ export function createTicketCard(container) {
           el('div', { class: 'card-subtitle' }, 'Select a ticket and authorize access'),
         ]),
       ]),
-      ticketBadgeWrap,
       refreshBtn,
     ]),
     el('div', { class: 'card-body' }, [
@@ -154,11 +194,8 @@ export function createTicketCard(container) {
 
   container.appendChild(card);
 
-  // Load favorites from Dexie
   loadFavorites('tickets').then(f => { favs = f; });
 
-  // When config is unlocked while already connected, re-render the ticket list
-  // (the connection.status listener won't fire because the status hasn't changed)
   state.on('config.locked', (locked) => {
     if (!locked && state.get('connection.status') === 'connected') {
       handleRefreshTickets();
@@ -170,11 +207,16 @@ export function createTicketCard(container) {
     const search = qs('#ticket-search-row');
     if (status === 'connected') {
       if (btn) btn.style.display = '';
-      handleRefreshTickets();
 
-      // If a ticket was pre-selected (e.g. restored from config snapshot),
-      // run the health check now — the tickets.selected listener won't fire
-      // again since the value was already set before connection completed.
+      // IMPORTANT: await handleRefreshTickets so that checkAllTokens finishes
+      // before we run the health check. Previously these ran concurrently,
+      // causing duplicate probes/refreshes for the same ticket token that
+      // would race and invalidate each other.
+      await handleRefreshTickets();
+
+      // Now that checkAllTokens has validated tokens (and cached them in
+      // memory), the health check can run cheaply — it will hit the in-memory
+      // cache instead of probing Tacton again.
       const preSelected = state.get('tickets.selected');
       if (preSelected) {
         await runTicketTokenHealthCheck(preSelected);
@@ -183,6 +225,7 @@ export function createTicketCard(container) {
       if (btn) btn.style.display = 'none';
       if (search) search.style.display = 'none';
       highlightedTicketId = null;
+      authFormOpen = false;
       tokenStatus = {};
       hideAuthSection();
       clear(qs('#ticket-list'));
@@ -192,26 +235,73 @@ export function createTicketCard(container) {
     }
   });
 
-  // Run ticket token health check when a ticket is selected
   state.on('tickets.selected', async (ticketId) => {
     if (!ticketId) {
       state.set('tickets.tokenHealth', null);
-      updateTicketBadge();
       return;
     }
+    // Only run health check if connection is established.
+    // During loadLockedConfig, tickets.selected is restored before
+    // the connection is re-established — running a health check then
+    // would race with the connection.status listener's own health check.
+    if (state.get('connection.status') !== 'connected') return;
     await runTicketTokenHealthCheck(ticketId);
   });
 
-  // Update badge whenever token health changes
-  state.on('tickets.tokenHealth', () => updateTicketBadge());
+  // Re-render rows when token health changes (updates inline badges)
+  state.on('tickets.tokenHealth', (health) => {
+    if (!health || !health.ticketId) return;
+
+    // If the selected ticket just became authorized, close the auth form
+    if (health.status === 'ok' && health.ticketId === highlightedTicketId) {
+      showTicketStatus('', '');
+      hideAuthSection();
+    }
+
+    // Update token status cache
+    if (health.status) tokenStatus[health.ticketId] = health.status;
+
+    // Try to update badge in-place (keeps tooltip open)
+    const row = document.querySelector(`.ticket-row[data-ticket-id="${health.ticketId}"]`);
+    if (row) {
+      const rightSide = row.querySelector('.ticket-row-right');
+      if (rightSide && health.steps?.length) {
+        const oldBadge = rightSide.querySelector('.ticket-token-badge-wrap');
+        const oldDot = rightSide.querySelector('.ticket-token-dot');
+        const newBadge = buildTokenBadge(health, health.ticketId);
+
+        if (oldBadge) {
+          // Check if tooltip was visible before replacing
+          const wasVisible = oldBadge.classList.contains('tooltip-visible');
+          oldBadge.replaceWith(newBadge);
+          if (wasVisible) {
+            // Re-open tooltip on the new badge element
+            const rect = newBadge.getBoundingClientRect();
+            const tip = newBadge.querySelector('.conn-tooltip');
+            if (tip) {
+              tip.style.top = `${rect.bottom + 6}px`;
+              tip.style.right = `${window.innerWidth - rect.right}px`;
+              tip.style.left = 'auto';
+            }
+            newBadge.classList.add('tooltip-visible');
+          }
+        } else if (oldDot) {
+          oldDot.replaceWith(newBadge);
+        }
+        // Also update the dot via data-token-dot for consistency
+        updateTokenDot(health.ticketId);
+        return; // Done — no full re-render needed
+      }
+    }
+
+    // Fallback: full re-render if the row wasn't found
+    const si = qs('#ticket-search');
+    renderTicketList(state.get('tickets.list') || [], si?.value || '');
+  });
 }
 
 // ─── Ticket Token Health Check ───────────────────────────────────────────
 
-/**
- * Run the full 5-step ticket token diagnostic and publish results to state.
- * Called when a ticket is selected and after successful authorization.
- */
 async function runTicketTokenHealthCheck(ticketId) {
   const instanceId = state.get('connection.instanceId');
   if (!instanceId) return;
@@ -235,100 +325,25 @@ async function runTicketTokenHealthCheck(ticketId) {
   }
 }
 
-// ─── Ticket Token Badge ──────────────────────────────────────────────────
-
-const BADGE_LABELS = {
-  ok: 'Token Valid',
-  warn: 'Token Partial',
-  expired: 'Token Expired',
-  none: 'No Token',
-  error: 'Token Error',
-};
-
-const BADGE_CLASS = {
-  ok: 'badge-success',
-  warn: 'badge-warning',
-  expired: 'badge-danger',
-  none: 'badge-warning',
-  error: 'badge-danger',
-};
-
-const STEP_ICONS = { pass: '✓', fail: '✗', skip: '–', warn: '!' };
-
-/**
- * Update the ticket token health badge in the card header.
- * Shows a colored badge + hover tooltip with 5-step diagnostic.
- */
-function updateTicketBadge() {
-  const badge = qs('#ticket-token-badge');
-  if (!badge) return;
-
-  const health = state.get('tickets.tokenHealth');
-  clear(badge);
-
-  if (!health || !health.steps?.length) {
-    badge.style.display = 'none';
-    return;
-  }
-
-  badge.style.display = '';
-
-  const status = health.status || 'none';
-  const label = BADGE_LABELS[status] || 'Unknown';
-  const cls = BADGE_CLASS[status] || 'badge-muted';
-
-  const badgeSpan = el('span', { class: `badge ${cls}` }, label);
-  badge.appendChild(badgeSpan);
-
-  // Build tooltip (same style as connection-card admin tooltip)
-  const tooltip = el('div', { class: 'conn-tooltip' });
-
-  const tooltipBadge = status === 'ok' ? 'ok'
-    : status === 'warn' ? 'warn'
-    : 'error';
-  const tooltipLabel = status === 'ok' ? 'All Good'
-    : status === 'warn' ? 'Partial'
-    : status === 'expired' ? 'Expired'
-    : status === 'none' ? 'No Token'
-    : 'Error';
-
-  const header = el('div', { class: 'conn-tooltip-header' }, [
-    el('span', { class: 'conn-tooltip-title' }, `Ticket Token (${health.ticketId})`),
-    el('span', { class: `conn-tooltip-badge ${tooltipBadge}` }, tooltipLabel),
-  ]);
-  tooltip.appendChild(header);
-
-  const stepsEl = el('div', { class: 'conn-tooltip-steps' });
-  for (const step of health.steps) {
-    stepsEl.appendChild(el('div', { class: 'conn-tooltip-step' }, [
-      el('span', { class: `conn-tooltip-icon tt-${step.status}` }, STEP_ICONS[step.status] || '–'),
-      el('div', { class: 'conn-tooltip-body' }, [
-        el('div', { class: 'conn-tooltip-label' }, step.label),
-        el('div', { class: 'conn-tooltip-detail' }, step.detail),
-      ]),
-    ]));
-  }
-  tooltip.appendChild(stepsEl);
-  badge.appendChild(tooltip);
-}
-
 // ─── Handlers ───────────────────────────────────────────────────────────
 
-async function handleTestTicketToken() {
-  const ticketId = state.get('tickets.selected') || highlightedTicketId;
+async function handleTestTicketToken(ticketId) {
   if (!ticketId) return;
 
-  const btn = qs('#ticket-test-inline-btn');
+  const btn = document.querySelector(`[data-test-btn="${ticketId}"]`);
   if (btn) {
     btn.disabled = true;
-    btn.innerHTML = `${icon('refresh', 12)} Testing…`;
+    btn.textContent = 'Testing…';
   }
 
   await runTicketTokenHealthCheck(ticketId);
 
-  if (btn) {
-    btn.disabled = false;
-    btn.innerHTML = `${icon('refresh', 12)} Test`;
+  // After health check, the badge may have been replaced in-place.
+  // Find the new button and reset it (if it wasn't already replaced).
+  const newBtn = document.querySelector(`[data-test-btn="${ticketId}"]`);
+  if (newBtn) {
+    newBtn.disabled = false;
+    newBtn.textContent = 'Test token';
   }
 }
 
@@ -357,21 +372,21 @@ async function handleRefreshTickets() {
 
   state.set('tickets.list', result.tickets);
 
-  // Show search bar once we have tickets
   const search = qs('#ticket-search-row');
   if (search) search.style.display = result.tickets.length > 0 ? '' : 'none';
 
-  // Reload favorites
   favs = await loadFavorites('tickets');
 
-  // Check token status for all tickets in the background
   tokenStatus = {};
   renderTicketList(result.tickets);
-  checkAllTokens(instance, result.tickets);
 
-  // Auto-select first favorite ticket (or first ticket if none favorited)
-  // Only highlight — confirmTicketSelection happens inside handleSelectTicket
-  // if the ticket already has a valid token
+  // IMPORTANT: await checkAllTokens so that all ticket tokens are fully
+  // resolved (probed/refreshed/cached) before any other code runs.
+  // Previously this was fire-and-forget, causing races with testTicketToken
+  // and getModel — each would independently probe/refresh the same token,
+  // and each refresh invalidates the previous token, causing cascading 403s.
+  await checkAllTokens(instance, result.tickets);
+
   if (!state.get('tickets.selected') && result.tickets.length > 0) {
     const firstFav = result.tickets.find(t => favs.has(t.id));
     const autoSelect = firstFav || result.tickets[0];
@@ -381,18 +396,8 @@ async function handleRefreshTickets() {
   }
 }
 
-/**
- * Check token availability and validity for all tickets (background, non-blocking).
- * For each ticket:
- *   - No token → gray dot ('none')
- *   - Has token, API responds OK → green dot ('ok')
- *   - Has token, API fails (401/403/error) → red dot ('error')
- * Updates the token dot on each row as results come in.
- */
 async function checkAllTokens(instance, tickets) {
   for (const ticket of tickets) {
-    // Only check tickets that have a stored token — skip the rest to avoid
-    // hammering the server with client_credentials calls that will fail.
     const hasToken = await hasStoredToken(ticket.id);
     if (!hasToken) {
       tokenStatus[ticket.id] = 'none';
@@ -404,23 +409,26 @@ async function checkAllTokens(instance, tickets) {
     updateTokenDot(ticket.id);
 
     try {
+      // getTicketToken already validates the stored token via probeTicketToken
+      // (Tier 2 in _resolveTicketToken), so no need for a second describe call.
+      // The redundant ticketFetch was causing extra API chatter and — when racing
+      // with other callers — could trigger unnecessary 403-retry refresh flows.
       const { token } = await getTicketToken(instance, ticket.id);
-      if (!token) {
-        tokenStatus[ticket.id] = 'none';
-      } else {
-        // Validate by hitting the describe endpoint
-        const result = await ticketFetch(instance, ticket.id, 'api-v2.2/describe');
-        tokenStatus[ticket.id] = result.ok ? 'ok' : 'error';
-      }
+      tokenStatus[ticket.id] = token ? 'ok' : 'none';
     } catch {
       tokenStatus[ticket.id] = 'error';
     }
-    // Update just the dot for this ticket
     updateTokenDot(ticket.id);
 
-    // If this is the highlighted ticket and it now has a valid token, auto-confirm
-    if (ticket.id === highlightedTicketId && tokenStatus[ticket.id] === 'ok' && !state.get('tickets.selected')) {
-      confirmTicketSelection(ticket.id);
+    // If this highlighted ticket now has a valid token
+    if (ticket.id === highlightedTicketId && tokenStatus[ticket.id] === 'ok') {
+      hideAuthSection(); // close any open auth form
+      if (!state.get('tickets.selected')) {
+        confirmTicketSelection(ticket.id);
+      }
+      // Re-render to show the authorized inline actions
+      const si = qs('#ticket-search');
+      renderTicketList(state.get('tickets.list') || [], si?.value || '');
     }
   }
 }
@@ -440,6 +448,8 @@ function updateTokenDot(ticketId) {
   dot.title = TOKEN_TITLES[status] || 'No token';
 }
 
+// ─── Render ─────────────────────────────────────────────────────────────
+
 function renderTicketList(tickets, filter) {
   const listEl = qs('#ticket-list');
   clear(listEl);
@@ -449,7 +459,6 @@ function renderTicketList(tickets, filter) {
     return;
   }
 
-  // Filter
   const lowerFilter = (filter || '').toLowerCase();
   const filtered = lowerFilter
     ? tickets.filter(t =>
@@ -463,7 +472,6 @@ function renderTicketList(tickets, filter) {
     return;
   }
 
-  // Sort: favorites first, then In Progress, then active before inactive, then by ID
   const sorted = [...filtered].sort((a, b) => {
     const aFav = favs.has(a.id) ? 0 : 1;
     const bFav = favs.has(b.id) ? 0 : 1;
@@ -481,8 +489,6 @@ function renderTicketList(tickets, filter) {
   });
 
   const selected = highlightedTicketId;
-
-  // Check if there are any favorites in the filtered list
   const hasFavs = sorted.some(t => favs.has(t.id));
   let separatorAdded = false;
 
@@ -490,7 +496,6 @@ function renderTicketList(tickets, filter) {
     const isFav = favs.has(ticket.id);
     const isSelected = ticket.id === selected;
 
-    // Add separator between favorites and non-favorites
     if (hasFavs && !isFav && !separatorAdded) {
       listEl.appendChild(el('div', { class: 'ticket-separator' }));
       separatorAdded = true;
@@ -509,18 +514,14 @@ function renderTicketList(tickets, filter) {
       },
     });
 
-    // Token status dot
     const tokenDot = el('span', {
       class: `ticket-token-dot token-${tkStatus}`,
       'data-token-dot': ticket.id,
       title: TOKEN_TITLES[tkStatus] || 'No token',
     });
 
-    const row = el('div', {
-      class: `ticket-row ${isSelected ? 'ticket-row-selected' : ''}`,
-      'data-ticket-id': ticket.id,
-      onclick: () => handleSelectTicket(ticket),
-    }, [
+    // Build main row content
+    const mainRow = el('div', { class: 'ticket-row-main' }, [
       starBtn,
       el('div', { class: 'ticket-row-left' }, [
         el('span', { class: 'ticket-id' }, ticket.id),
@@ -532,9 +533,264 @@ function renderTicketList(tickets, filter) {
       ]),
     ]);
 
+    // Build inline actions (only for selected ticket)
+    let actionsRow = null;
+    if (isSelected) {
+      actionsRow = buildInlineActions(ticket);
+    }
+
+    const row = el('div', {
+      class: `ticket-row ${isSelected ? 'ticket-row-selected' : ''}`,
+      'data-ticket-id': ticket.id,
+      onclick: () => handleSelectTicket(ticket),
+    }, [
+      mainRow,
+      actionsRow,
+    ]);
+
+    // If selected and has health data, replace dot with badge+tooltip
+    if (isSelected && (tkStatus === 'ok' || tkStatus === 'error')) {
+      const health = state.get('tickets.tokenHealth');
+      if (health && health.ticketId === ticket.id && health.steps?.length) {
+        const badgeWrap = row.querySelector('.ticket-row-right');
+        if (badgeWrap) {
+          const tokenBadge = buildTokenBadge(health, ticket.id);
+          const existingDot = badgeWrap.querySelector('.ticket-token-dot');
+          if (existingDot) existingDot.replaceWith(tokenBadge);
+        }
+      }
+    }
+
     listEl.appendChild(row);
   }
 }
+
+/**
+ * Build the token badge with hover tooltip.
+ * Tooltip includes diagnostic steps + action buttons (Test, Re-authorize).
+ * The tooltip stays open while the mouse is inside it.
+ */
+function buildTokenBadge(health, ticketId) {
+  const status = health.status || 'none';
+
+  const BADGE_LABELS = {
+    ok: 'Authorized',
+    warn: 'Partial',
+    expired: 'Expired',
+    none: 'No Token',
+    error: 'Error',
+  };
+  const BADGE_CLASS = {
+    ok: 'badge-success',
+    warn: 'badge-warning',
+    expired: 'badge-danger',
+    none: 'badge-warning',
+    error: 'badge-danger',
+  };
+
+  const label = BADGE_LABELS[status] || 'Unknown';
+  const cls = BADGE_CLASS[status] || 'badge-muted';
+
+  const wrap = el('span', { class: 'ticket-token-badge-wrap' });
+  const badgeSpan = el('span', { class: `badge badge-sm ${cls}` }, label);
+  wrap.appendChild(badgeSpan);
+
+  // "Get token" icon button — sits next to the badge
+  const getTokenBtn = el('button', {
+    class: 'ticket-get-token-icon',
+    title: 'Get token from Tacton',
+    html: icon('externalLink', 11),
+    onclick: (e) => { e.stopPropagation(); handleOpenAuthUrl(ticketId); },
+  });
+  wrap.appendChild(getTokenBtn);
+
+  // Build tooltip
+  const tooltip = el('div', { class: 'conn-tooltip ticket-badge-tooltip' });
+
+  const tooltipBadge = status === 'ok' ? 'ok' : status === 'warn' ? 'warn' : 'error';
+  const tooltipLabel = status === 'ok' ? 'All Good'
+    : status === 'warn' ? 'Partial'
+    : status === 'expired' ? 'Expired'
+    : status === 'none' ? 'No Token'
+    : 'Error';
+
+  tooltip.appendChild(el('div', { class: 'conn-tooltip-header' }, [
+    el('span', { class: 'conn-tooltip-title' }, `Token (${health.ticketId})`),
+    el('span', { class: `conn-tooltip-badge ${tooltipBadge}` }, tooltipLabel),
+  ]));
+
+  const stepsEl = el('div', { class: 'conn-tooltip-steps' });
+  renderDiagnosticSteps(stepsEl, health.steps);
+  tooltip.appendChild(stepsEl);
+
+  // Action buttons inside tooltip
+  const tooltipActions = el('div', { class: 'tooltip-actions' }, [
+    el('button', {
+      class: 'tooltip-action-btn',
+      'data-test-btn': ticketId,
+      onclick: (e) => { e.stopPropagation(); handleTestTicketToken(ticketId); },
+    }, 'Test token'),
+    el('button', {
+      class: 'tooltip-action-btn',
+      onclick: (e) => { e.stopPropagation(); openAuthForm(ticketId); },
+    }, 'Re-authorize'),
+  ]);
+  tooltip.appendChild(tooltipActions);
+  wrap.appendChild(tooltip);
+
+  // ── Hover logic: stay open while mouse is in badge OR tooltip ──
+  let hideTimer = null;
+  function showTooltip() {
+    clearTimeout(hideTimer);
+    const rect = wrap.getBoundingClientRect();
+    tooltip.style.top = `${rect.bottom + 6}px`;
+    tooltip.style.right = `${window.innerWidth - rect.right}px`;
+    tooltip.style.left = 'auto';
+    wrap.classList.add('tooltip-visible');
+  }
+  function scheduleHide() {
+    hideTimer = setTimeout(() => wrap.classList.remove('tooltip-visible'), 150);
+  }
+  wrap.addEventListener('mouseenter', showTooltip);
+  wrap.addEventListener('mouseleave', scheduleHide);
+  tooltip.addEventListener('mouseenter', showTooltip);
+  tooltip.addEventListener('mouseleave', scheduleHide);
+
+  return wrap;
+}
+
+/**
+ * Build inline actions row for the selected ticket.
+ * Returns null — the gray dot communicates "not authorized" and the
+ * auth form opens below the list automatically. Authorized tickets
+ * show everything in the badge + tooltip instead.
+ */
+function buildInlineActions(ticket) {
+  return null;
+}
+
+// toggleTokenVisibility imported from shared auth-form.js
+
+// ─── Auth Form (below list) ─────────────────────────────────────────────
+
+async function openAuthForm(ticketId) {
+  authFormOpen = true;
+
+  const section = qs('#ticket-auth-section');
+  section.style.display = '';
+  section.dataset.ticketId = ticketId;
+
+  const title = qs('#ticket-auth-title');
+  if (title) title.textContent = `Authorize ${ticketId}`;
+
+  const codeInput = qs('#ticket-auth-code');
+  if (codeInput) { codeInput.value = ''; codeInput.type = 'password'; }
+  const refreshInput = qs('#ticket-auth-refresh');
+  if (refreshInput) { refreshInput.value = ''; refreshInput.type = 'password'; }
+
+  // Reset eye toggles back to "show" state
+  section.querySelectorAll('.token-visibility-toggle').forEach(btn => {
+    btn.innerHTML = icon('eye', 14);
+    btn.title = 'Show / hide token';
+  });
+
+  showTicketStatus('', '');
+
+  const instanceId = state.get('connection.instanceId');
+  const instance = await getInstance(instanceId);
+  if (instance) {
+    try {
+      const authUrl = getTicketAuthUrl(instance, ticketId);
+      section.dataset.authUrl = authUrl;
+    } catch (_) {
+      section.dataset.authUrl = '';
+    }
+  }
+
+  const openBtn = qs('#ticket-auth-open-btn');
+  if (openBtn) openBtn.style.display = section.dataset.authUrl ? '' : 'none';
+}
+
+function hideAuthSection() {
+  authFormOpen = false;
+  const section = qs('#ticket-auth-section');
+  if (section) section.style.display = 'none';
+}
+
+async function handleOpenAuthUrl(ticketId) {
+  // If called from inline button (with ticketId) or from auth section
+  let instanceId = state.get('connection.instanceId');
+  const instance = await getInstance(instanceId);
+  if (!instance) return;
+
+  const tid = ticketId || qs('#ticket-auth-section')?.dataset.ticketId;
+  if (!tid) return;
+
+  try {
+    const authUrl = getTicketAuthUrl(instance, tid);
+    if (authUrl) window.open(authUrl, '_blank');
+  } catch (_) { /* ignore */ }
+}
+
+async function handleSubmitAuth() {
+  const section = qs('#ticket-auth-section');
+  const ticketId = section?.dataset.ticketId;
+  const accessInput = qs('#ticket-auth-code');
+  const refreshInput = qs('#ticket-auth-refresh');
+  const rawAccess = accessInput?.value.trim();
+  const rawRefresh = refreshInput?.value.trim();
+
+  if ((!rawAccess && !rawRefresh) || !ticketId) {
+    showTicketStatus('Access token is required', 'error');
+    return;
+  }
+
+  const instanceId = state.get('connection.instanceId');
+  const instance = await getInstance(instanceId);
+  if (!instance) return;
+
+  // Clear any previous error status before starting
+  showTicketStatus('', '');
+
+  const btn = qs('#ticket-auth-submit-btn');
+  if (btn) {
+    btn.style.minWidth = `${btn.offsetWidth}px`;
+    btn.textContent = 'Authorizing…';
+    btn.disabled = true;
+  }
+
+  // ── Use shared authorization flow (validates before storing) ──
+  const result = await authorizeTicket(instance, ticketId, rawAccess, rawRefresh);
+
+  if (btn) {
+    btn.textContent = 'Authorize';
+    btn.disabled = false;
+  }
+
+  if (result.ok) {
+    tokenStatus[ticketId] = 'ok';
+    // Clear inputs only on success
+    if (accessInput) accessInput.value = '';
+    if (refreshInput) refreshInput.value = '';
+    showTicketStatus('', '');
+    hideAuthSection();
+
+    const wasAlreadySelected = state.get('tickets.selected') === ticketId;
+    confirmTicketSelection(ticketId);
+    if (wasAlreadySelected) {
+      await runTicketTokenHealthCheck(ticketId);
+    }
+  } else {
+    tokenStatus[ticketId] = 'error';
+    showTicketStatus(result.error || 'Token not accepted — check the value', 'error');
+    // Auth failed — run health check so the error badge+tooltip show diagnostics
+    await runTicketTokenHealthCheck(ticketId);
+  }
+
+  // tokenHealth listener already handles in-place badge update + dot
+}
+
+// ─── Toggle & Select ────────────────────────────────────────────────────
 
 async function toggleFavorite(ticketId) {
   if (favs.has(ticketId)) {
@@ -544,243 +800,32 @@ async function toggleFavorite(ticketId) {
   }
   await saveFavorites('tickets', favs);
 
-  const searchInput = qs('#ticket-search');
-  const filter = searchInput?.value || '';
-  renderTicketList(state.get('tickets.list') || [], filter);
+  const si = qs('#ticket-search');
+  renderTicketList(state.get('tickets.list') || [], si?.value || '');
 }
 
-/**
- * Clicking a ticket: highlight it and show auth section.
- * Only confirms selection in state if the ticket already has a valid token.
- * Otherwise the user must authorize first.
- */
 async function handleSelectTicket(ticket) {
   highlightedTicketId = ticket.id;
 
-  // Re-render to show highlight
-  const searchInput = qs('#ticket-search');
-  const filter = searchInput?.value || '';
-  renderTicketList(state.get('tickets.list') || [], filter);
+  // If the newly selected ticket is authorized, close any auth form
+  if (tokenStatus[ticket.id] === 'ok') {
+    hideAuthSection();
+  } else {
+    // Not authorized — auto-open the auth form
+    openAuthForm(ticket.id);
+  }
 
-  // Show auth section for this ticket
-  const instanceId = state.get('connection.instanceId');
-  const instance = await getInstance(instanceId);
-  if (!instance) return;
+  const si = qs('#ticket-search');
+  renderTicketList(state.get('tickets.list') || [], si?.value || '');
 
-  showAuthSection(instance, ticket.id);
-
-  // If the ticket already has a validated token, confirm selection immediately
   if (tokenStatus[ticket.id] === 'ok') {
     confirmTicketSelection(ticket.id);
   }
 }
 
-/**
- * Confirm a ticket as the active selection (set state, emit event).
- * Called when a ticket already has a token or after successful authorization.
- */
 function confirmTicketSelection(ticketId) {
   state.set('tickets.selected', ticketId);
   events.emit('ticket:selected', { ticketId, hasToken: true });
-}
-
-function showAuthSection(instance, ticketId) {
-  const section = qs('#ticket-auth-section');
-  section.style.display = '';
-  section.dataset.ticketId = ticketId;
-
-  // Reset authorized state
-  section.classList.remove('is-authorized');
-  const prevStatus = section.querySelector('.ticket-auth-authorized-status');
-  if (prevStatus) prevStatus.remove();
-
-  // Update the title to show which ticket
-  const title = qs('#ticket-auth-title');
-  if (title) title.textContent = `Authorize ${ticketId}`;
-
-  // Clear previous input
-  const codeInput = qs('#ticket-auth-code');
-  if (codeInput) codeInput.value = '';
-
-  // Clear previous status
-  showTicketStatus('', '');
-
-  try {
-    const authUrl = getTicketAuthUrl(instance, ticketId);
-    section.dataset.authUrl = authUrl;
-  } catch (e) {
-    // Auth URL generation may fail if frontend creds aren't set — that's ok
-    section.dataset.authUrl = '';
-  }
-
-  // Hide "Open Auth URL" button if no URL available
-  const openBtn = qs('#ticket-auth-open-btn');
-  if (openBtn) openBtn.style.display = section.dataset.authUrl ? '' : 'none';
-
-  // If the ticket already has a valid token, show authorized state immediately
-  if (tokenStatus[ticketId] === 'ok') {
-    showAuthorizedState(ticketId, '');
-  }
-}
-
-function hideAuthSection() {
-  const section = qs('#ticket-auth-section');
-  if (section) {
-    section.style.display = 'none';
-    section.classList.remove('is-authorized');
-    // Remove authorized status row if present
-    const statusRow = section.querySelector('.ticket-auth-authorized-status');
-    if (statusRow) statusRow.remove();
-  }
-}
-
-/**
- * Show compact authorized state — hides input row, shows "Authorized ✓" with re-auth link.
- */
-function showAuthorizedState(ticketId, method) {
-  const section = qs('#ticket-auth-section');
-  if (!section) return;
-
-  section.classList.add('is-authorized');
-
-  // Remove any previous authorized status row
-  const prev = section.querySelector('.ticket-auth-authorized-status');
-  if (prev) prev.remove();
-
-  const methodLabel = method ? ` (${method})` : '';
-  const statusRow = el('div', { class: 'ticket-auth-authorized-status' }, [
-    el('span', { class: 'ticket-auth-check-icon', html: icon('check', 14) }),
-    el('span', { class: 'ticket-auth-check-label' }, `Authorized ${ticketId}${methodLabel}`),
-    el('div', { class: 'ticket-auth-actions' }, [
-      el('button', {
-        class: 'ticket-auth-action-link',
-        id: 'ticket-test-inline-btn',
-        onclick: handleTestTicketToken,
-        html: `${icon('refresh', 12)} Test`,
-      }),
-      el('button', {
-        class: 'ticket-auth-action-link',
-        onclick: () => {
-          section.classList.remove('is-authorized');
-          statusRow.remove();
-          const codeInput = qs('#ticket-auth-code');
-          if (codeInput) codeInput.value = '';
-        },
-      }, 'Re-authorize'),
-    ]),
-  ]);
-
-  // Insert after the header
-  const header = section.querySelector('.ticket-auth-header');
-  if (header && header.nextSibling) {
-    section.insertBefore(statusRow, header.nextSibling);
-  } else {
-    section.appendChild(statusRow);
-  }
-}
-
-async function handleOpenAuthUrl() {
-  const section = qs('#ticket-auth-section');
-  const authUrl = section?.dataset.authUrl;
-  if (authUrl) {
-    window.open(authUrl, '_blank');
-  }
-}
-
-/**
- * Handle pasted token / auth code submission.
- *
- * Try order (mirrors TactonUtil SAVE_TICKET_TOKEN):
- *   1. Try as access token — probe describe endpoint directly
- *   2. Try as refresh token — exchange for access token, validate, persist both
- *   3. Try as authorization code — exchange via OAuth code grant
- */
-async function handleSubmitAuth() {
-  const section = qs('#ticket-auth-section');
-  const ticketId = section?.dataset.ticketId;
-  const codeInput = qs('#ticket-auth-code');
-  const raw = codeInput?.value.trim();
-
-  if (!raw || !ticketId) {
-    showTicketStatus('Please enter a token or authorization code', 'error');
-    return;
-  }
-
-  const instanceId = state.get('connection.instanceId');
-  const instance = await getInstance(instanceId);
-  if (!instance) return;
-
-  const btn = qs('#ticket-auth-submit-btn');
-  btn.style.minWidth = `${btn.offsetWidth}px`;
-  btn.textContent = 'Authorizing…';
-  btn.disabled = true;
-
-  let authorized = false;
-  let authMethod = '';
-
-  // ── 1. Try as direct access token ──
-  await storeManualTicketToken(ticketId, raw);
-  const accessProbe = await ticketFetch(instance, ticketId, 'api-v2.2/describe');
-  if (accessProbe.ok) {
-    tokenStatus[ticketId] = 'ok';
-    authMethod = 'access token';
-    authorized = true;
-
-    // Also try to store it as a refresh token so future sessions can refresh.
-    // The raw value might be a refresh token that also works as access — store it.
-    tryAsRefreshToken(instance, ticketId, raw).catch(() => {});
-  } else {
-    // ── 2. Try as refresh token ──
-    const refreshResult = await tryAsRefreshToken(instance, ticketId, raw);
-    if (refreshResult.ok) {
-      tokenStatus[ticketId] = 'ok';
-      authMethod = 'refresh token';
-      authorized = true;
-    } else {
-      // ── 3. Try as authorization code ──
-      const codeResult = await exchangeTicketCode(instance, ticketId, raw);
-      if (codeResult.ok) {
-        const validation = await ticketFetch(instance, ticketId, 'api-v2.2/describe');
-        tokenStatus[ticketId] = validation.ok ? 'ok' : 'error';
-        if (validation.ok) {
-          authMethod = 'auth code';
-          authorized = true;
-        } else {
-          showTicketStatus(`Token for ${ticketId} failed validation`, 'error');
-        }
-      } else {
-        tokenStatus[ticketId] = 'error';
-        showTicketStatus(
-          'Not accepted as access token, refresh token, or auth code',
-          'error',
-        );
-      }
-    }
-  }
-
-  codeInput.value = '';
-  btn.textContent = 'Authorize';
-  btn.disabled = false;
-
-  // If authorization succeeded, confirm this ticket and show authorized state
-  if (authorized) {
-    showTicketStatus('', ''); // clear any previous error
-    showAuthorizedState(ticketId, authMethod);
-
-    const wasAlreadySelected = state.get('tickets.selected') === ticketId;
-    confirmTicketSelection(ticketId);
-    // If the ticket was already selected, the state listener won't fire —
-    // run the health check explicitly so the badge updates.
-    if (wasAlreadySelected) {
-      await runTicketTokenHealthCheck(ticketId);
-    }
-  }
-
-  // Update the dot and re-render
-  updateTokenDot(ticketId);
-  const searchInput = qs('#ticket-search');
-  const filter = searchInput?.value || '';
-  renderTicketList(state.get('tickets.list') || [], filter);
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────

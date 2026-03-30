@@ -72,8 +72,9 @@ export const wizState = {
  * @param {Object} existing - existing variable to edit, or null for new
  */
 export function resetWiz(existing) {
-  // Preserve pre-set catalogueId (set by "New data set" menu on a catalogue)
+  // Preserve pre-set catalogueId and sectionId (set by "New data set" menu)
   const presetCatalogueId = wizState.catalogueId;
+  const presetSectionId = wizState.sectionId;
 
   wizState.isEditMode = !!existing;
   wizState.existingVariable = existing;
@@ -103,6 +104,8 @@ export function resetWiz(existing) {
     wizState.previewColumns = copy.previewColumns || [];
     wizState.sourceDefine = copy.sourceDefine || '';
     wizState.sourceDefineSource = copy.sourceDefineSource || '';
+    wizState._singleFilter = copy._singleFilter || null;
+    wizState._singleLeafField = copy._singleLeafField || null;
     wizState.id = copy.id;
   } else {
     // New variable defaults
@@ -121,7 +124,7 @@ export function resetWiz(existing) {
     wizState.catchAll = false;
     wizState.excludeVars = [];
     wizState.catalogueId = presetCatalogueId || null;
-    wizState.sectionId = null;
+    wizState.sectionId = presetSectionId || null;
     wizState.cpContext = null;
     wizState.matchCount = 0;
     wizState.tags = [];
@@ -138,11 +141,19 @@ export function resetWiz(existing) {
   wizState.modelObjects = [];
   wizState.objectRecords = [];
 
-  // Reset object explorer state
+  // Reset object explorer state (objectPath rebuilt later by rebuildObjectPath)
   wizState.objectPath = [];
   wizState.explorerTab = 'all';
   wizState.explorerFavs = new Set();
   wizState.currentObjDesc = null;
+
+  // Only reset single-filter state for NEW variables — in edit mode these
+  // were already restored from the saved variable above (lines 107-108).
+  // rebuildObjectPath() will also re-extract _singleLeafField from the source.
+  if (!existing) {
+    wizState._singleLeafField = null;
+    wizState._singleFilter = null;
+  }
 
   // Reset source mode — auto-detect from existing source
   if (existing && existing.source && existing.source.includes('getConfigurationAttribute(')) {
@@ -150,6 +161,7 @@ export function resetWiz(existing) {
   } else {
     wizState._singleSourceMode = 'object';
   }
+
 
   // Reset config explorer state
   wizState._configTab = 'all';
@@ -192,6 +204,90 @@ export function inferPurpose(v) {
 }
 
 /**
+ * Rebuild objectPath from a source expression + model objects.
+ *
+ * Given an expression like "solution.opportunity.currency.name" and the model,
+ * walks the ref chain to reconstruct the objectPath segments the explorer needs
+ * for breadcrumb navigation. Also strips the leaf field from wizState.source
+ * so the explorer shows the correct object with the leaf highlighted.
+ *
+ * Call this after the model is loaded (in bootAsync edit-mode path).
+ *
+ * @param {Array} modelObjects — array of {name, attributes: [{name, refType}]}
+ */
+export function rebuildObjectPath(modelObjects) {
+  if (!wizState.isEditMode || !wizState.source || !modelObjects?.length) return;
+  // Don't rebuild for non-object/single types or config sources
+  if (wizState.type !== 'object' && wizState.type !== 'single') return;
+  if (wizState._singleSourceMode === 'config') return;
+
+  const startObj = state.get('startingObject.type') || 'Solution';
+  const root = startObj.charAt(0).toLowerCase() + startObj.slice(1);
+  const source = wizState.source;
+
+  if (!source.startsWith(root)) return;
+
+  // Tokenise: split on dots but keep .related('X','Y') as single tokens
+  const tokens = [];
+  let rest = source.slice(root.length); // strip root prefix
+  while (rest.length > 0) {
+    if (rest.startsWith('.related(')) {
+      // Parse .related('FromObject','attribute')
+      const m = rest.match(/^\.related\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)/);
+      if (m) {
+        tokens.push({ type: 'reverse', fromObject: m[1], name: m[2] });
+        rest = rest.slice(m[0].length);
+      } else {
+        break; // malformed — bail
+      }
+    } else if (rest.startsWith('.')) {
+      // Forward segment
+      const dotRest = rest.slice(1); // strip leading dot
+      const nextDot = dotRest.search(/[.]/);
+      const seg = nextDot === -1 ? dotRest : dotRest.slice(0, nextDot);
+      if (!seg) break;
+      tokens.push({ type: 'forward', name: seg });
+      rest = nextDot === -1 ? '' : dotRest.slice(nextDot);
+    } else {
+      break;
+    }
+  }
+
+  if (tokens.length === 0) return;
+
+  // Walk the model to determine which forward tokens are refs vs the leaf field.
+  // Reverse tokens are always path segments (never the leaf).
+  const path = [];
+  let currentObj = startObj;
+
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if (tok.type === 'reverse') {
+      path.push({ name: tok.name, reverse: true, fromObject: tok.fromObject });
+      currentObj = tok.fromObject;
+      continue;
+    }
+    // Forward token — check if it's a ref on the current object
+    const objDef = modelObjects.find(o => o.name === currentObj);
+    if (!objDef) break;
+    const attr = objDef.attributes.find(a => a.name === tok.name);
+    if (attr && attr.refType) {
+      // It's a reference — add as path segment
+      path.push({ name: tok.name, refType: attr.refType });
+      currentObj = attr.refType;
+    } else {
+      // Not a ref — this is the leaf field (and everything after it like .trim())
+      wizState._singleLeafField = tok.name;
+      break;
+    }
+  }
+
+  if (path.length > 0) {
+    wizState.objectPath = path;
+  }
+}
+
+/**
  * Get a snapshot of the current variable for saving.
  * @returns {Object} variable object
  */
@@ -220,5 +316,7 @@ export function getWizSnapshot() {
     previewColumns: wizState.previewColumns || [],
     sourceDefine: wizState.sourceDefine || '',
     sourceDefineSource: wizState.sourceDefineSource || '',
+    _singleFilter: wizState._singleFilter || null,
+    _singleLeafField: wizState._singleLeafField || null,
   };
 }

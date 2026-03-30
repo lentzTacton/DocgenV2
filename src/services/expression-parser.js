@@ -261,7 +261,9 @@ function inferDataType(source) {
   if (!source) return 'bom';
 
   // Check if collection narrows to one record → single
-  const narrowsToOne = source.includes('[0]');
+  // [0], [1], [n] — any index access narrows to a single record
+  // .{?...} without index keeps it as a collection unless combined with [n]
+  const narrowsToOne = /\[\d+\]/.test(source);
 
   // ── Collection types ────────────────────────────────────────────
 
@@ -271,8 +273,13 @@ function inferDataType(source) {
   if (source.includes('.groupBy(')) return 'bom';
   if (source.includes('.flatten(')) return 'bom';
 
-  // Filter — single if [0], otherwise bom
-  if (source.includes('.{?')) return narrowsToOne ? 'single' : 'bom';
+  // Filter — single if [n] or if followed by a leaf field (e.g. .{?cond}.fieldName)
+  if (source.includes('.{?')) {
+    if (narrowsToOne) return 'single';
+    // .{?...}.leafField → intends single scalar extraction
+    if (/\.\{\?[^}]+\}\.\w+$/.test(source)) return 'single';
+    return 'bom';
+  }
 
   // .size() / .sum() → scalar number
   if (source.includes('.size()') || source.includes('.sum()')) return 'single';
@@ -315,7 +322,67 @@ function inferDataType(source) {
   if (source.includes('?') && source.includes(':')) return 'single';
   if (/[+\-*/]/.test(source) && !source.includes('.{')) return 'single';
 
+  // Any expression with index access [n] narrows to a single record
+  if (narrowsToOne) return 'single';
+
   return 'bom';
+}
+
+// ─── Filter / index extraction from source expressions ──────────────
+
+/**
+ * Parse filter (.{?...}) and index ([n]) syntax from a source expression.
+ * Returns { cleanSource, filters[], filterLogic, indexAccess }.
+ *
+ * Example:
+ *   "solution.opportunity.{?name==\"Euro\"}.currency"
+ *   → cleanSource: "solution.opportunity.currency"
+ *     filters: [{ field: 'name', op: '==', value: 'Euro' }]
+ *     indexAccess: null
+ *
+ *   "solution.opportunity[0].name"
+ *   → cleanSource: "solution.opportunity.name"
+ *     filters: []
+ *     indexAccess: 0
+ */
+export function parseSourceFilters(source) {
+  if (!source) return { cleanSource: source, filters: [], filterLogic: 'and', indexAccess: null };
+
+  const rawSegments = source.replace(/^#(this|cp)\./, '').split('.');
+  const prefix = source.startsWith('#this.') ? '#this.' : source.startsWith('#cp.') ? '#cp.' : '';
+  const cleanSegments = [];
+  const filters = [];
+  let filterLogic = 'and';
+  let indexAccess = null;
+
+  for (const seg of rawSegments) {
+    // Filter segment: {?field=="value"}
+    if (seg.startsWith('{?') && seg.endsWith('}')) {
+      const inner = seg.slice(2, -1);
+      if (inner.includes(' || ')) filterLogic = 'or';
+      const condParts = inner.split(/\s*(?:&&|\|\|)\s*/);
+      for (const cp of condParts) {
+        const cm = cp.match(/^(\w+)\s*(==|!=|>=|<=|>|<|contains|matches)\s*"?([^"]*)"?\s*$/);
+        if (cm) filters.push({ field: cm[1], op: cm[2], value: cm[3] });
+      }
+      continue;
+    }
+    // Index access: opportunity[0] → opportunity
+    const idxMatch = seg.match(/^(\w+)\[(\d+)\]$/);
+    if (idxMatch) {
+      cleanSegments.push(idxMatch[1]);
+      indexAccess = parseInt(idxMatch[2]);
+      continue;
+    }
+    cleanSegments.push(seg);
+  }
+
+  return {
+    cleanSource: prefix + cleanSegments.join('.'),
+    filters,
+    filterLogic,
+    indexAccess,
+  };
 }
 
 // ─── Human-readable description ─────────────────────────────────────
@@ -337,7 +404,8 @@ export function describeExpression(parsed) {
       if (parsed.nullSafeFallback != null) {
         return `Null-safe single: ${parsed.name}${parsed.accessor || ''} → fallback "${parsed.nullSafeFallback}"`;
       }
-      return `Inline reference: ${parsed.name}`;
+      // Clean filter/index syntax from the description
+      return `Inline reference: ${parseSourceFilters(parsed.name).cleanSource}`;
 
     case 'for':
       return `For-loop: iterates "${parsed.loopVar}" over ${parsed.loopSource}`;
@@ -345,9 +413,11 @@ export function describeExpression(parsed) {
     case 'endfor':
       return 'End of for-loop';
 
-    case 'dotpath':
-      if (parsed.name) return `${parsed.dataType} reference: ${parsed.name}`;
-      return `${parsed.dataType} expression: ${parsed.source}`;
+    case 'dotpath': {
+      const cleanName = parsed.name ? parseSourceFilters(parsed.name).cleanSource : null;
+      if (cleanName) return `${parsed.dataType} reference: ${cleanName}`;
+      return `${parsed.dataType} expression: ${parseSourceFilters(parsed.source).cleanSource}`;
+    }
 
     default:
       return parsed.raw;

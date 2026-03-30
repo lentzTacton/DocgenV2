@@ -105,6 +105,8 @@ export async function createVariable(data) {
     previewColumns: data.previewColumns || [],
     sourceDefine: data.sourceDefine || '',
     sourceDefineSource: data.sourceDefineSource || '',
+    _singleFilter: data._singleFilter || null,
+    _singleLeafField: data._singleLeafField || null,
     expression: '',
     order: vars.length,
     matchCount: 0,
@@ -278,10 +280,48 @@ export function generateExpression(variable) {
   } else if (type === 'single') {
     // Single = scalar value (dot-walk, getConfigurationAttribute, narrowed collection)
     const { transforms } = variable;
+    const singleFilter = variable._singleFilter;
+    const leafField = variable._singleLeafField;
     expr = source || '';
 
-    // Append collection filter if present (for related().{?...}[0] patterns)
-    if (filters && filters.length > 0) {
+    // Insert collection filter BEFORE the leaf field (not at the end)
+    // e.g. solution.opportunity.name → solution.opportunity.{?name=="X"}.name
+    if (singleFilter) {
+      let filterPart = '';
+      if (singleFilter.mode === 'field') {
+        // Build conditions — supports new multi-condition format and legacy single-condition
+        const conds = singleFilter.conditions || (singleFilter.field ? [{ field: singleFilter.field, op: singleFilter.op, value: singleFilter.value }] : []);
+        const validConds = conds.filter(c => c.field && c.value);
+        if (validConds.length > 0) {
+          const logic = singleFilter.logic === 'or' ? ' || ' : ' && ';
+          const parts = validConds.map(c => {
+            if (c.op === 'contains') return `${c.field} matches '.*${c.value}.*'`;
+            if (c.op === 'matches') return `${c.field} matches '${c.value}'`;
+            const val = typeof c.value === 'string' && !c.value.match(/^[0-9.]+$/)
+              && c.op !== '>' && c.op !== '<' && c.op !== '>=' && c.op !== '<='
+              ? `"${c.value}"` : c.value;
+            return `${c.field}${c.op}${val}`;
+          });
+          filterPart = `.{?${parts.join(logic)}}`;
+        }
+      } else if (singleFilter.mode === 'first') {
+        filterPart = '[0]';
+      } else if (singleFilter.mode === 'index') {
+        filterPart = `[${singleFilter.index || 0}]`;
+      }
+
+      if (filterPart) {
+        if (leafField && expr.endsWith(`.${leafField}`)) {
+          const collectionPath = expr.slice(0, expr.length - leafField.length - 1);
+          expr = `${collectionPath}${filterPart}.${leafField}`;
+        } else {
+          expr += filterPart;
+        }
+      }
+    }
+
+    // Legacy: append collection filter if present (for related().{?...} patterns)
+    if (filters && filters.length > 0 && !singleFilter) {
       const logic = filterLogic === 'and' ? ' && ' : ' || ';
       const conditions = filters.map(f => {
         const val = typeof f.value === 'string' && !f.value.match(/^[0-9.]+$/) && f.op !== '>' && f.op !== '<' && f.op !== '>=' && f.op !== '<='
@@ -443,9 +483,8 @@ export function generateExpression(variable) {
     return expr;
   }
 
-  // Config attribute singles → inline ${expr}$ (outputs value directly in the document)
-  // Production pattern: ${getConfigurationAttribute("node.attr")!=null?...:"N/A"}$
-  if (type === 'single' && source && source.includes('getConfigurationAttribute(')) {
+  // Inline purpose → ${expr}$ (direct output, no named define)
+  if (purpose === 'inline') {
     return `\${${expr}}$`;
   }
 

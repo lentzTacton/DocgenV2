@@ -12,10 +12,55 @@ import { el, qs, clear } from '../../core/dom.js';
 import { icon } from '../../components/icon.js';
 import { wizState } from './wizard-state.js';
 import {
-  describeObjectWithData, resolveCurrentObject, toggleExplorerFavorite, getStartingObject,
+  describeObject, resolveCurrentObject, toggleExplorerFavorite, getStartingObject,
 } from '../../services/data-api.js';
 
 let refreshPipelineCallback = null;
+
+/**
+ * If transformations (single filter) are set, show a confirmation dialog before
+ * proceeding with a path change that would reset them. Calls `onConfirm` only
+ * if the user agrees or no transformations exist.
+ */
+function confirmPathChangeIfNeeded(onConfirm) {
+  if (!wizState._singleFilter) { onConfirm(); return; }
+  // Build a styled confirmation overlay (same pattern as showWizConfirmDialog)
+  const existing = document.getElementById('wiz-confirm-overlay');
+  if (existing) existing.remove();
+  const overlay = el('div', {
+    id: 'wiz-confirm-overlay',
+    style: {
+      position: 'fixed', inset: '0', background: 'rgba(0,0,0,.35)',
+      zIndex: '9999', display: 'flex', alignItems: 'center', justifyContent: 'center',
+    },
+    onclick: (e) => { if (e.target === overlay) overlay.remove(); },
+  });
+  overlay.appendChild(
+    el('div', {
+      style: {
+        background: 'var(--card, #fff)', border: '1px solid var(--border)',
+        borderRadius: '8px', padding: '16px 18px', maxWidth: '340px', width: '90%',
+        boxShadow: '0 8px 24px rgba(0,0,0,.18)',
+      },
+    }, [
+      el('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' } }, [
+        el('span', { class: 'icon', style: { color: 'var(--warning, #D4A015)' }, html: icon('warning', 18) }),
+        el('div', { style: { fontWeight: '700', fontSize: '13px' } }, 'Reset transformations?'),
+      ]),
+      el('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '14px', lineHeight: '1.5' } },
+        'Changing the data path will reset filter conditions defined in the Transformation tab. Do you wish to continue?'),
+      el('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: '6px' } }, [
+        el('button', { class: 'btn btn-outline btn-sm', onclick: () => overlay.remove() }, 'Cancel'),
+        el('button', {
+          class: 'btn btn-sm',
+          style: { background: 'var(--warning, #D4A015)', color: '#fff', border: 'none' },
+          onclick: () => { overlay.remove(); onConfirm(); },
+        }, 'Continue'),
+      ]),
+    ])
+  );
+  document.body.appendChild(overlay);
+}
 
 /**
  * Set the refreshPipeline callback.
@@ -54,12 +99,18 @@ export async function loadObjectExplorer() {
   try {
     // Resolve current object from path
     const currentObjName = await resolveCurrentObject(wizState.objectPath);
-    wizState.currentObjDesc = await describeObjectWithData(currentObjName);
+    wizState.currentObjDesc = await describeObject(currentObjName);
 
     clear(container);
     renderObjectExplorer(container, currentObjName);
     // Update breadcrumb now that currentObjDesc is loaded (breadcrumb is in shared wizard area)
     refreshPipeline();
+
+    // Auto-scroll to the selected field so it's visible on edit
+    requestAnimationFrame(() => {
+      const sel = container.querySelector('.obj-row-sel');
+      if (sel) sel.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    });
   } catch (err) {
     clear(container);
     console.error('[object-explorer] Error:', err);
@@ -84,14 +135,14 @@ function renderObjectExplorer(container, currentObjName) {
     const bc = el('div', { class: 'obj-path-bar' });
     bc.appendChild(el('span', {
       class: 'obj-path-link',
-      onclick: () => { wizState.objectPath = []; wizState.source = ''; loadObjectExplorer(); refreshPipeline(); },
+      onclick: () => confirmPathChangeIfNeeded(() => { wizState.objectPath = []; wizState.source = ''; wizState._singleFilter = null; wizState._singleLeafField = null; loadObjectExplorer(); refreshPipeline(); }),
     }, startObj));
     wizState.objectPath.forEach((seg, idx) => {
       bc.appendChild(el('span', { class: 'obj-path-sep' }, seg.reverse ? ' ← ' : ' › '));
       const isLast = idx === wizState.objectPath.length - 1;
       bc.appendChild(el('span', {
         class: isLast ? 'obj-path-current' : 'obj-path-link',
-        onclick: isLast ? null : () => { wizState.objectPath = wizState.objectPath.slice(0, idx + 1); wizState.source = ''; loadObjectExplorer(); refreshPipeline(); },
+        onclick: isLast ? null : () => confirmPathChangeIfNeeded(() => { wizState.objectPath = wizState.objectPath.slice(0, idx + 1); wizState.source = ''; wizState._singleFilter = null; wizState._singleLeafField = null; loadObjectExplorer(); refreshPipeline(); }),
       }, seg.reverse ? seg.fromObject : seg.name));
     });
     if (wizState.currentObjDesc?.recordCount != null) {
@@ -220,7 +271,7 @@ function renderAttrRow(container, objName, attr, showStar = false) {
 
   container.appendChild(el('div', {
     class: `obj-row ${isSelected ? 'obj-row-sel' : ''}`,
-    onclick: () => { wizState.source = buildPath(attr.name); loadObjectExplorer(); refreshPipeline(); },
+    onclick: () => confirmPathChangeIfNeeded(() => { wizState.source = buildPath(attr.name); wizState._singleFilter = null; wizState._singleLeafField = attr.name; loadObjectExplorer(); refreshPipeline(); }),
   }, [
     el('span', { class: 'obj-row-name' }, attr.name),
     el('span', { class: 'obj-row-type' }, attr.type || 'string'),
@@ -259,12 +310,14 @@ function renderForwardRefRow(container, objName, attr, showStar = false) {
 
   // Forward ref: clicking the row navigates INTO the object (dot-walk).
   // This matches the original prototype behavior.
-  const navigate = () => {
+  const navigate = () => confirmPathChangeIfNeeded(() => {
     wizState.objectPath.push({ name: attr.name, refType: attr.refType });
     wizState.source = '';
+    wizState._singleFilter = null;
+    wizState._singleLeafField = null;
     loadObjectExplorer();
     refreshPipeline();
-  };
+  });
 
   // Select as source (collection) — secondary action via select button
   const selectAsSource = (e) => {
@@ -315,13 +368,17 @@ function renderRefRow(container, objName, rev, showStar = false) {
   const isSelected = wizState.source === revExpr;
 
   // Click row: set as source (collection). Click arrow: navigate into source object.
-  const selectAsSource = () => { wizState.source = revExpr; refreshPipeline(); loadObjectExplorer(); };
+  const selectAsSource = () => confirmPathChangeIfNeeded(() => { wizState.source = revExpr; wizState._singleFilter = null; wizState._singleLeafField = null; refreshPipeline(); loadObjectExplorer(); });
   const navigateInto = (e) => {
     e.stopPropagation();
-    wizState.objectPath.push(revSeg);
-    wizState.source = '';
-    loadObjectExplorer();
-    refreshPipeline();
+    confirmPathChangeIfNeeded(() => {
+      wizState.objectPath.push(revSeg);
+      wizState.source = '';
+      wizState._singleFilter = null;
+      wizState._singleLeafField = null;
+      loadObjectExplorer();
+      refreshPipeline();
+    });
   };
 
   container.appendChild(el('div', {

@@ -70,7 +70,7 @@ export function createAiSettingsCard(container) {
     onclick: handleSaveSettings,
   }, 'Save Settings');
 
-  const actions = el('div', { class: 'card-actions' }, [testBtn, saveBtn]);
+  const actions = el('div', { class: 'card-actions', style: { justifyContent: 'flex-end' } }, [testBtn, saveBtn]);
 
   // ── Assemble card ──
   const card = el('div', { class: 'card', id: 'ai-settings-card' }, [

@@ -18,6 +18,7 @@ import {
   suggestDataSetFields,
   parseMultipleDefines,
   reverseParseSource,
+  parseSourceFilters,
 } from '../../services/expression-parser.js';
 import {
   createVariable,
@@ -274,22 +275,53 @@ function renderPanel() {
 function buildBreakdownRows(parsed) {
   const rows = [];
 
-  const addRow = (label, value) => {
+  const addRow = (label, value, valueStyle) => {
     if (!value) return;
     rows.push(
       el('div', { class: 'sel-bd-row' }, [
         el('span', { class: 'sel-bd-label' }, label),
-        el('span', { class: 'sel-bd-value' }, value),
+        typeof value === 'string'
+          ? el('span', { class: 'sel-bd-value', style: valueStyle || {} }, value)
+          : el('span', { class: 'sel-bd-value', style: valueStyle || {} }, [value]),
       ])
     );
   };
 
-  if (parsed.name) addRow('Name', parsed.name);
-  if (parsed.source) {
-    // For config attributes, show just the path instead of the full function call
-    const configPath = parsed.source.match(/getConfigurationAttribute\s*\(\s*"([^"]+)"\s*\)/);
-    addRow('Source', configPath ? configPath[1] : parsed.source);
+  // Parse filter/index from source to show clean breakdown
+  const sourceExpr = parsed.source || parsed.loopSource || '';
+  const { cleanSource, filters, filterLogic, indexAccess } = parseSourceFilters(sourceExpr);
+
+  // Name — for inline/dotpath, derive a short name from the clean path
+  if (parsed.name) {
+    let displayName = parsed.name;
+    if (parsed.type === 'inline' || parsed.type === 'dotpath') {
+      const clean = parseSourceFilters(parsed.name).cleanSource;
+      // Use last two segments as a short readable name (e.g. "opportunity.name")
+      const segs = clean.replace(/^#(this|cp)\./, '').split('.');
+      displayName = segs.length > 2 ? segs.slice(-2).join('.') : clean;
+    }
+    addRow('Name', displayName);
   }
+
+  // Source — clean, without filter/index syntax
+  if (parsed.source) {
+    const configPath = parsed.source.match(/getConfigurationAttribute\s*\(\s*"([^"]+)"\s*\)/);
+    addRow('Source', configPath ? configPath[1] : cleanSource);
+  }
+
+  // Filter conditions
+  if (filters.length > 0) {
+    const logic = filterLogic === 'or' ? ' || ' : ' && ';
+    const filterText = filters.map(f => `${f.field} ${f.op} "${f.value}"`).join(logic);
+    addRow('Filter', filterText);
+  }
+
+  // Index access
+  if (indexAccess != null) {
+    const indexLabel = indexAccess === 0 ? '[0] (first record)' : `[${indexAccess}] (record ${indexAccess})`;
+    addRow('Index', indexLabel);
+  }
+
   if (parsed.accessor) addRow('Accessor', parsed.accessor);
   if (parsed.nullSafeFallback != null) addRow('Fallback', `"${parsed.nullSafeFallback}"`);
   if (parsed.loopVar) addRow('Loop var', parsed.loopVar);
@@ -325,14 +357,21 @@ function renderResolveArea(container, dupeInfo) {
         ])
       );
     } else if (resolveData.records && resolveData.records.length > 0) {
-      // Show sample records
+      // Show record count — with filtered context if applicable
+      const count = resolveData.totalCount ?? resolveData.records.length;
+      const unfilt = resolveData.unfilteredCount;
+      const countText = unfilt && unfilt !== count
+        ? `${count} / ${unfilt} record${unfilt !== 1 ? 's' : ''}`
+        : `${count} record${count !== 1 ? 's' : ''} found`;
       container.appendChild(
         el('div', { class: 'sel-resolve-header' }, [
           el('span', { html: icon('database', 13) }),
-          `${resolveData.totalCount ?? resolveData.records.length} record${resolveData.records.length !== 1 ? 's' : ''} found`,
+          countText,
           resolveData.objectName ? el('span', { class: 'sel-resolve-obj' }, resolveData.objectName) : null,
         ])
       );
+
+      // Filter/index info now shown in breakdown rows above — no duplicate here
 
       // Use existing variable's column preferences when available
       const dupeColumns = dupeInfo?.previewColumns;
@@ -362,7 +401,7 @@ function renderResolveArea(container, dupeInfo) {
         }
       }
     } else if (resolveData.value !== undefined) {
-      // Single value result
+      // Single value result — filter info now shown in breakdown rows above
       container.appendChild(
         el('div', { class: 'sel-resolve-single' }, [
           el('span', { class: 'sel-resolve-label' }, 'Value:'),
@@ -440,13 +479,15 @@ async function resolveExpression(parsed) {
   }
 
   // For dot-paths like solution.opportunity.account.name
-  // try to walk the model and fetch the relevant object
+  // try to walk the model and fetch the relevant object.
+  // Also handles filter syntax: .{?field=="value"}, [n]
   const model = await fetchModel();
   if (!model) return { error: 'Model not loaded' };
 
-  // Find the root object in the path
-  const segments = source.replace(/^#(this|cp)\./, '').split('.');
-  const rootName = segments[0];
+  // ── Parse source into clean segments, extracting filters & indices ──
+  const { cleanSource, filters, filterLogic, indexAccess } = parseSourceFilters(source);
+  const cleanSegments = cleanSource.replace(/^#(this|cp)\./, '').split('.');
+  const rootName = cleanSegments[0];
 
   // Try to find the object in the model
   let objMatch = model.find(o => o.name.toLowerCase() === rootName.toLowerCase());
@@ -461,7 +502,8 @@ async function resolveExpression(parsed) {
   if (source.includes('flatbom') || source.includes('.bom') || parsed.dataType === 'bom') {
     const bomObj = model.find(o => o.name.toLowerCase().includes('bom') || o.name.toLowerCase().includes('flatbom'));
     if (bomObj) {
-      const records = await fetchRecords(bomObj.name);
+      let records = await fetchRecords(bomObj.name);
+      records = _applyFiltersAndIndex(records, filters, filterLogic, indexAccess);
       return {
         records,
         totalCount: records.length,
@@ -470,16 +512,19 @@ async function resolveExpression(parsed) {
           .map(a => a.name)
           .filter(n => !n.startsWith('_'))
           .slice(0, 6),
+        filters: filters.length > 0 ? filters : undefined,
+        filterLogic: filters.length > 1 ? filterLogic : undefined,
+        indexAccess,
       };
     }
   }
 
   // For object-type dot-walks, try to resolve along the path
-  if (objMatch && segments.length > 1) {
-    // Walk references
+  if (objMatch && cleanSegments.length > 1) {
+    // Walk references using clean (filter-free) segments
     let currentObj = objMatch;
-    for (let i = 1; i < segments.length - 1; i++) {
-      const seg = segments[i];
+    for (let i = 1; i < cleanSegments.length - 1; i++) {
+      const seg = cleanSegments[i];
       const attr = currentObj.attributes.find(a => a.name.toLowerCase() === seg.toLowerCase());
       if (attr && attr.refType) {
         const nextObj = model.find(o => o.name === attr.refType);
@@ -489,8 +534,10 @@ async function resolveExpression(parsed) {
     }
 
     // Fetch records of the resolved object
-    const records = await fetchRecords(currentObj.name);
-    const lastSeg = segments[segments.length - 1];
+    let records = await fetchRecords(currentObj.name);
+    const unfilteredCount = records.length;
+    records = _applyFiltersAndIndex(records, filters, filterLogic, indexAccess);
+    const lastSeg = cleanSegments[cleanSegments.length - 1];
 
     // If last segment is a field, extract values
     const isField = currentObj.attributes.some(a => a.name.toLowerCase() === lastSeg.toLowerCase());
@@ -499,14 +546,25 @@ async function resolveExpression(parsed) {
       if (fieldKey) {
         const values = records.map(r => r[fieldKey]).filter(v => v != null);
         if (values.length === 1) {
-          return { value: values[0] };
+          return {
+            value: values[0],
+            totalCount: unfilteredCount,
+            objectName: currentObj.name,
+            filters: filters.length > 0 ? filters : undefined,
+            filterLogic: filters.length > 1 ? filterLogic : undefined,
+            indexAccess,
+          };
         }
         // Multiple → show as a list
         return {
           records: records.slice(0, 5),
           totalCount: records.length,
+          unfilteredCount,
           objectName: currentObj.name,
           fields: [fieldKey],
+          filters: filters.length > 0 ? filters : undefined,
+          filterLogic: filters.length > 1 ? filterLogic : undefined,
+          indexAccess,
         };
       }
     }
@@ -514,8 +572,12 @@ async function resolveExpression(parsed) {
     return {
       records: records.slice(0, 5),
       totalCount: records.length,
+      unfilteredCount,
       objectName: currentObj.name,
       fields: currentObj.attributes.map(a => a.name).filter(n => !n.startsWith('_')).slice(0, 6),
+      filters: filters.length > 0 ? filters : undefined,
+      filterLogic: filters.length > 1 ? filterLogic : undefined,
+      indexAccess,
     };
   }
 
@@ -531,6 +593,45 @@ async function resolveExpression(parsed) {
   }
 
   return { error: `Could not resolve "${source}" in the model` };
+}
+
+// ─── Filter / index helpers for expression resolution ───────────────
+
+/**
+ * Apply parsed filter conditions and index access to a records array.
+ * Mirrors the Spring EL semantics: .{?cond} filters, [n] picks by index.
+ */
+function _applyFiltersAndIndex(records, filters, filterLogic, indexAccess) {
+  if (!records || records.length === 0) return records;
+
+  // Apply field filters (.{?field=="value"})
+  if (filters.length > 0) {
+    records = records.filter(r => {
+      const results = filters.map(f => {
+        const val = String(r[f.field] ?? '');
+        const target = f.value;
+        switch (f.op) {
+          case '==': return val === target;
+          case '!=': return val !== target;
+          case '>':  return parseFloat(val) > parseFloat(target);
+          case '<':  return parseFloat(val) < parseFloat(target);
+          case '>=': return parseFloat(val) >= parseFloat(target);
+          case '<=': return parseFloat(val) <= parseFloat(target);
+          case 'contains': return val.toLowerCase().includes(target.toLowerCase());
+          case 'matches':  try { return new RegExp(target).test(val); } catch { return false; }
+          default: return val === target;
+        }
+      });
+      return filterLogic === 'or' ? results.some(Boolean) : results.every(Boolean);
+    });
+  }
+
+  // Apply index access ([n])
+  if (indexAccess != null && indexAccess >= 0 && records.length > indexAccess) {
+    records = [records[indexAccess]];
+  }
+
+  return records;
 }
 
 // ─── Duplicate detection ────────────────────────────────────────────

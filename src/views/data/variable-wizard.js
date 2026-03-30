@@ -22,10 +22,10 @@ import {
 import {
   isConnected, fetchBomRecords, fetchRecords, getBomFields, getBomFieldValues,
   getBomSources, fetchModel, getStartingObject,
-  describeObjectWithData, resolveCurrentObject,
+  resolveCurrentObject,
   getExplorerFavorites, toggleExplorerFavorite,
 } from '../../services/data-api.js';
-import { wizState, resetWiz } from './wizard-state.js';
+import { wizState, resetWiz, rebuildObjectPath } from './wizard-state.js';
 import { renderBomSection, setRefreshPipelineCallback as setBomRefresh, TRANSFORM_TYPES, buildTransformSyntax, refreshMatchPreview } from './wizard-bom.js';
 import { loadObjectExplorer, setRefreshPipelineCallback as setObjectRefresh, buildPath } from './wizard-object.js';
 import { loadConfigExplorer, setRefreshPipelineCallback as setConfigRefresh, resetConfigExplorer, resolveConfigAttrAcrossCPs } from './wizard-config-explorer.js';
@@ -75,12 +75,118 @@ function makeCustomDropdown(placeholder, options, opts = {}) {
   return wrap;
 }
 
+// ─── Combo input (text input + typeahead dropdown) ──────────────────
+
+/**
+ * Create a combo input: a text field with a dropdown of suggestions
+ * that filters as you type (typeahead). Allows free-text entry too.
+ * @param {string} initialValue - Current value
+ * @param {string[]} suggestions - Available values for the dropdown
+ * @param {Object} opts - { placeholder, onchange }
+ */
+function makeComboInput(initialValue, suggestions, opts = {}) {
+  const wrap = el('div', { class: 'combo-input', style: { flex: '1', minWidth: '0', position: 'relative' } });
+
+  const input = el('input', {
+    class: 'input', value: initialValue,
+    placeholder: opts.placeholder || '',
+    style: { fontSize: '11px', width: '100%', fontFamily: 'var(--mono)', boxSizing: 'border-box', paddingRight: '22px' },
+  });
+
+  const arrow = el('span', {
+    style: {
+      position: 'absolute', right: '4px', top: '50%', transform: 'translateY(-50%)',
+      cursor: 'pointer', display: 'flex', opacity: '0.5',
+    },
+    html: icon('chevronDown', 10),
+  });
+
+  const dropdown = el('div', {
+    class: 'combo-dropdown',
+    style: {
+      display: 'none', position: 'absolute', top: '100%', left: '0', right: '0',
+      maxHeight: '160px', overflowY: 'auto', background: '#fff', zIndex: '200',
+      border: '1px solid var(--border)', borderRadius: '0 0 var(--radius) var(--radius)',
+      boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
+    },
+  });
+
+  function renderOptions(filter) {
+    dropdown.innerHTML = '';
+    const query = (filter || '').toLowerCase();
+    const filtered = query
+      ? suggestions.filter(s => s.toLowerCase().includes(query))
+      : suggestions;
+
+    if (filtered.length === 0) {
+      dropdown.style.display = 'none';
+      return;
+    }
+
+    filtered.forEach(s => {
+      const item = el('div', {
+        style: {
+          padding: '4px 8px', fontSize: '11px', fontFamily: 'var(--mono)',
+          cursor: 'pointer', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+        },
+      });
+      // Highlight matching portion
+      if (query && s.toLowerCase().includes(query)) {
+        const idx = s.toLowerCase().indexOf(query);
+        item.appendChild(document.createTextNode(s.slice(0, idx)));
+        item.appendChild(el('strong', { style: { color: 'var(--accent)' } }, s.slice(idx, idx + query.length)));
+        item.appendChild(document.createTextNode(s.slice(idx + query.length)));
+      } else {
+        item.textContent = s;
+      }
+      item.addEventListener('mousedown', (e) => {
+        e.preventDefault(); // prevent blur before click fires
+        input.value = s;
+        dropdown.style.display = 'none';
+        if (opts.onchange) opts.onchange(s);
+      });
+      item.addEventListener('mouseenter', () => { item.style.background = 'var(--bg, #F6F8FA)'; });
+      item.addEventListener('mouseleave', () => { item.style.background = ''; });
+      dropdown.appendChild(item);
+    });
+
+    dropdown.style.display = filtered.length > 0 ? '' : 'none';
+  }
+
+  input.addEventListener('input', () => {
+    renderOptions(input.value);
+    if (opts.onchange) opts.onchange(input.value);
+  });
+
+  input.addEventListener('focus', () => { renderOptions(input.value); });
+  input.addEventListener('blur', () => {
+    // Delay to allow mousedown on dropdown items
+    setTimeout(() => { dropdown.style.display = 'none'; }, 150);
+  });
+
+  arrow.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    if (dropdown.style.display === 'none') {
+      input.focus();
+      renderOptions(''); // show all
+    } else {
+      dropdown.style.display = 'none';
+    }
+  });
+
+  wrap.appendChild(input);
+  wrap.appendChild(arrow);
+  wrap.appendChild(dropdown);
+  return wrap;
+}
+
 // ─── Purpose selector ────────────────────────────────────────────────
 
 function renderPurposeSelector() {
   const purposes = [
-    { key: 'block',    label: 'Block', icon: 'box',    desc: '$for{}$ / $rowgroup{}$' },
-    { key: 'variable', label: 'Variable',  icon: 'target', desc: 'Inline ${}$ value' },
+    { key: 'block',    label: 'Block',    icon: 'box',    desc: '$for{}$ / $rowgroup{}$' },
+    { key: 'variable', label: 'Variable', icon: 'target', desc: '$define{#name=…}$' },
+    { key: 'inline',   label: 'Inline',   icon: 'dollar', desc: '${…}$' },
   ];
   const sel = el('div', { class: 'purpose-sel-compact', id: 'wiz-purpose-sel' });
   purposes.forEach(p => {
@@ -93,6 +199,13 @@ function renderPurposeSelector() {
         if (p.key === 'block' && (wizState.type === 'single' || wizState.type === 'list')) {
           wizState.type = 'bom';
           wizState.source = wizState.bomSources[0]?.expression || wizState.bomSources[0]?.name || '#this.flatbom';
+          if (!wizState.isEditMode) switchTypeView();
+          updateTypeSelector();
+        }
+        // Inline behaves like variable for type selection purposes
+        if (p.key === 'inline' && wizState.type === 'bom') {
+          wizState.type = 'single';
+          wizState.source = '';
           if (!wizState.isEditMode) switchTypeView();
           updateTypeSelector();
         }
@@ -187,7 +300,7 @@ function updatePurposeSelector() {
   const sel = qs('#wiz-purpose-sel');
   if (!sel) return;
   const pills = sel.querySelectorAll('.purpose-pill');
-  const purposeMap = { 'Block': 'block', 'Variable': 'variable' };
+  const purposeMap = { 'Block': 'block', 'Variable': 'variable', 'Inline': 'inline' };
   pills.forEach(p => {
     const label = p.querySelector('.purpose-pill-label')?.textContent;
     p.classList.toggle('purpose-pill-sel', purposeMap[label] === wizState.purpose);
@@ -237,13 +350,7 @@ export function renderVariableWizard(container, existingVariable) {
   );
 
   // Guide text — only for new data sets
-  if (!wizState.isEditMode) {
-    container.appendChild(
-      el('div', { class: 'wiz-guide' },
-        'Give your data set a name and pick what kind of data it represents, then connect it to a source — a BOM, an object path, or a list of values. When you\'re done, drag it straight into your Word template.'
-      )
-    );
-  }
+  // Guide text removed to save vertical space
 
   // ── Expression preview (always visible above tabs, builds progressively) ──
   container.appendChild(el('div', { id: 'wiz-selected-source' }));
@@ -455,19 +562,38 @@ async function bootAsync() {
   const bomSection = qs('#wiz-bom-section');
   if (!bomSection) return;
 
+  const needsBomData = wizState.type === 'bom';
+
   if (isConnected()) {
-    bomSection.innerHTML = `<div class="obj-empty">${icon('loader', 14)} Loading data...</div>`;
-    try {
-      const [sources, fields, records, model, favs] = await Promise.all([
-        getBomSources(), getBomFields(), fetchBomRecords(), fetchModel(), getExplorerFavorites(),
-      ]);
-      wizState.bomSources = sources; wizState.bomFields = fields; wizState.bomRecords = records;
-      wizState.modelObjects = model || []; wizState.explorerFavs = favs;
-      // Only set default BOM source for new BOM variables, not when editing or for other types
-      if (!wizState.isEditMode && wizState.type === 'bom' && sources.length > 0) {
-        wizState.source = sources[0].expression || sources[0].name;
-      }
-    } catch (e) { console.error('[wizard] Boot:', e); }
+    if (needsBomData) {
+      // BOM type needs full data load before rendering
+      bomSection.innerHTML = `<div class="obj-empty">${icon('loader', 14)} Loading data...</div>`;
+      try {
+        const [sources, fields, records, model, favs] = await Promise.all([
+          getBomSources(), getBomFields(), fetchBomRecords(), fetchModel(), getExplorerFavorites(),
+        ]);
+        wizState.bomSources = sources; wizState.bomFields = fields; wizState.bomRecords = records;
+        wizState.modelObjects = model || []; wizState.explorerFavs = favs;
+        if (!wizState.isEditMode && sources.length > 0) {
+          wizState.source = sources[0].expression || sources[0].name;
+        }
+      } catch (e) { console.error('[wizard] Boot:', e); }
+    } else {
+      // Non-BOM types only need model + favorites (fast — no record fetching)
+      try {
+        const [model, favs] = await Promise.all([
+          fetchModel(), getExplorerFavorites(),
+        ]);
+        wizState.modelObjects = model || [];
+        wizState.explorerFavs = favs;
+      } catch (e) { console.error('[wizard] Boot (light):', e); }
+    }
+  }
+
+  // In edit mode, reconstruct the objectPath from the saved source expression
+  // so the explorer shows breadcrumb navigation at the right depth.
+  if (wizState.isEditMode && wizState.modelObjects.length > 0) {
+    rebuildObjectPath(wizState.modelObjects);
   }
 
   // Render the active type section
@@ -517,7 +643,9 @@ function renderTypeSelector() {
     else if (t.key === 'list') wizState.source = '{""}';
     else wizState.source = '';
 
-    const autoPurpose = (t.key === 'single' || t.key === 'list' || t.key === 'define' || t.key === 'code') ? 'variable' : 'block';
+    const autoPurpose = t.key === 'single' ? 'inline'
+      : (t.key === 'list' || t.key === 'define' || t.key === 'code') ? 'variable'
+      : 'block';
     wizState.purpose = autoPurpose;
     updatePurposeSelector();
 
@@ -652,6 +780,11 @@ function renderSingleSourceToggle(container) {
       wizState._singleSourceMode = 'config';
       wizState.source = '';
       wizState.objectPath = [];
+      // Auto-set purpose to inline for config attributes
+      if (wizState.purpose === 'variable') {
+        wizState.purpose = 'inline';
+        updatePurposeSelector();
+      }
       switchTypeView();
       refreshPipeline();
     },
@@ -1099,21 +1232,43 @@ function updateSelectedSource() {
       source: wizState.source, filters: wizState.filters, filterLogic: wizState.filterLogic,
       catchAll: wizState.catchAll, transforms: wizState.transforms,
       sourceDefine: wizState.sourceDefine, sourceDefineSource: wizState.sourceDefineSource,
+      _singleFilter: wizState._singleFilter, _singleLeafField: wizState._singleLeafField,
     });
   } else if ((wizState.type === 'object' || wizState.type === 'single') && wizState.objectPath.length > 0) {
     // Progressive: build partial expression from current dot-walk path
     const partialPath = buildPath(); // no leaf → just the path so far
     const name = wizState.name || '#…';
-    const wrapper = wizState.purpose === 'block' ? '$for' : (wizState.type === 'single' ? '$define' : '$');
+    const wrapper = wizState.purpose === 'block' ? '$for' : wizState.purpose === 'inline' ? '$' : '$define';
     expr = `${wrapper}{${name}=${partialPath}.…}$`;
   }
 
   const hasContent = hasSource || expr;
-  const stateClass = hasSource ? '' : (hasContent ? 'obj-selected-progress' : 'obj-selected-empty');
 
-  wrap.appendChild(el('div', { class: `obj-selected-source ${stateClass}` }, [
-    el('span', { class: 'icon', html: icon(hasSource ? 'check' : 'code', 12) }),
+  // Multi-value detection for single type
+  let resolvedCount = 0;
+  let isMultiValue = false;
+  if (hasSource && wizState.type === 'single') {
+    const totalRecords = wizState.currentObjDesc?.recordCount || wizState.objectRecords?.length || 0;
+    if (totalRecords > 1) {
+      // Compute filtered count
+      const savedShowAll = _drawerShowAll;
+      _drawerShowAll = false;
+      const { records: filtered } = getDrawerData();
+      _drawerShowAll = savedShowAll;
+      resolvedCount = filtered.length;
+      isMultiValue = resolvedCount !== 1;
+    }
+  }
+  const stateClass = isMultiValue ? 'obj-selected-warn'
+    : hasSource ? '' : (hasContent ? 'obj-selected-progress' : 'obj-selected-empty');
+  const tooltip = isMultiValue
+    ? `Resolves to ${resolvedCount} value${resolvedCount !== 1 ? 's' : ''} — use a filter to narrow to 1`
+    : expr;
+
+  wrap.appendChild(el('div', { class: `obj-selected-source ${stateClass}`, title: tooltip }, [
+    el('span', { class: 'icon', html: icon(isMultiValue ? 'warning' : (hasSource ? 'check' : 'code'), 12) }),
     el('span', { class: 'obj-selected-expr' }, expr || 'Expression builds here as you configure…'),
+    isMultiValue ? el('span', { style: { fontSize: '9px', opacity: '0.8', whiteSpace: 'nowrap' } }, `${resolvedCount} values`) : null,
     hasSource ? el('button', {
       class: 'obj-selected-clear',
       onclick: () => {
@@ -1226,6 +1381,7 @@ let _drawerPinned = false;   // pinned open (click to toggle)
 let _drawerTab = 'data';     // 'data' | 'columns'
 let _drawerLoading = false;
 let _drawerLoadAttempted = false;  // prevent infinite retry when records stay empty
+let _drawerShowAll = false;        // show all records (ignore filters in preview)
 
 /** Create the drawer DOM and append to the wizard container. */
 function renderDataDrawer(parentContainer) {
@@ -1316,6 +1472,39 @@ function getDrawerData() {
     if (records.length > 0 && wizState.filters.length > 0) {
       records = records.filter(r => matchesFilters(r, wizState.filters, wizState.filterLogic));
     }
+    // Apply single filter to preview — unless "show all" is on
+    if (!_drawerShowAll && records.length > 0 && wizState.type === 'single' && wizState._singleFilter) {
+      const sf = wizState._singleFilter;
+      if (sf.mode === 'field') {
+        const conds = sf.conditions || (sf.field ? [{ field: sf.field, op: sf.op, value: sf.value }] : []);
+        const validConds = conds.filter(c => c.field && c.value);
+        if (validConds.length > 0) {
+          const isOr = sf.logic === 'or';
+          records = records.filter(r => {
+            const results = validConds.map(c => {
+              const v = r[c.field];
+              if (v == null) return false;
+              const sv = String(v), fv = c.value;
+              if (c.op === '==') return sv === fv;
+              if (c.op === '!=') return sv !== fv;
+              if (c.op === 'contains') return sv.includes(fv);
+              if (c.op === '>') return parseFloat(sv) > parseFloat(fv);
+              if (c.op === '<') return parseFloat(sv) < parseFloat(fv);
+              if (c.op === '>=') return parseFloat(sv) >= parseFloat(fv);
+              if (c.op === '<=') return parseFloat(sv) <= parseFloat(fv);
+              if (c.op === 'matches') return new RegExp(fv).test(sv);
+              return true;
+            });
+            return isOr ? results.some(Boolean) : results.every(Boolean);
+          });
+        }
+      } else if (sf.mode === 'first') {
+        records = records.slice(0, 1);
+      } else if (sf.mode === 'index') {
+        const idx = sf.index || 0;
+        records = idx < records.length ? [records[idx]] : [];
+      }
+    }
   }
 
   // Visible columns: use user selection if set, otherwise auto-pick first 6
@@ -1382,6 +1571,22 @@ function refreshDrawerContent() {
       onclick: () => { _drawerTab = t.key; refreshDrawerContent(); },
     }, [el('span', { class: 'icon', html: icon(t.icon, 11) }), t.label]));
   });
+
+  // "Show all" checkbox — visible when a filter is active
+  const hasActiveFilter = (wizState._singleFilter && wizState.type === 'single')
+    || (wizState.filters.length > 0) || wizState.catchAll;
+  if (hasActiveFilter) {
+    tabs.appendChild(el('label', {
+      style: { display: 'flex', alignItems: 'center', gap: '4px', marginLeft: 'auto', fontSize: '10px', color: 'var(--text-tertiary)', cursor: 'pointer', whiteSpace: 'nowrap' },
+    }, [
+      el('input', {
+        type: 'checkbox', checked: _drawerShowAll || undefined,
+        style: { margin: '0' },
+        onchange: (e) => { _drawerShowAll = e.target.checked; refreshDrawerContent(); },
+      }),
+      'Show all',
+    ]));
+  }
 
   if (_drawerTab === 'data') {
     renderDrawerDataTab(body, actions);
@@ -1968,11 +2173,169 @@ function renderSingleDetailsControls(container) {
 
   container.appendChild(nullCard);
 
-  // Also allow collection filter + transforms if source is a collection (related())
-  if (wizState.source && (wizState.source.includes('related(') || wizState.source.includes('.{'))) {
-    container.appendChild(renderObjectFilterBuilder());
-    container.appendChild(renderObjectTransformBuilder());
+  // Collection filter — narrow multi-record results to a single value
+  // Only shown when multiple records exist
+  const recordCount = wizState.currentObjDesc?.recordCount || wizState.objectRecords?.length || 0;
+  if (recordCount > 1 || wizState._singleFilter) {
+    container.appendChild(renderSingleFilterBuilder());
   }
+
+}
+
+// ── Single type: guided collection filter ──
+
+function renderSingleFilterBuilder() {
+  const totalRecords = wizState.currentObjDesc?.recordCount || wizState.objectRecords?.length || 0;
+
+  // Get filtered count
+  const savedShowAll = _drawerShowAll;
+  _drawerShowAll = false;
+  const { records: filteredRecords } = getDrawerData();
+  _drawerShowAll = savedShowAll;
+  const filteredCount = filteredRecords.length;
+
+  const filter = wizState._singleFilter;
+  const hasFilter = filter && (filter.mode === 'first' || filter.mode === 'index' ||
+    (filter.mode === 'field' && (filter.conditions || []).some(c => c.field && c.value)));
+
+  const countLabel = hasFilter
+    ? `${filteredCount} / ${totalRecords}`
+    : `${totalRecords} records`;
+  const countColor = hasFilter
+    ? (filteredCount === 1 ? 'var(--success, #1A7F37)' : '#F57F17')
+    : 'var(--text-tertiary)';
+
+  const card = el('div', { class: 'wiz-transform-card' });
+  card.appendChild(el('div', { class: 'wiz-transform-card-header' }, [
+    el('span', { class: 'icon', style: { color: '#F57F17' }, html: icon('filter', 12) }),
+    'Narrow to single record',
+    el('span', { style: { fontSize: '10px', color: countColor, fontWeight: hasFilter ? '600' : '400', marginLeft: 'auto' } }, countLabel),
+  ]));
+
+  if (!filter) {
+    // No filter set — show mode options
+    const modeRow = el('div', { style: { display: 'flex', gap: '6px', padding: '8px 0' } });
+    [
+      { key: 'field', label: 'Match field', desc: '.{?field=="value"}' },
+      { key: 'first', label: 'First',       desc: '[0]' },
+      { key: 'index', label: 'By index',    desc: '[n]' },
+    ].forEach(m => {
+      modeRow.appendChild(el('button', {
+        class: 'btn btn-outline btn-sm', style: { flex: '1', justifyContent: 'center', flexDirection: 'column', padding: '6px 4px', gap: '2px' },
+        onclick: () => {
+          wizState._singleFilter = { mode: m.key, conditions: [{ field: '', op: '==', value: '' }], logic: 'and', index: 0 };
+          renderDetailsControls();
+          refreshPipeline();
+        },
+      }, [
+        el('span', { style: { fontFamily: 'var(--mono)', fontSize: '10px', color: 'var(--text-tertiary)' } }, m.desc),
+        el('span', { style: { fontSize: '11px' } }, m.label),
+      ]));
+    });
+    card.appendChild(modeRow);
+  } else if (filter.mode === 'field') {
+    // Multi-condition field match with AND/OR
+    // Migrate old single-condition format
+    if (!filter.conditions) {
+      filter.conditions = [{ field: filter.field || '', op: filter.op || '==', value: filter.value || '' }];
+      filter.logic = 'and';
+    }
+
+    // Get fields from the unfiltered data
+    const savedShowAll = _drawerShowAll;
+    _drawerShowAll = true;
+    const { allFields, records } = getDrawerData();
+    _drawerShowAll = savedShowAll;
+
+    const condWrap = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px', padding: '4px 0' } });
+
+    filter.conditions.forEach((cond, idx) => {
+      // Logic label between conditions
+      if (idx > 0) {
+        condWrap.appendChild(el('div', { style: { textAlign: 'center', padding: '2px 0' } }, [
+          el('button', {
+            class: 'btn btn-sm', style: { fontSize: '10px', padding: '1px 8px', fontWeight: '600', color: 'var(--accent)' },
+            onclick: () => { filter.logic = filter.logic === 'and' ? 'or' : 'and'; renderDetailsControls(); refreshPipeline(); },
+            title: 'Toggle AND / OR',
+          }, filter.logic === 'and' ? '&&  AND' : '||  OR'),
+        ]));
+      }
+
+      const fieldSel = el('select', {
+        class: 'input', style: { fontSize: '11px', flex: '1', minWidth: '0' },
+        onchange: (e) => { cond.field = e.target.value; cond.value = ''; renderDetailsControls(); refreshPipeline(); },
+      }, [
+        el('option', { value: '' }, '— field —'),
+        ...allFields.map(f => el('option', { value: f, selected: f === cond.field || undefined }, f)),
+      ]);
+
+      const opSel = el('select', {
+        class: 'input', style: { fontSize: '11px', width: '56px', flexShrink: '0' },
+        onchange: (e) => { cond.op = e.target.value; refreshPipeline(); },
+      }, ['==', '!=', '>', '<', '>=', '<=', 'contains', 'matches'].map(op =>
+        el('option', { value: op, selected: op === cond.op || undefined }, op)
+      ));
+
+      // Value: combo input with typeahead dropdown from column values
+      const uniqueVals = (cond.field && records.length > 0)
+        ? [...new Set(records.map(r => r[cond.field]).filter(v => v != null && v !== ''))].map(String).sort()
+        : [];
+      const valueEl = makeComboInput(cond.value || '', uniqueVals, {
+        placeholder: 'value',
+        onchange: (val) => { cond.value = val; refreshPipeline(); },
+      });
+
+      const removeCondBtn = el('button', {
+        class: 'btn btn-sm',
+        style: { padding: '2px', flexShrink: '0', width: '20px', visibility: filter.conditions.length > 1 ? 'visible' : 'hidden' },
+        onclick: () => { filter.conditions.splice(idx, 1); renderDetailsControls(); refreshPipeline(); },
+        html: icon('x', 10),
+      });
+
+      condWrap.appendChild(el('div', { style: { display: 'flex', gap: '3px', alignItems: 'center' } }, [
+        fieldSel, opSel, valueEl, removeCondBtn,
+      ]));
+    });
+
+    card.appendChild(condWrap);
+
+    // Button row: Add condition + Remove all
+    card.appendChild(el('div', { style: { display: 'flex', gap: '6px', alignItems: 'center', padding: '4px 0 2px' } }, [
+      el('button', {
+        class: 'btn btn-outline btn-sm',
+        onclick: () => { filter.conditions.push({ field: '', op: '==', value: '' }); renderDetailsControls(); refreshPipeline(); },
+      }, [el('span', { class: 'icon', html: icon('plus', 10) }), 'Add condition']),
+      el('button', {
+        class: 'btn btn-sm', style: { marginLeft: 'auto', padding: '2px 6px' },
+        onclick: () => { wizState._singleFilter = null; renderDetailsControls(); refreshPipeline(); },
+      }, [el('span', { class: 'icon', html: icon('x', 10) }), 'Remove']),
+    ]));
+  } else if (filter.mode === 'first') {
+    card.appendChild(el('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 0' } }, [
+      el('span', { style: { fontSize: '12px' } }, 'Takes the first record'),
+      el('span', { style: { fontFamily: 'var(--mono)', fontSize: '11px', color: 'var(--text-tertiary)' } }, '[0]'),
+      el('button', {
+        class: 'btn btn-sm', style: { marginLeft: 'auto', padding: '2px 6px' },
+        onclick: () => { wizState._singleFilter = null; renderDetailsControls(); refreshPipeline(); },
+      }, [el('span', { class: 'icon', html: icon('x', 10) }), 'Remove']),
+    ]));
+  } else if (filter.mode === 'index') {
+    card.appendChild(el('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 0' } }, [
+      el('span', { style: { fontSize: '12px' } }, 'Record at index'),
+      el('input', {
+        class: 'input', type: 'number', value: filter.index || 0, min: 0,
+        style: { fontSize: '11px', width: '50px', fontFamily: 'var(--mono)', textAlign: 'center' },
+        oninput: (e) => { filter.index = parseInt(e.target.value) || 0; refreshPipeline(); },
+      }),
+      el('span', { style: { fontFamily: 'var(--mono)', fontSize: '11px', color: 'var(--text-tertiary)' } }, `[${filter.index || 0}]`),
+      el('button', {
+        class: 'btn btn-sm', style: { marginLeft: 'auto', padding: '2px 6px' },
+        onclick: () => { wizState._singleFilter = null; renderDetailsControls(); refreshPipeline(); },
+      }, [el('span', { class: 'icon', html: icon('x', 10) }), 'Remove']),
+    ]));
+  }
+
+  return card;
 }
 
 // ── List type: individual value editor + paste/CSV import ──
