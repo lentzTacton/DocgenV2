@@ -4,9 +4,9 @@
   "description": "Tacton DocGen — Word Add-in for document generation",
   "private": true,
   "scripts": {
-    "dev": "npx --node-options=--disable-warning=DEP0060 webpack-cli serve --mode development --open",
+    "dev": "npx webpack-cli serve --mode development --open",
     "build": "npx webpack-cli --mode production",
-    "start": "npx --node-options=--disable-warning=DEP0060 webpack-cli serve --mode development"
+    "start": "npx webpack-cli serve --mode development"
   },
   "dependencies": {
     "dexie": "^4.0.11"
