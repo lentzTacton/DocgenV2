@@ -407,8 +407,10 @@ async function refreshTicketTokenSerialized(instance, ticketId) {
       return result;
     } catch (e) {
       console.warn(`[auth] refresh failed for ${ticketId}:`, e.message);
-      // Delete the consumed/invalid refresh token so we don't keep retrying it
-      await deleteToken(refreshKey).catch(() => {});
+      // Keep the refresh token in Dexie — the failure may be transient
+      // (network issue, temporary server error). Deleting it forces a
+      // full re-auth which is worse UX. The health check will report
+      // the failed state so the user can re-authorize if needed.
       return null;
     }
   };
@@ -560,11 +562,13 @@ async function _resolveTicketToken(instance, ticketId) {
     diag.push({ key: 'validate-new', status: 'skip', detail: 'No refreshed token to test' });
   }
 
-  // ── All tiers exhausted — clean up dead tokens ──
-  if (storedAccess) {
-    await deleteToken(`access:${ticketId}`).catch(() => {});
-    delete ticketTokens[ticketId];
-  }
+  // ── All tiers exhausted ──
+  // Do NOT delete stored tokens from Dexie — the access token may still be
+  // valid after a transient network failure, or the user may be able to
+  // re-authorize without starting from scratch. Deleting tokens forces a
+  // full re-auth which is a worse UX than showing "expired" in diagnostics.
+  // Only clear the in-memory cache so the next call re-probes Dexie.
+  delete ticketTokens[ticketId];
 
   return { token: null, diag };
 }

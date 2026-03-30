@@ -43,11 +43,111 @@ function createHeader() {
       ]),
     ]),
 
-    // Right: DocGen Plugin badge
+    // Right: DocGen Plugin badge + hamburger menu
     el('div', { class: 'header-right' }, [
       el('span', { class: 'header-badge' }, 'DocGen Plugin'),
+      createHamburgerMenu(),
     ]),
   ]);
+}
+
+// ─── Hamburger Menu ───────────────────────────────────────────────────
+
+function createHamburgerMenu() {
+  const menuBtn = el('button', {
+    class: 'hamburger-btn',
+    id: 'hamburger-btn',
+    title: 'Menu',
+    onclick: (e) => { e.stopPropagation(); toggleHamburgerMenu(); },
+  });
+  menuBtn.innerHTML = icon('menu', 18);
+  return menuBtn;
+}
+
+function toggleHamburgerMenu() {
+  const existing = qs('#hamburger-dropdown');
+  if (existing) { existing.remove(); return; }
+  showHamburgerMenu();
+}
+
+function showHamburgerMenu() {
+  const btn = qs('#hamburger-btn');
+  if (!btn) return;
+
+  // Track which group is expanded
+  let expandedGroup = null;
+
+  function buildMenu() {
+    clear(dropdown);
+
+    // ── Section: Import & Export ──
+    dropdown.appendChild(el('div', { class: 'hb-section-label' }, 'Import & Export'));
+
+    // Connection — expandable
+    const connItem = el('button', {
+      class: `hb-menu-item hb-expandable ${expandedGroup === 'connection' ? 'hb-expanded' : ''}`,
+      onclick: (e) => { e.stopPropagation(); expandedGroup = expandedGroup === 'connection' ? null : 'connection'; buildMenu(); },
+    }, [
+      el('span', { class: 'icon', html: icon('link', 14) }),
+      el('span', {}, 'Connection'),
+      el('span', { class: 'hb-chevron icon', html: icon(expandedGroup === 'connection' ? 'chevronDown' : 'chevronRight', 10) }),
+    ]);
+    dropdown.appendChild(connItem);
+
+    if (expandedGroup === 'connection') {
+      dropdown.appendChild(el('button', { class: 'hb-sub-item', onclick: () => { closeHamburgerMenu(); state.set('menu.action', 'connection-export'); } }, [
+        el('span', { class: 'icon', html: icon('upload', 12) }),
+        'Export',
+      ]));
+      dropdown.appendChild(el('button', { class: 'hb-sub-item', onclick: () => { closeHamburgerMenu(); state.set('menu.action', 'connection-import'); } }, [
+        el('span', { class: 'icon', html: icon('download', 12) }),
+        'Import',
+      ]));
+    }
+
+    // Data — expandable
+    const dataItem = el('button', {
+      class: `hb-menu-item hb-expandable ${expandedGroup === 'data' ? 'hb-expanded' : ''}`,
+      onclick: (e) => { e.stopPropagation(); expandedGroup = expandedGroup === 'data' ? null : 'data'; buildMenu(); },
+    }, [
+      el('span', { class: 'icon', html: icon('database', 14) }),
+      el('span', {}, 'Data'),
+      el('span', { class: 'hb-chevron icon', html: icon(expandedGroup === 'data' ? 'chevronDown' : 'chevronRight', 10) }),
+    ]);
+    dropdown.appendChild(dataItem);
+
+    if (expandedGroup === 'data') {
+      dropdown.appendChild(el('button', { class: 'hb-sub-item', onclick: () => { closeHamburgerMenu(); state.set('menu.action', 'data-export'); } }, [
+        el('span', { class: 'icon', html: icon('upload', 12) }),
+        'Export',
+      ]));
+      dropdown.appendChild(el('button', { class: 'hb-sub-item', onclick: () => { closeHamburgerMenu(); state.set('menu.action', 'data-import'); } }, [
+        el('span', { class: 'icon', html: icon('download', 12) }),
+        'Import',
+      ]));
+    }
+  }
+
+  const dropdown = el('div', { class: 'hamburger-dropdown', id: 'hamburger-dropdown' });
+  buildMenu();
+
+  // Position below the header-right area
+  const taskpane = qs('.taskpane');
+  (taskpane || document.body).appendChild(dropdown);
+
+  // Close on click outside
+  const closeOnOutside = (e) => {
+    if (!dropdown.contains(e.target) && e.target !== btn && !btn.contains(e.target)) {
+      closeHamburgerMenu();
+      document.removeEventListener('click', closeOnOutside);
+    }
+  };
+  setTimeout(() => document.addEventListener('click', closeOnOutside), 0);
+}
+
+function closeHamburgerMenu() {
+  const dd = qs('#hamburger-dropdown');
+  if (dd) dd.remove();
 }
 
 function switchMode(mode) {

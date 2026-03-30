@@ -26,7 +26,7 @@ export function createAiSettingsCard(container) {
   const apiKeyInput = el('input', {
     class: 'input',
     id: 'ai-api-key',
-    type: 'password',
+    type: 'text',
     placeholder: 'sk-ant-api03-…',
   });
 
@@ -109,8 +109,16 @@ export function createAiSettingsCard(container) {
 
 // ─── Handlers ───────────────────────────────────────────────────────────
 
+function _getApiKey() {
+  const input = qs('#ai-api-key');
+  // If the field still shows the masked value, use the stored key
+  return (input._storedKey && input.value.includes('…'))
+    ? input._storedKey
+    : input.value.trim();
+}
+
 async function handleTestKey() {
-  const key = qs('#ai-api-key').value.trim();
+  const key = _getApiKey();
   if (!key) {
     showStatus('Enter an API key first', 'error');
     return;
@@ -153,8 +161,19 @@ async function handleTestKey() {
 }
 
 async function handleSaveSettings() {
+  const newKey = _getApiKey();
+
+  // Guard: don't overwrite a stored key with an empty field
+  if (!newKey) {
+    const existing = await loadAiSettings();
+    if (existing.apiKey) {
+      showStatus('API key field is empty — keeping existing key. Clear it explicitly to remove.', 'error');
+      return;
+    }
+  }
+
   const settings = {
-    apiKey: qs('#ai-api-key').value.trim(),
+    apiKey: newKey,
     model: qs('#ai-model').value,
     maxTokens: parseInt(qs('#ai-max-tokens').value) || 2048,
   };
@@ -191,9 +210,26 @@ async function handleSaveSettings() {
 async function initFromStorage() {
   const settings = await loadAiSettings();
   if (settings.apiKey) {
-    qs('#ai-api-key').value = settings.apiKey;
+    // Show masked key so it's clear a key is stored
+    // (type=text avoids the ambiguous password dots vs placeholder confusion)
+    const masked = settings.apiKey.substring(0, 12) + '…' + settings.apiKey.slice(-4);
+    const input = qs('#ai-api-key');
+    input.value = masked;
+    input._storedKey = settings.apiKey; // Keep real key for test/save
+    // On focus, reveal the real key for editing
+    input.addEventListener('focus', function onFocus() {
+      if (input._storedKey && input.value === masked) {
+        input.value = input._storedKey;
+      }
+    }, { once: true });
     qs('#ai-model').value = settings.model || 'claude-sonnet-4-6';
     qs('#ai-max-tokens').value = settings.maxTokens || 2048;
+    // If we have a stored key, trust it as valid (matches app.js boot logic).
+    // The user can re-test if needed; this prevents the "NOT CONFIGURED"
+    // badge from flashing while async boot code is still running.
+    if (!state.get('ai.apiKeyValid')) {
+      state.set('ai.apiKeyValid', true);
+    }
   }
 }
 

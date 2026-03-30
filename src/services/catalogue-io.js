@@ -38,8 +38,8 @@ export function exportCatalogue(catalogueId) {
     return buildExportPayload(cat, sections, variables);
   }
 
-  // Multi-catalogue export (all user-owned, non-readonly)
-  const userCats = catalogues.filter(c => !c.readonly);
+  // Multi-catalogue export (all catalogues including readonly/cookbook)
+  const userCats = catalogues;
   return {
     version: 1,
     exportedAt: new Date().toISOString(),
@@ -137,7 +137,7 @@ async function importSingleCatalogue(payload) {
   const existing = (state.get('catalogues') || []);
   let catName = catalogue.name;
   if (existing.find(c => c.name === catName)) {
-    catName = `${catName} (imported)`;
+    catName = `${catName} (copy)`;
   }
 
   // Create catalogue

@@ -163,6 +163,19 @@ document.addEventListener('mouseout', (e) => {
 state.on('dataView', dismissAllTooltips);
 state.on('activeVariable', dismissAllTooltips);
 
+// ── Hamburger menu actions (data import/export) ──
+state.on('menu.action', (action) => {
+  if (action === 'data-export') {
+    const catalogues = state.get('catalogues') || [];
+    const variables = state.get('variables') || [];
+    const sections = state.get('sections') || [];
+    showDataExportDialog(catalogues, variables, sections);
+  }
+  if (action === 'data-import') {
+    triggerImport();
+  }
+});
+
 // ─── Main render ────────────────────────────────────────────────────────
 
 export function renderVariableList(container) {
@@ -204,29 +217,22 @@ export function renderVariableList(container) {
   }
 
   // ── Page header ──
-  const dsCount = variables.length;
-
   container.appendChild(
     el('div', { class: 'data-section-head' }, [
       el('div', { class: 'data-section-left' }, [
         el('span', { class: 'icon', style: { color: 'var(--tacton-blue)' }, html: icon('database', 15) }),
         el('span', { style: { fontWeight: '700', fontSize: '13px' } }, 'Data'),
-        el('span', {
-          class: 'badge badge-muted',
-          style: { fontSize: '9px', marginLeft: '6px' },
-        }, `${dsCount} data set${dsCount !== 1 ? 's' : ''}` + (catalogues.length > 0 ? `, ${catalogues.filter(c => !c.readonly).length} catalogue${catalogues.filter(c => !c.readonly).length !== 1 ? 's' : ''}` : '')),
       ]),
       el('div', { style: { display: 'flex', gap: '4px' } }, [
         el('button', {
           class: 'btn btn-outline btn-sm',
           onclick: () => triggerImport(),
           title: 'Import catalogue from JSON',
-        }, [el('span', { class: 'icon', html: icon('arrowDown', 12) }), 'Import']),
+        }, [el('span', { class: 'icon', html: icon('download', 12) }), 'Import']),
         el('button', {
           class: 'btn btn-outline btn-sm',
           onclick: () => showNewCatalogueInline(container),
         }, [el('span', { class: 'icon', html: icon('folder', 12) }), 'New catalogue']),
-        // "New data set" button lives inside each catalogue tile now
       ]),
     ])
   );
@@ -1099,6 +1105,152 @@ function showNewSectionInline(body, catalogueId) {
   if (footer) body.insertBefore(form, footer);
   else body.appendChild(form);
   nameInput.focus();
+}
+
+// ─── Data Export Dialog ─────────────────────────────────────────────────
+
+/**
+ * Show export dialog with scope options:
+ *   - All data sets (all user catalogues)
+ *   - Selected data sets (multi-select)
+ *   - Per catalogue
+ */
+function showDataExportDialog(catalogues, variables, sections) {
+  const existing = qs('#data-export-dialog');
+  if (existing) existing.remove();
+
+  const userCats = catalogues;
+  const hasSelection = selectedVarIds.size > 0;
+
+  // Build scope options
+  const scopeOptions = [];
+
+  // (1) All user catalogues
+  scopeOptions.push({
+    key: 'all',
+    label: `All data sets (${variables.length})`,
+    checked: !hasSelection,
+  });
+
+  // (2) Selected data sets (only if multi-select active)
+  if (hasSelection) {
+    scopeOptions.push({
+      key: 'selected',
+      label: `Selected data sets (${selectedVarIds.size})`,
+      checked: true,
+    });
+  }
+
+  // (3) Individual catalogues
+  for (const cat of userCats) {
+    const catVars = variables.filter(v => v.catalogueId === cat.id);
+    scopeOptions.push({
+      key: `cat-${cat.id}`,
+      label: `${cat.name} (${catVars.length})`,
+      checked: false,
+      catId: cat.id,
+    });
+  }
+
+  let selectedScope = scopeOptions.find(o => o.checked)?.key || 'all';
+
+  const radioRows = scopeOptions.map(opt => {
+    const radio = el('input', {
+      type: 'radio',
+      name: 'data-export-scope',
+      value: opt.key,
+      checked: opt.checked || false,
+    });
+    radio.addEventListener('change', () => { selectedScope = opt.key; });
+    return el('label', { class: 'export-option-row' }, [
+      radio,
+      el('span', {}, opt.label),
+    ]);
+  });
+
+  const dialog = el('div', { class: 'config-dialog-overlay', id: 'data-export-dialog' }, [
+    el('div', { class: 'config-dialog' }, [
+      el('div', { class: 'config-dialog-header' }, [
+        el('span', { class: 'icon', html: icon('upload', 18) }),
+        el('span', {}, 'Export Data'),
+      ]),
+      el('div', { class: 'config-dialog-body' }, [
+        el('div', { class: 'config-dialog-hint' }, 'Choose what to include in the export file.'),
+        el('div', { class: 'export-options' }, radioRows),
+      ]),
+      el('div', { class: 'config-dialog-actions' }, [
+        el('button', { class: 'btn btn-secondary', onclick: () => dialog.remove() }, 'Cancel'),
+        el('button', { class: 'btn btn-primary', onclick: () => {
+          doDataExport(selectedScope, userCats, variables, sections);
+          dialog.remove();
+        }}, 'Export'),
+      ]),
+    ]),
+  ]);
+
+  (qs('.taskpane') || document.body).appendChild(dialog);
+}
+
+/** Execute data export based on scope */
+function doDataExport(scope, catalogues, variables, sections) {
+  let data;
+  let filename;
+
+  if (scope === 'all') {
+    // Export all user catalogues
+    data = exportCatalogue(null);
+    filename = `data-all-${new Date().toISOString().slice(0, 10)}.json`;
+  } else if (scope === 'selected') {
+    // Export only selected variables — build a virtual catalogue
+    const selectedVars = variables.filter(v => selectedVarIds.has(v.id));
+    // Group by catalogue for proper structure
+    const catIds = [...new Set(selectedVars.map(v => v.catalogueId).filter(Boolean))];
+    const allCats = state.get('catalogues') || [];
+    const allSections = state.get('sections') || [];
+
+    const exportCats = catIds.map(catId => {
+      const cat = allCats.find(c => c.id === catId);
+      if (!cat) return null;
+      const catVars = selectedVars.filter(v => v.catalogueId === catId);
+      const catSectionIds = [...new Set(catVars.map(v => v.sectionId).filter(Boolean))];
+      const catSecs = allSections.filter(s => catSectionIds.includes(s.id));
+      const secById = {};
+      catSecs.forEach(s => { secById[s.id] = s.name; });
+
+      return {
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        catalogue: { name: cat.name, description: cat.description || '', scope: cat.scope || 'ticket', tags: cat.tags || [] },
+        sections: catSecs.map(s => ({ name: s.name, description: s.description || '', tags: s.tags || [], order: s.order || 0 })),
+        variables: catVars.map(v => ({
+          name: v.name, purpose: v.purpose || 'block', type: v.type || 'bom',
+          description: v.description || '', source: v.source || '',
+          filters: v.filters || [], filterLogic: v.filterLogic || 'or',
+          transforms: v.transforms || [], catchAll: v.catchAll || false,
+          excludeVars: v.excludeVars || [], instanceMode: v.instanceMode || 'all',
+          sectionName: v.sectionId ? (secById[v.sectionId] || null) : null,
+          order: v.order || 0,
+        })),
+      };
+    }).filter(Boolean);
+
+    data = { version: 1, exportedAt: new Date().toISOString(), catalogues: exportCats };
+    filename = `data-selected-${selectedVarIds.size}-${new Date().toISOString().slice(0, 10)}.json`;
+  } else if (scope.startsWith('cat-')) {
+    // Export a single catalogue
+    const catId = scope.replace('cat-', '');
+    // catalogueId could be string or number — use find with coercion
+    const cat = catalogues.find(c => String(c.id) === catId);
+    if (cat) {
+      data = exportCatalogue(cat.id);
+      filename = `data-${cat.name.replace(/\s+/g, '-').toLowerCase()}-${new Date().toISOString().slice(0, 10)}.json`;
+    } else {
+      data = exportCatalogue(null);
+      filename = `data-export-${new Date().toISOString().slice(0, 10)}.json`;
+    }
+  }
+
+  if (data) downloadJson(data, filename);
 }
 
 // ─── Import trigger ─────────────────────────────────────────────────────

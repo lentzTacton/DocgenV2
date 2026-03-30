@@ -380,6 +380,19 @@ export const upload = createIcon(`
   <line x1="12" y1="3" x2="12" y2="15"/>
 `);
 
+export const download = createIcon(`
+  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+  <polyline points="7 10 12 15 17 10"/>
+  <line x1="12" y1="15" x2="12" y2="3"/>
+`);
+
+// Hamburger menu (three horizontal lines)
+export const menu = createIcon(`
+  <line x1="3" y1="6" x2="21" y2="6"/>
+  <line x1="3" y1="12" x2="21" y2="12"/>
+  <line x1="3" y1="18" x2="21" y2="18"/>
+`);
+
 /**
  * Icon lookup helper - retrieves icon by name
  * @param {string} name - Icon name (e.g., 'settings', 'code', 'edit')
@@ -442,6 +455,8 @@ export function icon(name, size = 16) {
     chevronUp,
     clipboard,
     upload,
+    download,
+    menu,
   };
 
   const iconFn = iconMap[name];

@@ -24,6 +24,7 @@ import {
   getBomSources, fetchModel, getStartingObject,
   resolveCurrentObject,
   getExplorerFavorites, toggleExplorerFavorite,
+  fetchStartingObjectInstances, getSelectedInstance, setSelectedInstance,
 } from '../../services/data-api.js';
 import { wizState, resetWiz, rebuildObjectPath } from './wizard-state.js';
 import { renderBomSection, setRefreshPipelineCallback as setBomRefresh, TRANSFORM_TYPES, buildTransformSyntax, refreshMatchPreview } from './wizard-bom.js';
@@ -382,6 +383,68 @@ export function renderVariableWizard(container, existingVariable) {
     ]),
     el('div', { id: 'wiz-err', class: 'wiz-err', style: { display: 'none' } }),
   ]));
+
+  // ─ Instance picker (which Solution / ConfiguredProduct / etc.) ─
+  // Only show when fully connected with a healthy ticket token
+  const tokenHealth = state.get('tickets.tokenHealth');
+  const hasHealthyToken = tokenHealth && (tokenHealth.status === 'ok' || tokenHealth.status === 'warn');
+  if (isConnected() && hasHealthyToken && !wizState.isEditMode) {
+    const instanceCard = el('div', { class: 'wiz-card', id: 'wiz-instance-card' });
+    const startType = getStartingObject();
+    const currentInst = getSelectedInstance();
+
+    instanceCard.appendChild(el('div', { class: 'wiz-card-label' }, `${startType} instance`));
+
+    const instanceSelect = el('select', {
+      class: 'input wiz-instance-select', id: 'wiz-instance-select',
+      onchange: (e) => {
+        const option = e.target.selectedOptions[0];
+        if (!option || !option.value) {
+          setSelectedInstance(null);
+        } else {
+          setSelectedInstance({
+            id: option.value,
+            displayId: option.dataset.displayId || option.value,
+            name: option.textContent,
+          });
+        }
+      },
+    });
+    instanceSelect.appendChild(el('option', { value: '' }, 'Loading instances…'));
+    instanceCard.appendChild(instanceSelect);
+
+    instanceCard.appendChild(
+      el('div', { class: 'wiz-instance-hint' },
+        `In production, the document is generated from a specific ${startType}. Pick one to simulate realistic data.`
+      )
+    );
+
+    classPanel.appendChild(instanceCard);
+
+    // Async-load the instances
+    fetchStartingObjectInstances(startType).then(instances => {
+      const sel = qs('#wiz-instance-select');
+      if (!sel) return;
+      clear(sel);
+      sel.appendChild(el('option', { value: '' }, `— Select a ${startType} —`));
+      for (const inst of instances) {
+        const label = inst.displayId && inst.displayId !== inst.name
+          ? `${inst.name}  (${inst.displayId})`
+          : inst.name;
+        const opt = el('option', {
+          value: inst.id,
+          'data-display-id': inst.displayId,
+        }, label);
+        if (currentInst && currentInst.id === inst.id) opt.selected = true;
+        sel.appendChild(opt);
+      }
+      // Auto-select first if only one instance
+      if (instances.length === 1 && !currentInst) {
+        sel.value = instances[0].id;
+        setSelectedInstance(instances[0]);
+      }
+    });
+  }
 
   // ─ Type + Usage side-by-side ─
   const configRow = el('div', { class: 'wiz-config-row' });

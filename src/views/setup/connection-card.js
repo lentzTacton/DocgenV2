@@ -237,7 +237,7 @@ export function createConnectionCard(container) {
 
 // ─── Init ────────────────────────────────────────────────────────────────
 
-async function initInstances() {
+export async function initInstances() {
   instanceFavs = await loadFavorites('instances');
   allInstances = await getInstances();
   renderInstanceList();
@@ -485,32 +485,65 @@ async function handleDeleteInstanceById(id) {
   const instance = await getInstance(id);
   if (!instance) return;
 
-  await deleteInstance(id);
-  clearAdminTokenCache(instance.url);
+  // Show confirmation dialog
+  const name = instance.name || instance.url || 'this instance';
+  showDeleteConfirm(name, async () => {
+    await deleteInstance(id);
+    clearAdminTokenCache(instance.url);
 
-  // Remove from favorites if present
-  instanceFavs.delete(String(id));
-  await saveFavorites('instances', instanceFavs);
+    // Remove from favorites if present
+    instanceFavs.delete(String(id));
+    await saveFavorites('instances', instanceFavs);
 
-  // If this was the active connection, disconnect
-  if (state.get('connection.instanceId') === id) {
-    state.batch({
-      'connection.instanceId': null,
-      'connection.url': '',
-      'connection.status': 'disconnected',
-      'connection.error': null,
-    });
-  }
+    // If this was the active connection, disconnect
+    if (state.get('connection.instanceId') === id) {
+      state.batch({
+        'connection.instanceId': null,
+        'connection.url': '',
+        'connection.status': 'disconnected',
+        'connection.error': null,
+      });
+    }
 
-  if (selectedInstanceId === id) {
-    selectedInstanceId = null;
-    clearForm();
-    showForm(false);
-  }
+    if (selectedInstanceId === id) {
+      selectedInstanceId = null;
+      clearForm();
+      showForm(false);
+    }
 
-  allInstances = await getInstances();
-  renderInstanceList();
-  showStatus('Instance deleted', 'info');
+    allInstances = await getInstances();
+    renderInstanceList();
+    showStatus('Instance deleted', 'info');
+  });
+}
+
+function showDeleteConfirm(name, onConfirm) {
+  const existing = qs('#delete-confirm-dialog');
+  if (existing) existing.remove();
+
+  const dialog = el('div', { class: 'config-dialog-overlay', id: 'delete-confirm-dialog' }, [
+    el('div', { class: 'config-dialog' }, [
+      el('div', { class: 'config-dialog-header' }, [
+        el('span', { class: 'icon', html: icon('trash', 18) }),
+        el('span', {}, 'Delete Connection'),
+      ]),
+      el('div', { class: 'config-dialog-body' }, [
+        el('p', { style: { margin: '0 0 8px', fontSize: '13px', color: '#374151' } },
+          `Are you sure you want to delete "${name}"?`),
+        el('p', { style: { margin: '0', fontSize: '12px', color: '#6b7280' } },
+          'This action cannot be undone.'),
+      ]),
+      el('div', { class: 'config-dialog-actions' }, [
+        el('button', { class: 'btn btn-secondary', onclick: () => dialog.remove() }, 'Cancel'),
+        el('button', { class: 'btn btn-danger', onclick: async () => {
+          dialog.remove();
+          await onConfirm();
+        }}, 'Delete'),
+      ]),
+    ]),
+  ]);
+
+  (qs('.taskpane') || document.body).appendChild(dialog);
 }
 
 async function toggleInstanceFav(instanceId) {

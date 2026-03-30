@@ -760,6 +760,65 @@ export function indexConfigAttributes(productTree) {
   return index;
 }
 
+// ─── Starting-Object Instance Helpers ──────────────────────────────
+
+/**
+ * Fetch available instances of the current starting object type.
+ * Returns [{ id, displayId, name, summary }] — the records that represent
+ * real documents a consultant would "Generate document" from.
+ *
+ * In production, a user opens e.g. a specific Solution and presses
+ * "Generate document". This helper gives us that list so the plugin
+ * can simulate the same context.
+ */
+export async function fetchStartingObjectInstances(objectType) {
+  const type = objectType || getStartingObject();
+  const records = await fetchRecords(type);
+  if (!records || records.length === 0) return [];
+
+  return records.map(r => {
+    const id = r._uuid || r._resourceId || r.id || r.Id || r.ID;
+    const displayId = r.id || r.Id || r.ID || '';
+    const name = r.name || r.Name || r.displayName || displayId || id;
+    const summary = r.summary || r.Summary || r.description || r.Description || '';
+    return { id, displayId, name, summary };
+  }).filter(r => r.id);
+}
+
+/**
+ * Get the currently selected starting-object instance (for simulation).
+ * Returns { id, displayId, name } or null.
+ */
+export function getSelectedInstance() {
+  const id = state.get('startingObject.instanceId');
+  if (!id) return null;
+  return {
+    id,
+    displayId: state.get('startingObject.instanceDisplayId') || id,
+    name: state.get('startingObject.instanceName') || id,
+  };
+}
+
+/**
+ * Set the active starting-object instance (for simulation).
+ * Pass null to clear.
+ */
+export function setSelectedInstance(instance) {
+  if (!instance) {
+    state.batch({
+      'startingObject.instanceId': null,
+      'startingObject.instanceDisplayId': null,
+      'startingObject.instanceName': null,
+    });
+  } else {
+    state.batch({
+      'startingObject.instanceId': instance.id,
+      'startingObject.instanceDisplayId': instance.displayId || instance.id,
+      'startingObject.instanceName': instance.name || instance.displayId || instance.id,
+    });
+  }
+}
+
 // ─── Cache management ───────────────────────────────────────────────
 
 export function clearDataCache() {

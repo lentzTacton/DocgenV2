@@ -29,6 +29,10 @@ import {
   fetchRecords,
   fetchModel,
   getObjectAttributes,
+  fetchStartingObjectInstances,
+  getSelectedInstance,
+  setSelectedInstance,
+  getStartingObject,
 } from '../../services/data-api.js';
 import { resolveConfigAttrAcrossCPs } from './wizard-config-explorer.js';
 
@@ -196,6 +200,10 @@ function renderPanel() {
     return;
   }
 
+  // ── Instance picker (simulation context) ──
+  const instanceBar = el('div', { class: 'sel-instance-bar', id: 'sel-instance-bar' });
+  renderInstancePicker(instanceBar);
+
   // Resolve area (pass dupeInfo so it can use existing variable's column settings)
   // Find ALL matching duplicates (not just the first)
   const dupeMatches = canCreateDataSet(parsed) ? checkDuplicates(parsed) : [];
@@ -267,7 +275,7 @@ function renderPanel() {
     }
   }
 
-  panelEl.append(headerRow, exprRow, descRow, breakdown, resolveArea, actions);
+  panelEl.append(headerRow, exprRow, descRow, breakdown, instanceBar, resolveArea, actions);
 }
 
 // ─── Breakdown table ────────────────────────────────────────────────
@@ -363,12 +371,28 @@ function renderResolveArea(container, dupeInfo) {
       const countText = unfilt && unfilt !== count
         ? `${count} / ${unfilt} record${unfilt !== 1 ? 's' : ''}`
         : `${count} record${count !== 1 ? 's' : ''} found`;
+
+      // Instance-scoped badge: shows when data is narrowed to a specific instance
+      const scopedInst = resolveData.instanceScoped ? getSelectedInstance() : null;
+      const scopedBadge = scopedInst
+        ? el('span', { class: 'sel-resolve-scoped' }, `${scopedInst.name}`)
+        : null;
+
+      // Effective cardinality: when instance-scoped, 1 record = single, not multi
+      const effectiveCount = count;
+      const isSingleInContext = resolveData.instanceScoped && effectiveCount === 1;
+      const cardinalityBadge = isSingleInContext
+        ? el('span', { class: 'badge badge-type-single', style: { fontSize: '9px', marginLeft: '6px' } }, 'SINGLE')
+        : null;
+
       container.appendChild(
         el('div', { class: 'sel-resolve-header' }, [
           el('span', { html: icon('database', 13) }),
           countText,
           resolveData.objectName ? el('span', { class: 'sel-resolve-obj' }, resolveData.objectName) : null,
-        ])
+          scopedBadge,
+          cardinalityBadge,
+        ].filter(Boolean))
       );
 
       // Filter/index info now shown in breakdown rows above — no duplicate here
@@ -452,6 +476,10 @@ async function autoResolve(parsed) {
 async function resolveExpression(parsed) {
   const source = parsed.source || parsed.loopSource || '';
 
+  // ── Selected instance context (simulation) ──
+  const selectedInst = getSelectedInstance();
+  const startObj = state.get('startingObject.type') || 'Solution';
+
   // ── Config attributes: resolve via Solution API, not object model ──
   if (source.includes('getConfigurationAttribute(')) {
     const pathMatch = source.match(/getConfigurationAttribute\s*\(\s*"([^"]+)"\s*\)/);
@@ -493,9 +521,37 @@ async function resolveExpression(parsed) {
   let objMatch = model.find(o => o.name.toLowerCase() === rootName.toLowerCase());
 
   // If the first segment is the starting object (e.g. 'solution'), walk from there
-  const startObj = state.get('startingObject.type') || 'Solution';
   if (!objMatch && rootName.toLowerCase() === startObj.toLowerCase()) {
     objMatch = model.find(o => o.name.toLowerCase() === startObj.toLowerCase());
+  }
+
+  /**
+   * Instance-scoped filtering helper.
+   * When a specific starting-object instance is selected (e.g. a specific Solution),
+   * filter child records to only those referencing that instance via a foreign key.
+   * This mirrors how DocGen works in production: you generate from a *specific* instance.
+   */
+  function scopeToInstance(records, objectName) {
+    if (!selectedInst || !records.length) return records;
+    // If we're looking at the starting object itself, filter to the selected instance
+    if (objectName.toLowerCase() === startObj.toLowerCase()) {
+      return records.filter(r => {
+        const rid = r._uuid || r._resourceId || r.id || r.Id || r.ID;
+        return rid === selectedInst.id;
+      });
+    }
+    // For child objects, find a foreign-key attribute that references the starting object
+    const objDef = model.find(o => o.name === objectName);
+    if (objDef) {
+      const refAttr = objDef.attributes.find(a => a.refType === startObj);
+      if (refAttr) {
+        return records.filter(r => {
+          const fk = r[refAttr.name] || '';
+          return fk === selectedInst.id || fk === selectedInst.displayId;
+        });
+      }
+    }
+    return records;
   }
 
   // For BOM sources, try to fetch flatbom records
@@ -503,6 +559,7 @@ async function resolveExpression(parsed) {
     const bomObj = model.find(o => o.name.toLowerCase().includes('bom') || o.name.toLowerCase().includes('flatbom'));
     if (bomObj) {
       let records = await fetchRecords(bomObj.name);
+      records = scopeToInstance(records, bomObj.name);
       records = _applyFiltersAndIndex(records, filters, filterLogic, indexAccess);
       return {
         records,
@@ -515,6 +572,7 @@ async function resolveExpression(parsed) {
         filters: filters.length > 0 ? filters : undefined,
         filterLogic: filters.length > 1 ? filterLogic : undefined,
         indexAccess,
+        instanceScoped: !!selectedInst,
       };
     }
   }
@@ -533,8 +591,9 @@ async function resolveExpression(parsed) {
       break;
     }
 
-    // Fetch records of the resolved object
+    // Fetch records of the resolved object, scoped to instance
     let records = await fetchRecords(currentObj.name);
+    records = scopeToInstance(records, currentObj.name);
     const unfilteredCount = records.length;
     records = _applyFiltersAndIndex(records, filters, filterLogic, indexAccess);
     const lastSeg = cleanSegments[cleanSegments.length - 1];
@@ -553,6 +612,7 @@ async function resolveExpression(parsed) {
             filters: filters.length > 0 ? filters : undefined,
             filterLogic: filters.length > 1 ? filterLogic : undefined,
             indexAccess,
+            instanceScoped: !!selectedInst,
           };
         }
         // Multiple → show as a list
@@ -565,6 +625,7 @@ async function resolveExpression(parsed) {
           filters: filters.length > 0 ? filters : undefined,
           filterLogic: filters.length > 1 ? filterLogic : undefined,
           indexAccess,
+          instanceScoped: !!selectedInst,
         };
       }
     }
@@ -578,17 +639,20 @@ async function resolveExpression(parsed) {
       filters: filters.length > 0 ? filters : undefined,
       filterLogic: filters.length > 1 ? filterLogic : undefined,
       indexAccess,
+      instanceScoped: !!selectedInst,
     };
   }
 
   // Fallback: try to fetch the root object directly
   if (objMatch) {
-    const records = await fetchRecords(objMatch.name);
+    let records = await fetchRecords(objMatch.name);
+    records = scopeToInstance(records, objMatch.name);
     return {
       records: records.slice(0, 5),
       totalCount: records.length,
       objectName: objMatch.name,
       fields: objMatch.attributes.map(a => a.name).filter(n => !n.startsWith('_')).slice(0, 6),
+      instanceScoped: !!selectedInst,
     };
   }
 
@@ -632,6 +696,79 @@ function _applyFiltersAndIndex(records, filters, filterLogic, indexAccess) {
   }
 
   return records;
+}
+
+// ─── Instance picker (simulation context) ──────────────────────────
+
+/** Cached instance list to avoid re-fetching on every panel render */
+let _cachedInstances = null;
+let _cachedInstanceType = null;
+
+/**
+ * Render a compact instance picker dropdown inside the selection panel.
+ * Switching instance triggers a full re-resolve of the current expression.
+ */
+function renderInstancePicker(container) {
+  if (!isConnected()) return;
+  // Only show when we have a healthy ticket token
+  const tokenHealth = state.get('tickets.tokenHealth');
+  if (!tokenHealth || (tokenHealth.status !== 'ok' && tokenHealth.status !== 'warn')) return;
+  clear(container);
+
+  const startType = getStartingObject();
+  const currentInst = getSelectedInstance();
+
+  const label = el('span', { class: 'sel-instance-label' }, `${startType}:`);
+  const select = el('select', {
+    class: 'sel-instance-select', id: 'sel-instance-select',
+    onchange: (e) => {
+      const opt = e.target.selectedOptions[0];
+      if (!opt || !opt.value) {
+        setSelectedInstance(null);
+      } else {
+        setSelectedInstance({
+          id: opt.value,
+          displayId: opt.dataset.displayId || opt.value,
+          name: opt.textContent,
+        });
+      }
+      // Re-resolve the current expression with new instance context
+      if (currentParsed) {
+        resolveData = null;
+        autoResolve(currentParsed);
+      }
+    },
+  });
+  select.appendChild(el('option', { value: '' }, 'All (no filter)'));
+  container.append(label, select);
+
+  // Load instances (use cache if same type)
+  const populateSelect = (instances) => {
+    const sel = qs('#sel-instance-select');
+    if (!sel) return;
+    // Keep the "All" option, add instances
+    for (const inst of instances) {
+      const text = inst.displayId && inst.displayId !== inst.name
+        ? `${inst.name}  (${inst.displayId})`
+        : inst.name;
+      const opt = el('option', {
+        value: inst.id,
+        'data-display-id': inst.displayId,
+      }, text);
+      if (currentInst && currentInst.id === inst.id) opt.selected = true;
+      sel.appendChild(opt);
+    }
+  };
+
+  if (_cachedInstances && _cachedInstanceType === startType) {
+    populateSelect(_cachedInstances);
+  } else {
+    fetchStartingObjectInstances(startType).then(instances => {
+      _cachedInstances = instances;
+      _cachedInstanceType = startType;
+      populateSelect(instances);
+    });
+  }
 }
 
 // ─── Duplicate detection ────────────────────────────────────────────
