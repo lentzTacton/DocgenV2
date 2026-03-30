@@ -3523,6 +3523,7 @@ select.input {
 .sec-header:hover .sec-insert-btn { opacity: 0.7; }
 .sec-insert-btn:hover { opacity: 1 !important; background: var(--tacton-light, #E0F0FF); }
 .sec-card-list { margin-left: 6px; }
+.sec-card-list .sec-add-btn { margin-left: 24px; width: auto; }
 .sec-empty { font-size: 10px; color: var(--text-tertiary); padding: 6px 12px 6px 20px; font-style: italic; }
 
 .sec-add-btn {

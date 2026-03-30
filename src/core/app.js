@@ -43,9 +43,8 @@ function createHeader() {
       ]),
     ]),
 
-    // Right: DocGen Plugin badge + hamburger menu
+    // Right: hamburger menu
     el('div', { class: 'header-right' }, [
-      el('span', { class: 'header-badge' }, 'DocGen Plugin'),
       createHamburgerMenu(),
     ]),
   ]);

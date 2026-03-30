@@ -226,11 +226,6 @@ export function renderVariableList(container) {
       el('div', { style: { display: 'flex', gap: '4px' } }, [
         el('button', {
           class: 'btn btn-outline btn-sm',
-          onclick: () => triggerImport(),
-          title: 'Import catalogue from JSON',
-        }, [el('span', { class: 'icon', html: icon('download', 12) }), 'Import']),
-        el('button', {
-          class: 'btn btn-outline btn-sm',
           onclick: () => showNewCatalogueInline(container),
         }, [el('span', { class: 'icon', html: icon('folder', 12) }), 'New catalogue']),
       ]),
@@ -616,7 +611,13 @@ function renderSection(section, variables, catalogue) {
   const cardList = el('div', { class: 'var-card-list sec-card-list' });
   variables.forEach(v => cardList.appendChild(renderVarCard(v, isCatReadonly, isLocked)));
   if (!isCatReadonly) makeDropZone(cardList, section.catalogueId, section.id);
-  if (variables.length === 0) {
+  if (variables.length === 0 && !isCatReadonly && !isLocked) {
+    cardList.appendChild(el('button', { class: 'sec-add-btn', onclick: () => {
+      wizState.catalogueId = section.catalogueId;
+      wizState.sectionId = section.id;
+      state.set('dataView', 'new');
+    }}, [el('span', { class: 'icon', html: icon('plus', 10) }), 'Add data set']));
+  } else if (variables.length === 0) {
     cardList.appendChild(el('div', { class: 'sec-empty' }, 'No data sets in this section'));
   }
   frag.appendChild(cardList);
