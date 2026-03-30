@@ -80,6 +80,10 @@ function setShowExpr(val) {
 let searchQuery = '';
 let activeTagFilters = new Set();  // set of tag strings
 
+// ── Multi-select state ──
+const selectedVarIds = new Set();  // IDs of currently selected variables
+let lastClickedVarId = null;       // for shift-click range selection
+
 // Validation context cache (populated once per render when connected)
 let validationCtx = { bomSources: [], bomFields: [], bomRecords: [], modelObjects: [], configAttrPaths: new Set() };
 let validationCtxLoaded = false;
@@ -162,6 +166,17 @@ state.on('activeVariable', dismissAllTooltips);
 // ─── Main render ────────────────────────────────────────────────────────
 
 export function renderVariableList(container) {
+  // ── Multi-select handlers ──
+  document.removeEventListener('keydown', _handleSelectionKeydown);
+  document.addEventListener('keydown', _handleSelectionKeydown);
+
+  // Click on empty space clears selection
+  container.addEventListener('click', (e) => {
+    if (selectedVarIds.size > 0 && !e.target.closest('.var-card')) {
+      clearMultiSelect();
+    }
+  });
+
   const variables = state.get('variables') || [];
   const catalogues = state.get('catalogues') || [];
   const sections = state.get('sections') || [];
@@ -291,6 +306,16 @@ export function renderVariableList(container) {
   }
 
   // Coverage bar removed — BOM type not in use
+
+  // ── Multi-select hint (bottom-right) ──
+  container.appendChild(
+    el('div', { class: 'multiselect-hint' }, [
+      el('span', {}, 'Shift'),
+      ' select  ',
+      el('span', {}, 'Ctrl'),
+      ' range',
+    ])
+  );
 }
 
 // ─── Unassigned block ───────────────────────────────────────────────────
@@ -549,28 +574,31 @@ function renderSection(section, variables, catalogue) {
         return;
       }
 
-      // Handle variable drags
-      const varId = e.dataTransfer.getData('application/x-docgen-var-id');
-      if (!varId) return;
+      // Handle variable drags (supports multi-select)
+      const varIds = _extractDraggedIds(e);
+      if (varIds.length === 0) return;
 
-      // Check if from locked section
+      // Check if any are from locked sections
       const allVars = state.get('variables') || [];
-      const draggedVar = allVars.find(v => String(v.id) === varId);
-      if (draggedVar && draggedVar.sectionId) {
-        const allSections = state.get('sections') || [];
-        const srcSec = allSections.find(s => s.id === draggedVar.sectionId);
-        if (srcSec && srcSec.locked && srcSec.id !== section.id) {
-          showConfirmDialog(
-            `Move out of locked section?`,
-            `"${draggedVar.name}" is in locked section "${srcSec.name}". Moving it out will remove its protection.`,
-            async () => { await performDrop(varId, section.catalogueId, section.id, null); },
-            'Move'
-          );
-          return;
-        }
+      const allSections = state.get('sections') || [];
+      const lockedVars = varIds.filter(vid => {
+        const v = allVars.find(x => String(x.id) === vid);
+        if (!v || !v.sectionId) return false;
+        const s = allSections.find(x => x.id === v.sectionId);
+        return s && s.locked && s.id !== section.id;
+      });
+      if (lockedVars.length > 0) {
+        const names = lockedVars.map(vid => allVars.find(x => String(x.id) === vid)?.name).filter(Boolean);
+        showConfirmDialog(
+          `Move out of locked section?`,
+          `${names.length} data set${names.length > 1 ? 's are' : ' is'} in a locked section. Moving will remove protection.`,
+          async () => { await performMultiDrop(varIds, section.catalogueId, section.id, null); },
+          'Move'
+        );
+        return;
       }
 
-      await performDrop(varId, section.catalogueId, section.id, null);
+      await performMultiDrop(varIds, section.catalogueId, section.id, null);
     });
   }
 
@@ -627,6 +655,66 @@ function makeExprIssueIcon(valResult) {
   });
 
   return wrapper;
+}
+
+// ─── Multi-select helpers ──────────────────────────────────────────────
+
+/**
+ * Handle shift+click (range) or ctrl/cmd+click (toggle) multi-selection.
+ * After updating selectedVarIds, re-renders to update visual state.
+ */
+function handleMultiSelect(variable, e) {
+  const id = String(variable.id);
+
+  if (e.ctrlKey || e.metaKey) {
+    // Ctrl/Cmd+click: range select from last clicked to this
+    if (lastClickedVarId) {
+      const allCards = [...document.querySelectorAll('.var-card[data-var-id]')];
+      const ids = allCards.map(c => c.getAttribute('data-var-id'));
+      const startIdx = ids.indexOf(lastClickedVarId);
+      const endIdx = ids.indexOf(id);
+      if (startIdx >= 0 && endIdx >= 0) {
+        const lo = Math.min(startIdx, endIdx);
+        const hi = Math.max(startIdx, endIdx);
+        if (!e.shiftKey) selectedVarIds.clear();
+        for (let i = lo; i <= hi; i++) {
+          const card = allCards[i];
+          if (!card.closest('[data-readonly]')) selectedVarIds.add(ids[i]);
+        }
+      }
+    } else {
+      selectedVarIds.add(id);
+    }
+  } else {
+    // Shift+click: toggle individual
+    if (selectedVarIds.has(id)) {
+      selectedVarIds.delete(id);
+    } else {
+      selectedVarIds.add(id);
+    }
+  }
+
+  lastClickedVarId = id;
+
+  // Update visual state without full re-render (fast toggle)
+  document.querySelectorAll('.var-card[data-var-id]').forEach(card => {
+    const cardId = card.getAttribute('data-var-id');
+    card.classList.toggle('var-card-selected', selectedVarIds.has(cardId));
+  });
+}
+
+/** Escape key clears multi-selection. */
+function _handleSelectionKeydown(e) {
+  if (e.key === 'Escape' && selectedVarIds.size > 0) {
+    clearMultiSelect();
+  }
+}
+
+/** Clear multi-selection (e.g. after a drop or escape). */
+function clearMultiSelect() {
+  selectedVarIds.clear();
+  lastClickedVarId = null;
+  document.querySelectorAll('.var-card-selected').forEach(c => c.classList.remove('var-card-selected'));
 }
 
 function renderVarCard(variable, isReadonly = false, sectionLocked = false) {
@@ -718,13 +806,33 @@ function renderVarCard(variable, isReadonly = false, sectionLocked = false) {
       : 'var-expr-valid'
     : '';
 
+  const varIdStr = String(variable.id);
+  const isSelected = selectedVarIds.has(varIdStr);
+
   const card = el('div', {
-    class: `var-card${sectionLocked ? ' var-card-locked' : ''}`,
+    class: `var-card${sectionLocked ? ' var-card-locked' : ''}${isSelected ? ' var-card-selected' : ''}`,
     draggable: isReadonly ? undefined : 'true',
-    'data-var-id': String(variable.id),
+    'data-var-id': varIdStr,
     'data-locked-section': sectionLocked ? 'true' : undefined,
     style: isReadonly ? { opacity: '0.85' } : {},
-    onclick: noEdit ? null : () => {
+    onclick: noEdit ? null : (e) => {
+      if (e.shiftKey || e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        handleMultiSelect(variable, e);
+        return;
+      }
+      // If this card is selected, clicking it deselects just this one
+      if (selectedVarIds.has(varIdStr)) {
+        selectedVarIds.delete(varIdStr);
+        card.classList.remove('var-card-selected');
+        return;
+      }
+      // Clicking an unselected card while others are selected → clear all
+      if (selectedVarIds.size > 0) {
+        clearMultiSelect();
+        return;
+      }
+      // Normal click with no selection — open editor
       state.set('activeVariable', variable.id);
       state.set('dataView', 'detail');
     },
@@ -798,16 +906,38 @@ function renderVarCard(variable, isReadonly = false, sectionLocked = false) {
       e.dataTransfer.setData('application/x-docgen-cookbook-id', String(variable.id));
       e.dataTransfer.effectAllowed = 'copy';
     } else {
-      // Internal ID for reorder drops within the plugin
-      e.dataTransfer.setData('application/x-docgen-var-id', String(variable.id));
+      // If this card is part of a multi-selection, drag all selected
+      // If not selected, drag just this one (and clear selection)
+      if (selectedVarIds.size > 1 && selectedVarIds.has(varIdStr)) {
+        e.dataTransfer.setData('application/x-docgen-var-ids', JSON.stringify([...selectedVarIds]));
+      } else {
+        clearMultiSelect();
+      }
+      // Always set the single ID too (used by existing drop handlers as fallback)
+      e.dataTransfer.setData('application/x-docgen-var-id', varIdStr);
       e.dataTransfer.effectAllowed = 'copyMove';
     }
     // Expression text for Word drops (external targets)
     e.dataTransfer.setData('text/plain', variable.expression || variable.name);
     card.classList.add('var-card-dragging');
+    // Multi-drag: dim all selected cards and show count badge as drag image
+    if (selectedVarIds.size > 1 && selectedVarIds.has(varIdStr)) {
+      selectedVarIds.forEach(id => {
+        const c = document.querySelector(`.var-card[data-var-id="${id}"]`);
+        if (c) c.classList.add('var-card-dragging');
+      });
+      // Custom drag image with count
+      const ghost = document.createElement('div');
+      ghost.style.cssText = 'position:fixed;top:-100px;left:-100px;background:var(--tacton-blue,#0A6DC2);color:#fff;padding:4px 10px;border-radius:12px;font-size:12px;font-weight:700;white-space:nowrap;pointer-events:none;z-index:99999';
+      ghost.textContent = `${selectedVarIds.size} data sets`;
+      document.body.appendChild(ghost);
+      e.dataTransfer.setDragImage(ghost, 40, 14);
+      requestAnimationFrame(() => ghost.remove());
+    }
   });
   card.addEventListener('dragend', () => {
     card.classList.remove('var-card-dragging');
+    document.querySelectorAll('.var-card-dragging').forEach(c => c.classList.remove('var-card-dragging'));
     document.querySelectorAll('.var-drop-target').forEach(t => t.classList.remove('var-drop-target'));
   });
 
@@ -1261,55 +1391,75 @@ function makeDropZone(container, catalogueId, sectionId) {
       return;
     }
 
-    // ── Normal reorder drag ──
-    const varId = e.dataTransfer.getData('application/x-docgen-var-id');
-    if (!varId) return;
+    // ── Normal reorder drag (supports multi-select) ──
+    const varIds = _extractDraggedIds(e);
+    if (varIds.length === 0) return;
 
-    // Check if variable is coming from a locked section
+    // Check if any variable is coming from a locked section
     const allVars = state.get('variables') || [];
-    const draggedVar = allVars.find(v => String(v.id) === varId);
-    if (draggedVar && draggedVar.sectionId) {
-      const allSections = state.get('sections') || [];
-      const srcSection = allSections.find(s => s.id === draggedVar.sectionId);
-      if (srcSection && srcSection.locked && srcSection.id !== sectionId) {
-        // Moving out of a locked section — confirm first
-        showConfirmDialog(
-          `Move out of locked section?`,
-          `"${draggedVar.name}" is in locked section "${srcSection.name}". Moving it out will remove its protection.`,
-          async () => { await performDrop(varId, catalogueId, sectionId, container); },
-          'Move'
-        );
-        return;
-      }
+    const allSections = state.get('sections') || [];
+    const lockedVars = varIds.filter(vid => {
+      const v = allVars.find(x => String(x.id) === vid);
+      if (!v || !v.sectionId) return false;
+      const s = allSections.find(x => x.id === v.sectionId);
+      return s && s.locked && s.id !== sectionId;
+    });
+    if (lockedVars.length > 0) {
+      const names = lockedVars.map(vid => allVars.find(x => String(x.id) === vid)?.name).filter(Boolean);
+      showConfirmDialog(
+        `Move out of locked section?`,
+        `${names.length} data set${names.length > 1 ? 's are' : ' is'} in a locked section. Moving will remove protection.`,
+        async () => { await performMultiDrop(varIds, catalogueId, sectionId, container); },
+        'Move'
+      );
+      return;
     }
 
-    await performDrop(varId, catalogueId, sectionId, container);
+    await performMultiDrop(varIds, catalogueId, sectionId, container);
   });
 }
 
-async function performDrop(varId, catalogueId, sectionId, container) {
-    // Determine new order based on existing cards
+/** Extract dragged variable IDs from a drop event (multi or single). */
+function _extractDraggedIds(e) {
+  // Multi-select drag
+  const multiData = e.dataTransfer.getData('application/x-docgen-var-ids');
+  if (multiData) {
+    try { return JSON.parse(multiData); } catch { /* fall through */ }
+  }
+  // Single drag
+  const single = e.dataTransfer.getData('application/x-docgen-var-id');
+  return single ? [single] : [];
+}
+
+/** Drop one or more variables into a catalogue/section. */
+async function performMultiDrop(varIds, catalogueId, sectionId, container) {
+    // Determine starting order
     const cards = container ? [...container.querySelectorAll('.var-card[data-var-id]')] : [];
-    let newOrder = cards.length; // append at end when dropped on section header
+    let nextOrder = cards.length;
 
-    // Update variable's catalogue, section, and order
-    await updateVariable(varId, {
-      catalogueId: catalogueId,
-      sectionId: sectionId,
-      order: newOrder,
-    });
+    const movedSet = new Set(varIds);
 
-    // Reorder siblings
+    // Move all dragged variables
+    for (const vid of varIds) {
+      await updateVariable(vid, {
+        catalogueId,
+        sectionId,
+        order: nextOrder++,
+      });
+    }
+
+    // Reorder siblings (non-moved vars in the target)
     const variables = state.get('variables') || [];
     const siblings = variables
-      .filter(v => v.catalogueId === catalogueId && v.sectionId === sectionId && v.id !== varId)
+      .filter(v => v.catalogueId === catalogueId && v.sectionId === sectionId && !movedSet.has(String(v.id)))
       .sort((a, b) => (a.order || 0) - (b.order || 0));
     let idx = 0;
     for (const sib of siblings) {
-      if (idx === newOrder) idx++; // skip the slot we just placed our var in
       await updateVariable(sib.id, { order: idx });
       idx++;
     }
+
+    clearMultiSelect();
 }
 
 // ─── Section drag & drop reorder ─────────────────────────────────────
