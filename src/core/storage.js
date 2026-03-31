@@ -124,10 +124,12 @@ export async function saveProject(project) {
 }
 
 export async function deleteProject(id) {
-  await db.transaction('rw', [db.projects, db.tickets, db.variables], async () => {
-    await db.projects.delete(id);
-    await db.tickets.where('projectId').equals(id).delete();
+  await db.transaction('rw', [db.projects, db.tickets, db.variables, db.sections, db.catalogues], async () => {
     await db.variables.where('projectId').equals(id).delete();
+    await db.sections.where('projectId').equals(id).delete();
+    await db.catalogues.where('projectId').equals(id).delete();
+    await db.tickets.where('projectId').equals(id).delete();
+    await db.projects.delete(id);
   });
 }
 
@@ -227,6 +229,14 @@ export async function deleteSection(id) {
     for (const v of vars) {
       await db.variables.update(v.id, { sectionId: null });
     }
+    await db.sections.delete(id);
+  });
+}
+
+/** Force-delete a section AND all its variables (hard cascade). */
+export async function forceClearSection(id) {
+  return db.transaction('rw', [db.sections, db.variables], async () => {
+    await db.variables.where('sectionId').equals(id).delete();
     await db.sections.delete(id);
   });
 }

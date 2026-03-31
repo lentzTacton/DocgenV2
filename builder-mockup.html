@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=420, initial-scale=1">
+<title>DocGen Builder — Mockup</title>
+<style>
+  :root {
+    --tacton-blue: #0A6DC2;
+    --tacton-dark: #054D8C;
+    --tacton-light: #EBF5FF;
+    --bg: #F4F5F7;
+    --card: #FFFFFF;
+    --border: #E1E4E8;
+    --border-light: #ECEEF1;
+    --text: #1B1F24;
+    --text-secondary: #57606A;
+    --text-tertiary: #8C959F;
+    --success: #1A7F37;
+    --success-bg: #DAFBE1;
+    --warning: #9A6700;
+    --warning-bg: #FFF8C5;
+    --danger: #CF222E;
+    --danger-bg: #FFEBE9;
+    --purple: #8250DF;
+    --purple-bg: #FBEFFF;
+    --orange: #BC4C00;
+    --orange-bg: #FFF1E5;
+    --radius-sm: 4px;
+    --radius: 6px;
+    --radius-lg: 10px;
+    --shadow-sm: 0 1px 2px rgba(27,31,36,.04);
+    --shadow: 0 1px 3px rgba(27,31,36,.08), 0 1px 2px rgba(27,31,36,.06);
+    --shadow-md: 0 4px 12px rgba(27,31,36,.1);
+    --font: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+    --mono: 'Cascadia Code', 'SF Mono', 'Consolas', monospace;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: var(--font);
+    font-size: 12px;
+    color: var(--text);
+    background: var(--bg);
+    width: 420px;
+    margin: 0 auto;
+    min-height: 100vh;
+    overflow-y: auto;
+  }
+
+  /* ── Header ─────────────────────────── */
+  .header {
+    background: var(--card);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 14px;
+    display: flex; align-items: center; gap: 8px;
+    position: sticky; top: 0; z-index: 100;
+  }
+  .header-icon { width: 18px; height: 18px; color: var(--tacton-blue); }
+  .header-title { font-size: 14px; font-weight: 700; flex: 1; }
+  .header-actions { display: flex; gap: 4px; }
+
+  /* ── Toolbar ────────────────────────── */
+  .toolbar {
+    display: flex; gap: 4px; padding: 8px 14px;
+    background: var(--card); border-bottom: 1px solid var(--border-light);
+  }
+  .tb-btn {
+    font: inherit; font-size: 10px; font-weight: 600;
+    padding: 5px 10px; border-radius: var(--radius-sm);
+    border: 1px solid var(--border); background: var(--card);
+    cursor: pointer; display: flex; align-items: center; gap: 4px;
+    color: var(--text-secondary); transition: all .15s;
+  }
+  .tb-btn:hover { background: var(--tacton-light); color: var(--tacton-blue); border-color: var(--tacton-blue); }
+  .tb-btn svg { width: 12px; height: 12px; }
+
+  /* ── Active Data Set banner ─────────── */
+  .active-ds {
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 14px; background: var(--tacton-light);
+    font-size: 11px; color: var(--tacton-dark); border-bottom: 1px solid #c0dcf3;
+  }
+  .active-ds-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--tacton-blue); }
+  .active-ds strong { font-weight: 600; }
+
+  /* ── Section list ───────────────────── */
+  .section-list { padding: 10px 10px 60px; display: flex; flex-direction: column; gap: 8px; }
+
+  /* ── Section Card ───────────────────── */
+  .section {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius-lg); overflow: hidden;
+    box-shadow: var(--shadow-sm); transition: box-shadow .15s;
+  }
+  .section:hover { box-shadow: var(--shadow); }
+  .section.collapsed .section-body { display: none; }
+
+  .section-head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px; cursor: pointer; user-select: none;
+  }
+  .section-drag {
+    width: 14px; color: var(--text-tertiary); flex-shrink: 0;
+    cursor: grab; opacity: .5;
+  }
+  .section-drag:hover { opacity: 1; }
+  .section-icon {
+    width: 28px; height: 28px; border-radius: var(--radius);
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; font-size: 14px;
+  }
+  .section-icon.for { background: #E3F2FD; color: #1565C0; }
+  .section-icon.if  { background: #FFF3E0; color: #E65100; }
+  .section-icon.def { background: var(--purple-bg); color: var(--purple); }
+  .section-icon.row { background: var(--success-bg); color: var(--success); }
+  .section-icon.txt { background: #F3F4F6; color: var(--text-secondary); }
+  .section-icon.act { background: #FFF8E1; color: #F57F17; }
+
+  .section-meta { flex: 1; min-width: 0; }
+  .section-name { font-size: 12px; font-weight: 700; line-height: 1.3; }
+  .section-desc { font-size: 10px; color: var(--text-tertiary); line-height: 1.3; margin-top: 1px; }
+
+  .section-badges { display: flex; gap: 4px; flex-shrink: 0; }
+  .badge {
+    font-size: 9px; font-weight: 700; padding: 2px 6px;
+    border-radius: 3px; white-space: nowrap; line-height: 1.3;
+  }
+  .badge-count { background: var(--tacton-light); color: var(--tacton-blue); }
+  .badge-match { background: var(--success-bg); color: var(--success); }
+  .badge-included { background: var(--success-bg); color: var(--success); font-weight: 600; }
+  .badge-warn { background: var(--warning-bg); color: var(--warning); }
+
+  .section-toggle {
+    width: 20px; height: 20px; border: none; background: none;
+    cursor: pointer; color: var(--text-tertiary); flex-shrink: 0;
+    border-radius: var(--radius-sm); display: flex; align-items: center; justify-content: center;
+  }
+  .section-toggle:hover { background: var(--bg); }
+
+  /* ── Section Body ───────────────────── */
+  .section-body {
+    padding: 0 12px 10px 52px;
+    font-size: 11px;
+  }
+
+  /* ── Flow item (for/if/define/expr inside a section) */
+  .flow-item {
+    display: flex; align-items: flex-start; gap: 6px;
+    padding: 5px 0; border-top: 1px solid var(--border-light);
+  }
+  .flow-item:first-child { border-top: none; }
+
+  .flow-icon {
+    width: 18px; height: 18px; border-radius: 3px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 8px; font-weight: 800; flex-shrink: 0; margin-top: 1px;
+    text-transform: uppercase; letter-spacing: .3px;
+  }
+  .flow-icon.for { background: #E3F2FD; color: #1565C0; }
+  .flow-icon.if  { background: #FFF3E0; color: #E65100; }
+  .flow-icon.def { background: var(--purple-bg); color: var(--purple); }
+  .flow-icon.expr { background: #F0F0F0; color: var(--text-secondary); }
+  .flow-icon.else { background: #FFF3E0; color: #E65100; }
+  .flow-icon.act  { background: #FFF8E1; color: #F57F17; }
+  .flow-icon.row  { background: var(--success-bg); color: var(--success); }
+  .flow-icon.txt  { background: #F3F4F6; color: var(--text-tertiary); }
+
+  .flow-content { flex: 1; min-width: 0; }
+  .flow-label { font-weight: 600; color: var(--text); }
+  .flow-detail {
+    font-size: 10px; color: var(--text-tertiary);
+    font-family: var(--mono); margin-top: 1px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .flow-badge {
+    font-size: 8px; font-weight: 700; padding: 1px 5px;
+    border-radius: 3px; margin-left: 4px;
+  }
+
+  /* ── Nested container ───────────────── */
+  .nested {
+    margin-left: 0px; padding-left: 10px;
+    border-left: 2px solid var(--border-light);
+  }
+  .nested .nested { border-left-color: #E3F2FD; }
+  .nested .nested .nested { border-left-color: #FFF3E0; }
+
+  /* ── Expression preview (code block) ── */
+  .expr-preview {
+    font-family: var(--mono); font-size: 9px;
+    background: #F6F8FA; border: 1px solid var(--border-light);
+    border-radius: var(--radius-sm); padding: 4px 6px;
+    margin-top: 4px; color: var(--text-secondary);
+    overflow-x: auto; white-space: nowrap;
+  }
+
+  /* ── Text content block ─────────────── */
+  .text-block {
+    font-size: 10px; color: var(--text-secondary);
+    font-style: italic; padding: 2px 0;
+  }
+
+  /* ── Section footer with actions ────── */
+  .section-footer {
+    display: flex; gap: 4px; padding: 6px 0 2px;
+    border-top: 1px solid var(--border-light); margin-top: 4px;
+  }
+  .sf-btn {
+    font: inherit; font-size: 9px; font-weight: 600;
+    padding: 3px 8px; border-radius: var(--radius-sm);
+    border: 1px solid var(--border); background: var(--card);
+    cursor: pointer; color: var(--tacton-blue); transition: all .15s;
+  }
+  .sf-btn:hover { background: var(--tacton-light); }
+  .sf-btn.primary { background: var(--tacton-blue); color: #fff; border-color: var(--tacton-blue); }
+  .sf-btn.primary:hover { background: var(--tacton-dark); }
+
+  /* ── Expand / collapse all ──────────── */
+  .expand-bar {
+    text-align: center; padding: 6px;
+  }
+  .expand-bar button {
+    font: inherit; font-size: 10px; color: var(--tacton-blue);
+    background: none; border: none; cursor: pointer; font-weight: 600;
+  }
+
+  /* ── Connector lines between sections ─ */
+  .connector {
+    display: flex; justify-content: center; padding: 2px 0;
+    color: var(--text-tertiary); font-size: 10px;
+  }
+  .connector-line {
+    width: 1px; height: 12px; background: var(--border);
+  }
+
+  /* ── Table preview ──────────────────── */
+  .table-preview {
+    border: 1px solid var(--border-light); border-radius: var(--radius-sm);
+    overflow: hidden; margin-top: 4px; font-size: 10px;
+  }
+  .table-preview-head {
+    display: grid; gap: 0;
+    background: #F6F8FA; font-weight: 600; font-size: 9px;
+    border-bottom: 1px solid var(--border-light);
+  }
+  .table-preview-head > div, .table-preview-row > div {
+    padding: 3px 6px; border-right: 1px solid var(--border-light);
+  }
+  .table-preview-head > div:last-child, .table-preview-row > div:last-child { border-right: none; }
+  .table-preview-row {
+    display: grid; gap: 0; font-family: var(--mono); font-size: 9px;
+    color: var(--text-secondary);
+  }
+  .table-preview-row.strikethrough { text-decoration: line-through; color: var(--danger); }
+  .grid-4 { grid-template-columns: 1.2fr 1.5fr .8fr .5fr; }
+
+  /* ── Highlight bar on section ────────── */
+  .section.highlight-blue { border-left: 3px solid var(--tacton-blue); }
+  .section.highlight-green { border-left: 3px solid var(--success); }
+  .section.highlight-orange { border-left: 3px solid var(--orange); }
+  .section.highlight-purple { border-left: 3px solid var(--purple); }
+
+  /* ── Empty state / add button ────────── */
+  .add-section-btn {
+    width: 100%; padding: 10px;
+    border: 2px dashed var(--border); border-radius: var(--radius-lg);
+    background: none; color: var(--tacton-blue); font: inherit;
+    font-size: 12px; font-weight: 600; cursor: pointer;
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    transition: all .15s;
+  }
+  .add-section-btn:hover { background: var(--tacton-light); border-color: var(--tacton-blue); }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <svg class="header-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+  </svg>
+  <div class="header-title">Formula Sections</div>
+  <div class="header-actions">
+    <button class="tb-btn" title="Add section">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      Add section
+    </button>
+  </div>
+</div>
+
+<!-- Active data set -->
+<div class="active-ds">
+  <span class="active-ds-dot"></span>
+  <span>Active data set:</span>
+  <strong>High discount scenario (CP-004, CP-006)</strong>
+</div>
+
+<div class="section-list">
+
+<!-- ═══════════════════════════════════════ -->
+<!--  SECTION 1: Header Defines            -->
+<!-- ═══════════════════════════════════════ -->
+<div class="section highlight-purple">
+  <div class="section-head" onclick="this.parentElement.classList.toggle('collapsed')">
+    <div class="section-drag">⋮⋮</div>
+    <div class="section-icon def">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+    </div>
+    <div class="section-meta">
+      <div class="section-name">Header Defines</div>
+      <div class="section-desc">initialization variables</div>
+    </div>
+    <div class="section-badges">
+      <span class="badge badge-count">2 defines</span>
+      <span class="badge badge-included">Included</span>
+    </div>
+    <button class="section-toggle">&#9660;</button>
+  </div>
+  <div class="section-body">
+    <div class="flow-item">
+      <div class="flow-icon def">DEF</div>
+      <div class="flow-content">
+        <div class="flow-label">#primaryCp <span class="flow-badge" style="background:#FBEFFF;color:#8250DF;">placeholder</span></div>
+        <div class="flow-detail">#this.related('ConfiguredProduct','solution').{?false}</div>
+      </div>
+    </div>
+    <div class="flow-item">
+      <div class="flow-icon def">DEF</div>
+      <div class="flow-content">
+        <div class="flow-label">#primaryCpsList</div>
+        <div class="flow-detail">#this.related('ConfiguredProduct','solution').{?alternativeTo==null}</div>
+      </div>
+    </div>
+    <div class="section-footer">
+      <button class="sf-btn primary">Edit formulas</button>
+      <button class="sf-btn">Preview</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════ -->
+<!--  SECTION 2: BOM Comparison Loop       -->
+<!-- ═══════════════════════════════════════ -->
+<div class="section highlight-blue">
+  <div class="section-head" onclick="this.parentElement.classList.toggle('collapsed')">
+    <div class="section-drag">⋮⋮</div>
+    <div class="section-icon for">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+    </div>
+    <div class="section-meta">
+      <div class="section-name">BOM Comparison</div>
+      <div class="section-desc">for-loop over #primaryCpsList</div>
+    </div>
+    <div class="section-badges">
+      <span class="badge badge-count">2 records</span>
+      <span class="badge badge-included">Included</span>
+    </div>
+    <button class="section-toggle">&#9660;</button>
+  </div>
+  <div class="section-body">
+
+    <!-- For loop header -->
+    <div class="flow-item">
+      <div class="flow-icon for">FOR</div>
+      <div class="flow-content">
+        <div class="flow-label">each #currectPrimaryCP in #primaryCpsList</div>
+        <div class="flow-detail">$for{#currectPrimaryCP in #primaryCpsList}$</div>
+      </div>
+    </div>
+
+    <div class="nested">
+      <!-- Define: list of alternatives -->
+      <div class="flow-item">
+        <div class="flow-icon def">DEF</div>
+        <div class="flow-content">
+          <div class="flow-label">#listOfAlternativeToPrimary</div>
+          <div class="flow-detail">#this.related('ConfiguredProduct','solution').{?alternativeTo==#currectPrimaryCP}</div>
+        </div>
+      </div>
+
+      <!-- If: has alternatives -->
+      <div class="flow-item">
+        <div class="flow-icon if">IF</div>
+        <div class="flow-content">
+          <div class="flow-label">#listOfAlternativeToPrimary.size() > 0</div>
+          <span class="flow-badge" style="background:#DAFBE1;color:#1A7F37;">CP-004, CP-006 match</span>
+        </div>
+      </div>
+
+      <div class="nested">
+        <!-- Inner for loop -->
+        <div class="flow-item">
+          <div class="flow-icon for">FOR</div>
+          <div class="flow-content">
+            <div class="flow-label">each #currentAlternative in #listOfAlternativeToPrimary</div>
+          </div>
+        </div>
+
+        <div class="nested">
+          <!-- BOM defines -->
+          <div class="flow-item">
+            <div class="flow-icon def">DEF</div>
+            <div class="flow-content">
+              <div class="flow-label">#list2 = #currentAlternative.flatbom</div>
+            </div>
+          </div>
+          <div class="flow-item">
+            <div class="flow-icon def">DEF</div>
+            <div class="flow-content">
+              <div class="flow-label">#list1 = #currectPrimaryCP.flatbom</div>
+            </div>
+          </div>
+          <div class="flow-item">
+            <div class="flow-icon def">DEF</div>
+            <div class="flow-content">
+              <div class="flow-label">#added <span class="flow-badge" style="background:#DAFBE1;color:#1A7F37;">set diff</span></div>
+              <div class="flow-detail">#list2.{?(path+name) not in #list1.{path+name}}</div>
+            </div>
+          </div>
+          <div class="flow-item">
+            <div class="flow-icon def">DEF</div>
+            <div class="flow-content">
+              <div class="flow-label">#deleted <span class="flow-badge" style="background:#FFEBE9;color:#CF222E;">set diff</span></div>
+              <div class="flow-detail">#list1.{?(path+name) not in #list2.{path+name}}</div>
+            </div>
+          </div>
+
+          <!-- If same product -->
+          <div class="flow-item">
+            <div class="flow-icon if">IF</div>
+            <div class="flow-content">
+              <div class="flow-label">#currectPrimaryCP.productId == #currentAlternative.productId</div>
+              <div style="font-size:9px;color:var(--text-tertiary);margin-top:2px;">same product &rarr; show BOM delta</div>
+            </div>
+          </div>
+
+          <div class="nested">
+            <!-- Text content -->
+            <div class="flow-item">
+              <div class="flow-icon txt">T</div>
+              <div class="flow-content">
+                <div class="text-block">Primary ${#currectPrimaryCP.name}$ (${summary}$)</div>
+              </div>
+            </div>
+
+            <!-- If added > 0 -->
+            <div class="flow-item">
+              <div class="flow-icon if">IF</div>
+              <div class="flow-content">
+                <div class="flow-label">#added.{qty}.sum() > 0</div>
+              </div>
+            </div>
+
+            <div class="nested">
+              <!-- Price difference -->
+              <div class="flow-item">
+                <div class="flow-icon def">DEF</div>
+                <div class="flow-content">
+                  <div class="flow-label">#priceDiffrence</div>
+                  <div class="flow-detail">#currentAlternative.unitListPrice*1 - #currectPrimaryCP.unitListPrice*1</div>
+                </div>
+              </div>
+
+              <!-- Table: Added BOM items -->
+              <div class="flow-item">
+                <div class="flow-icon row" style="font-size:7px;">TBL</div>
+                <div class="flow-content">
+                  <div class="flow-label">$rowgroup{#added}</div>
+                  <div class="table-preview">
+                    <div class="table-preview-head grid-4">
+                      <div>Part No.</div><div>Description</div><div>Net Price</div><div>Qty</div>
+                    </div>
+                    <div class="table-preview-row grid-4">
+                      <div>${name}$</div><div>${description}$</div><div>${listPrice.price()}$</div><div>${qty}$</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Table: Deleted BOM items -->
+              <div class="flow-item">
+                <div class="flow-icon row" style="font-size:7px;">TBL</div>
+                <div class="flow-content">
+                  <div class="flow-label">$rowgroup{#deleted} <span class="flow-badge" style="background:#FFEBE9;color:#CF222E;">strikethrough</span></div>
+                  <div class="table-preview">
+                    <div class="table-preview-head grid-4">
+                      <div>Part No.</div><div>Description</div><div>Net Price</div><div>Qty</div>
+                    </div>
+                    <div class="table-preview-row strikethrough grid-4">
+                      <div>${name}$</div><div>${description}$</div><div>${listPrice.price()}$</div><div>${qty}$</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Else: no changes -->
+            <div class="flow-item">
+              <div class="flow-icon else">ELS</div>
+              <div class="flow-content">
+                <div class="text-block">No changes exist between Alternative and Primary</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Else: different product → accumulate -->
+          <div class="flow-item">
+            <div class="flow-icon else">ELS</div>
+            <div class="flow-content">
+              <div class="flow-label">different product &rarr; accumulate</div>
+            </div>
+          </div>
+
+          <div class="nested">
+            <div class="flow-item">
+              <div class="flow-icon act">!</div>
+              <div class="flow-content">
+                <div class="flow-label">#primaryCp.add(#currectPrimaryCP) <span class="flow-badge" style="background:#FFF8E1;color:#F57F17;">side-effect</span></div>
+              </div>
+            </div>
+            <div class="flow-item">
+              <div class="flow-icon act">!</div>
+              <div class="flow-content">
+                <div class="flow-label">#alternativeDifferentProductCp.add(#currentAlternative) <span class="flow-badge" style="background:#FFF8E1;color:#F57F17;">side-effect</span></div>
+              </div>
+            </div>
+          </div>
+
+        </div><!-- end inner nested (currentAlternative loop) -->
+      </div><!-- end nested (if has alternatives) -->
+    </div><!-- end nested (primaryCP loop) -->
+
+    <div class="section-footer">
+      <button class="sf-btn primary">Edit formulas</button>
+      <button class="sf-btn">Preview</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════ -->
+<!--  SECTION 3: Different Product Summary -->
+<!-- ═══════════════════════════════════════ -->
+<div class="section highlight-green">
+  <div class="section-head" onclick="this.parentElement.classList.toggle('collapsed')">
+    <div class="section-drag">⋮⋮</div>
+    <div class="section-icon for">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+    </div>
+    <div class="section-meta">
+      <div class="section-name">Different Product Alternatives</div>
+      <div class="section-desc">for-loop over #primaryCp.unique()</div>
+    </div>
+    <div class="section-badges">
+      <span class="badge badge-count">1 record</span>
+      <span class="badge badge-included">Included</span>
+    </div>
+    <button class="section-toggle">&#9660;</button>
+  </div>
+  <div class="section-body">
+
+    <div class="flow-item">
+      <div class="flow-icon for">FOR</div>
+      <div class="flow-content">
+        <div class="flow-label">each #currentCp in #primaryCp.unique()</div>
+        <div class="flow-detail">accumulated from BOM Comparison pass</div>
+      </div>
+    </div>
+
+    <div class="nested">
+      <!-- Text output -->
+      <div class="flow-item">
+        <div class="flow-icon txt">T</div>
+        <div class="flow-content">
+          <div class="text-block">Primary ${#currentCp.name}$ (${summary}$): ${unitListPrice.price()}$</div>
+        </div>
+      </div>
+
+      <!-- Define listTest -->
+      <div class="flow-item">
+        <div class="flow-icon def">DEF</div>
+        <div class="flow-content">
+          <div class="flow-label">#listTest</div>
+          <div class="flow-detail">#alternativeDifferentProductCp.{?alternativeTo==#currentCp}</div>
+        </div>
+      </div>
+
+      <!-- Inner for: alternatives -->
+      <div class="flow-item">
+        <div class="flow-icon for">FOR</div>
+        <div class="flow-content">
+          <div class="flow-label">each #currentAlternate in #alternativeDifferentProductCp.{?...}</div>
+        </div>
+      </div>
+
+      <div class="nested">
+        <div class="flow-item">
+          <div class="flow-icon expr">$</div>
+          <div class="flow-content">
+            <div class="flow-label">${#currentAlternate.productId}$ (${summary}$)</div>
+          </div>
+        </div>
+        <div class="flow-item">
+          <div class="flow-icon def">DEF</div>
+          <div class="flow-content">
+            <div class="flow-label">#priceDifference</div>
+            <div class="flow-detail">#currentAlternate.unitListPrice*1 - #currentCp.unitListPrice*1</div>
+          </div>
+        </div>
+        <div class="flow-item">
+          <div class="flow-icon expr">$</div>
+          <div class="flow-content">
+            <div class="flow-label">${#priceDifference.price()}$</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-footer">
+      <button class="sf-btn primary">Edit formulas</button>
+      <button class="sf-btn">Preview</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════ -->
+<!--  SECTION 4: Simple CP Loop (testing)  -->
+<!-- ═══════════════════════════════════════ -->
+<div class="section highlight-blue">
+  <div class="section-head" onclick="this.parentElement.classList.toggle('collapsed')">
+    <div class="section-drag">⋮⋮</div>
+    <div class="section-icon for">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+    </div>
+    <div class="section-meta">
+      <div class="section-name">CP Solution Names</div>
+      <div class="section-desc">for-loop over ConfiguredProducts</div>
+    </div>
+    <div class="section-badges">
+      <span class="badge badge-count">6 records</span>
+      <span class="badge badge-included">Included</span>
+    </div>
+    <button class="section-toggle">&#9660;</button>
+  </div>
+  <div class="section-body">
+    <div class="flow-item">
+      <div class="flow-icon for">FOR</div>
+      <div class="flow-content">
+        <div class="flow-label">each #CPcarsten in solution.related('ConfiguredProduct','solution')</div>
+      </div>
+    </div>
+    <div class="nested">
+      <div class="flow-item">
+        <div class="flow-icon expr">$</div>
+        <div class="flow-content">
+          <div class="flow-label">${#CPcarsten.solution.name}$</div>
+        </div>
+      </div>
+    </div>
+    <div class="section-footer">
+      <button class="sf-btn primary">Edit formulas</button>
+      <button class="sf-btn">Preview</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add Section button -->
+<button class="add-section-btn">
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+  Add section
+</button>
+
+</div><!-- end section-list -->
+
+<script>
+  // Simple collapse/expand toggle already handled by onclick on section-head
+  // This is a static mockup — no data binding
+</script>
+</body>
+</html>

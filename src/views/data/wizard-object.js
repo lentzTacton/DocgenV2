@@ -97,8 +97,9 @@ export async function loadObjectExplorer() {
   container.appendChild(el('div', { class: 'obj-empty', style: { color: 'var(--text-tertiary)' } }, 'Loading...'));
 
   try {
-    // Resolve current object from path
-    const currentObjName = await resolveCurrentObject(wizState.objectPath);
+    // Resolve current object from path (scoped to parent object type if child block)
+    const rootOverride = wizState.parentObjectType || null;
+    const currentObjName = await resolveCurrentObject(wizState.objectPath, rootOverride);
     wizState.currentObjDesc = await describeObject(currentObjName);
 
     clear(container);
@@ -130,13 +131,16 @@ function renderObjectExplorer(container, currentObjName) {
   clear(container);
 
   // ── Breadcrumb navigation (inside object explorer, above tabs) ──
-  const startObj = getStartingObject();
+  const startObj = wizState.parentObjectType || getStartingObject();
+  const rootLabel = wizState.parentLoopVar
+    ? `${wizState.parentLoopVar} (${startObj})`
+    : startObj;
   if (wizState.objectPath.length > 0) {
     const bc = el('div', { class: 'obj-path-bar' });
     bc.appendChild(el('span', {
       class: 'obj-path-link',
       onclick: () => confirmPathChangeIfNeeded(() => { wizState.objectPath = []; wizState.source = ''; wizState._singleFilter = null; wizState._singleLeafField = null; loadObjectExplorer(); refreshPipeline(); }),
-    }, startObj));
+    }, rootLabel));
     wizState.objectPath.forEach((seg, idx) => {
       bc.appendChild(el('span', { class: 'obj-path-sep' }, seg.reverse ? ' ← ' : ' › '));
       const isLast = idx === wizState.objectPath.length - 1;
@@ -175,6 +179,41 @@ function renderObjectExplorer(container, currentObjName) {
   });
   container.appendChild(tabBar);
 
+  // ── Search input ──
+  const searchWrap = el('div', { style: { padding: '4px 0', position: 'relative' } });
+  const searchInput = el('input', {
+    id: 'obj-search',
+    type: 'text',
+    value: wizState.explorerSearch || '',
+    placeholder: 'Filter attributes & refs…',
+    style: {
+      width: '100%', boxSizing: 'border-box', padding: '5px 24px 5px 8px',
+      fontSize: '12px', border: '1px solid var(--border-light)',
+      borderRadius: 'var(--radius)', outline: 'none',
+      background: 'var(--bg-input, #fff)',
+    },
+    oninput: (e) => {
+      wizState.explorerSearch = e.target.value;
+      renderObjectExplorer(container, currentObjName);
+      // Re-focus search input after re-render and restore cursor
+      const inp = container.querySelector('#obj-search');
+      if (inp) { inp.focus(); inp.selectionStart = inp.selectionEnd = e.target.selectionStart; }
+    },
+  });
+  searchWrap.appendChild(searchInput);
+  if (wizState.explorerSearch) {
+    searchWrap.appendChild(el('button', {
+      type: 'button',
+      style: {
+        position: 'absolute', right: '4px', top: '50%', transform: 'translateY(-50%)',
+        background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)',
+        fontSize: '13px', padding: '0 4px', lineHeight: '1',
+      },
+      onclick: () => { wizState.explorerSearch = ''; renderObjectExplorer(container, currentObjName); },
+    }, '✕'));
+  }
+  container.appendChild(searchWrap);
+
   // ── Tab content ──
   const content = el('div', { class: 'obj-content' });
   if (wizState.explorerTab === 'fav') renderFavTab(content, currentObjName);
@@ -205,7 +244,7 @@ function countFavs(objName) {
 }
 
 function renderFavTab(container, objName) {
-  const favItems = allFavCandidates().filter(a => wizState.explorerFavs.has(favKey(objName, a)));
+  const favItems = allFavCandidates().filter(a => wizState.explorerFavs.has(favKey(objName, a)) && matchesSearch(a.name));
 
   if (favItems.length === 0) {
     container.appendChild(el('div', { class: 'obj-empty' }, [
@@ -228,30 +267,40 @@ function renderFavTab(container, objName) {
 
 // ── All tab (unified view: refs first, then fields — like original prototype) ──
 
+/** Filter helper — matches name against search term (case-insensitive). */
+function matchesSearch(name) {
+  if (!wizState.explorerSearch) return true;
+  return name.toLowerCase().includes(wizState.explorerSearch.toLowerCase());
+}
+
 function renderAllTab(container, objName) {
   const { attributes, forwardRefs, reverseRefs } = wizState.currentObjDesc;
 
-  if (attributes.length === 0 && forwardRefs.length === 0 && reverseRefs.length === 0) {
-    container.appendChild(el('div', { class: 'obj-empty' }, 'No attributes found on this object.'));
+  const fRefs = forwardRefs.filter(a => matchesSearch(a.name));
+  const rRefs = reverseRefs.filter(r => matchesSearch(r.fromObject) || matchesSearch(r.attribute));
+  const attrs = attributes.filter(a => matchesSearch(a.name));
+
+  if (attrs.length === 0 && fRefs.length === 0 && rRefs.length === 0) {
+    container.appendChild(el('div', { class: 'obj-empty' }, wizState.explorerSearch ? 'No matches.' : 'No attributes found on this object.'));
     return;
   }
 
   // Forward references first (navigable — clicking navigates deeper)
-  if (forwardRefs.length > 0) {
-    container.appendChild(groupHeader(`References → (${forwardRefs.length})`));
-    forwardRefs.forEach(a => renderForwardRefRow(container, objName, a));
+  if (fRefs.length > 0) {
+    container.appendChild(groupHeader(`References → (${fRefs.length})`));
+    fRefs.forEach(a => renderForwardRefRow(container, objName, a));
   }
 
   // Reverse references (incoming — .related() pattern)
-  if (reverseRefs.length > 0) {
-    container.appendChild(groupHeader(`Incoming ← (${reverseRefs.length})`));
-    reverseRefs.forEach(r => renderRefRow(container, objName, r));
+  if (rRefs.length > 0) {
+    container.appendChild(groupHeader(`Incoming ← (${rRefs.length})`));
+    rRefs.forEach(r => renderRefRow(container, objName, r));
   }
 
   // Value attributes (leaf fields — clicking selects as expression endpoint)
-  if (attributes.length > 0) {
-    const mandatory = attributes.filter(a => a.mandatory);
-    const optional = attributes.filter(a => !a.mandatory);
+  if (attrs.length > 0) {
+    const mandatory = attrs.filter(a => a.mandatory);
+    const optional = attrs.filter(a => !a.mandatory);
 
     if (mandatory.length > 0) {
       container.appendChild(groupHeader(`Fields — mandatory (${mandatory.length})`));
@@ -286,19 +335,21 @@ function renderAttrRow(container, objName, attr, showStar = false) {
 
 function renderRefTab(container, objName) {
   const { forwardRefs, reverseRefs } = wizState.currentObjDesc;
+  const fRefs = forwardRefs.filter(a => matchesSearch(a.name));
+  const rRefs = reverseRefs.filter(r => matchesSearch(r.fromObject) || matchesSearch(r.attribute));
 
-  if (forwardRefs.length === 0 && reverseRefs.length === 0) {
-    container.appendChild(el('div', { class: 'obj-empty' }, 'No references on this object.'));
+  if (fRefs.length === 0 && rRefs.length === 0) {
+    container.appendChild(el('div', { class: 'obj-empty' }, wizState.explorerSearch ? 'No matches.' : 'No references on this object.'));
     return;
   }
 
-  if (forwardRefs.length > 0) {
-    container.appendChild(groupHeader(`Outgoing → (${forwardRefs.length})`));
-    forwardRefs.forEach(a => renderForwardRefRow(container, objName, a));
+  if (fRefs.length > 0) {
+    container.appendChild(groupHeader(`Outgoing → (${fRefs.length})`));
+    fRefs.forEach(a => renderForwardRefRow(container, objName, a));
   }
-  if (reverseRefs.length > 0) {
-    container.appendChild(groupHeader(`Incoming ← (${reverseRefs.length})`));
-    reverseRefs.forEach(r => renderRefRow(container, objName, r));
+  if (rRefs.length > 0) {
+    container.appendChild(groupHeader(`Incoming ← (${rRefs.length})`));
+    rRefs.forEach(r => renderRefRow(container, objName, r));
   }
 }
 

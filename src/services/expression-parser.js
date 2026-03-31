@@ -66,7 +66,7 @@ export function parseExpression(text) {
         raw,
         name,
         source,
-        purpose: inferPurpose(source),
+        purpose: 'variable',
         dataType: inferDataType(source),
       };
     }
@@ -165,8 +165,8 @@ export function parseExpression(text) {
     }
   }
 
-  // 3. $for{var in source}$
-  const forMatch = raw.match(/^\$for\{(\w+)\s+in\s+([^}]+)\}\$$/);
+  // 3. $for{var in source}$ — loop var may have # prefix (e.g. #currectPrimaryCP)
+  const forMatch = raw.match(/^\$for\{([#]?\w+)\s+in\s+([^}]+)\}\$$/);
   if (forMatch) {
     const loopVar = forMatch[1].trim();
     const loopSource = forMatch[2].trim();
@@ -249,6 +249,8 @@ function extractNameFromGetConfig(expr) {
 
 function inferPurpose(source) {
   if (!source) return 'variable';
+  // Placeholder (.{?false}) is always a variable, not a block
+  if (source.includes('.{?false}')) return 'variable';
   // BOM-like sources that return collections are typically blocks
   if (source.includes('.flatbom') || source.includes('.bom')) return 'block';
   if (source.includes('$for{') || source.includes('.{?')) return 'block';
@@ -275,9 +277,19 @@ function inferDataType(source) {
 
   // Filter — single if [n] or if followed by a leaf field (e.g. .{?cond}.fieldName)
   if (source.includes('.{?')) {
+    // Strip all filters to get the base path for type inference
+    const basePath = source.replace(/\.\{\?[^}]*\}/g, '');
+    // .{?false} is a placeholder (empty collection) — infer type from the base path
+    if (source.includes('.{?false}')) {
+      return inferDataType(basePath) || 'object';
+    }
     if (narrowsToOne) return 'single';
     // .{?...}.leafField → intends single scalar extraction
     if (/\.\{\?[^}]+\}\.\w+$/.test(source)) return 'single';
+    // If the base path is a related() call → object, not bom
+    if (basePath.match(/\.?related\s*\(/)) return 'object';
+    // If the base path starts with # → filtered subset of another variable, not raw bom
+    if (basePath.startsWith('#')) return 'object';
     return 'bom';
   }
 
@@ -356,12 +368,29 @@ export function parseSourceFilters(source) {
   let indexAccess = null;
 
   for (const seg of rawSegments) {
-    // Filter segment: {?field=="value"}
+    // Filter segment: {?field=="value"} or special {?false} / {?true}
     if (seg.startsWith('{?') && seg.endsWith('}')) {
-      const inner = seg.slice(2, -1);
+      const inner = seg.slice(2, -1).trim();
+      // Special boolean filters: {?false} returns empty collection, {?true} returns all
+      if (inner === 'false' || inner === 'true') {
+        filters.push({ field: '_literal', op: '==', value: inner });
+        continue;
+      }
       if (inner.includes(' || ')) filterLogic = 'or';
       const condParts = inner.split(/\s*(?:&&|\|\|)\s*/);
       for (const cp of condParts) {
+        // Handle "not null" shorthand: field != null, field == null
+        const nullMatch = cp.match(/^(\w+)\s*(==|!=)\s*null\s*$/);
+        if (nullMatch) {
+          filters.push({ field: nullMatch[1], op: nullMatch[2] === '==' ? 'is null' : 'not null', value: null });
+          continue;
+        }
+        // Handle variable references: field == #varName
+        const varRefMatch = cp.match(/^(\w+)\s*(==|!=|>=|<=|>|<)\s*(#\w+)\s*$/);
+        if (varRefMatch) {
+          filters.push({ field: varRefMatch[1], op: varRefMatch[2], value: varRefMatch[3], isVariableRef: true });
+          continue;
+        }
         const cm = cp.match(/^(\w+)\s*(==|!=|>=|<=|>|<|contains|matches)\s*"?([^"]*)"?\s*$/);
         if (cm) filters.push({ field: cm[1], op: cm[2], value: cm[3] });
       }
@@ -425,8 +454,8 @@ export function describeExpression(parsed) {
 }
 
 /**
- * Check if a parsed expression could become a data set.
- * (Only defines, dot-paths, and for-loops are meaningful as data sets.)
+ * Check if a parsed expression could become a dataset.
+ * (Only defines, dot-paths, and for-loops are meaningful as datasets.)
  */
 export function canCreateDataSet(parsed) {
   return parsed && ['define', 'inline-assign', 'inline', 'dotpath', 'for'].includes(parsed.type);
@@ -577,7 +606,7 @@ export function parseMultipleDefines(text) {
 
 /**
  * Extract a suggested name and source from a parsed expression
- * for use when creating a new data set.
+ * for use when creating a new dataset.
  */
 export function suggestDataSetFields(parsed) {
   if (!parsed) return { name: '', source: '', purpose: 'variable', type: 'bom' };

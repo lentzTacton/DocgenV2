@@ -5,7 +5,7 @@
  * Features:
  *   - Parses and shows expression structure
  *   - Live-resolves against Tacton API (sample data preview)
- *   - "Create data set" action with catalogue picker + favourite
+ *   - "Create dataset" action with catalogue picker + favourite
  *   - Duplicate detection (warns if expression already exists)
  */
 
@@ -62,7 +62,7 @@ function setFavouriteCatalogue(id) {
 // ─── Unique name generation ─────────────────────────────────────────
 
 /**
- * Generate a unique name for an imported data set.
+ * Generate a unique name for an imported dataset.
  * Appends `_imported_xyz` (short random suffix) when the base name
  * already exists, so imports never collide with hand-crafted sets.
  */
@@ -189,7 +189,7 @@ function renderPanel() {
         el('div', { class: 'sel-panel-connect-title' }, 'Connect to Tacton first'),
         el('div', { class: 'sel-panel-connect-desc' },
           !state.get('connection.status') || state.get('connection.status') === 'disconnected'
-            ? 'Set up a Tacton instance connection in the Setup tab to resolve expressions and create data sets.'
+            ? 'Set up a Tacton instance connection in the Setup tab to resolve expressions and create datasets.'
             : !hasTicket
               ? 'Select a ticket in the Setup tab to start working with data.'
               : 'Complete the setup to use data features.'
@@ -200,16 +200,27 @@ function renderPanel() {
     return;
   }
 
+  // ── Placeholder detection — skip instance picker & data preview ──
+  const isPlaceholder = (parsed.source || '').includes('.{?false}');
+
   // ── Instance picker (simulation context) ──
   const instanceBar = el('div', { class: 'sel-instance-bar', id: 'sel-instance-bar' });
-  renderInstancePicker(instanceBar);
+  if (!isPlaceholder) {
+    renderInstancePicker(instanceBar);
+  }
 
   // Resolve area (pass dupeInfo so it can use existing variable's column settings)
   // Find ALL matching duplicates (not just the first)
   const dupeMatches = canCreateDataSet(parsed) ? checkDuplicates(parsed) : [];
   const dupeInfo = dupeMatches.length > 0 ? dupeMatches[0] : null;
   const resolveArea = el('div', { class: 'sel-panel-resolve', id: 'sel-resolve-area' });
-  renderResolveArea(resolveArea, dupeInfo);
+  if (isPlaceholder) {
+    resolveArea.appendChild(el('div', {
+      style: { padding: '8px 12px', fontSize: '11px', color: 'var(--text-tertiary)', fontStyle: 'italic' },
+    }, 'Placeholder — starts as an empty collection (.{?false})'));
+  } else {
+    renderResolveArea(resolveArea, dupeInfo);
+  }
 
   // Actions
   const actions = el('div', { class: 'sel-panel-actions' });
@@ -218,7 +229,7 @@ function renderPanel() {
       // Found banner — header with inline "Create new" button
       const warnText = dupeMatches.length === 1
         ? `Already exists as "${dupeMatches[0].name}"`
-        : `Found ${dupeMatches.length} existing data sets — click to edit`;
+        : `Found ${dupeMatches.length} existing datasets — click to edit`;
       const foundBar = el('div', { class: 'sel-panel-found-bar' }, [
         el('div', { class: 'sel-panel-found-text' }, [
           el('span', { class: 'icon', html: icon('database', 13) }),
@@ -269,7 +280,7 @@ function renderPanel() {
           onclick: () => showCreateDataSetForm(parsed, dupeInfo),
         }, [
           el('span', { html: icon('plus', 14) }),
-          'Create data set',
+          'Create dataset',
         ])
       );
     }
@@ -312,15 +323,36 @@ function buildBreakdownRows(parsed) {
   }
 
   // Source — clean, without filter/index syntax
+  // Check if source references a #variable that doesn't exist
+  const allVarsForCheck = state.get('variables') || [];
+  const existingVarNames = new Set(allVarsForCheck.map(v => v.name));
+
   if (parsed.source) {
     const configPath = parsed.source.match(/getConfigurationAttribute\s*\(\s*"([^"]+)"\s*\)/);
-    addRow('Source', configPath ? configPath[1] : cleanSource);
+    const sourceDisplay = configPath ? configPath[1] : cleanSource;
+    // Flag red if source starts with #var that doesn't exist
+    const sourceRefMatch = cleanSource.match(/^(#\w+)/);
+    const sourceRefMissing = sourceRefMatch && !existingVarNames.has(sourceRefMatch[1]);
+    if (sourceRefMissing) {
+      addRow('Source', el('span', {}, [
+        el('span', {}, sourceDisplay),
+        el('span', { style: { fontSize: '9px', fontWeight: '600', color: '#D32F2F', marginLeft: '6px' } }, 'not in data'),
+      ]), { color: '#D32F2F', fontFamily: 'var(--mono)' });
+    } else {
+      addRow('Source', sourceDisplay);
+    }
   }
 
   // Filter conditions
   if (filters.length > 0) {
     const logic = filterLogic === 'or' ? ' || ' : ' && ';
-    const filterText = filters.map(f => `${f.field} ${f.op} "${f.value}"`).join(logic);
+    const filterText = filters.map(f => {
+      if (f.field === '_literal') return f.value === 'false' ? '{?false} (empty collection)' : '{?true} (all records)';
+      if (f.op === 'is null') return `${f.field} == null`;
+      if (f.op === 'not null') return `${f.field} != null`;
+      if (f.isVariableRef) return `${f.field} ${f.op} ${f.value}`;
+      return `${f.field} ${f.op} "${f.value}"`;
+    }).join(logic);
     addRow('Filter', filterText);
   }
 
@@ -328,6 +360,22 @@ function buildBreakdownRows(parsed) {
   if (indexAccess != null) {
     const indexLabel = indexAccess === 0 ? '[0] (first record)' : `[${indexAccess}] (record ${indexAccess})`;
     addRow('Index', indexLabel);
+  }
+
+  // Parent context — detect when source starts with #varName. (dot-walk into a parent)
+  // Only show if the parent ref differs from the clean source (otherwise it's redundant)
+  const parentLoopMatch = (parsed.source || '').match(/^(#\w+)\./);
+  if (parentLoopMatch && parentLoopMatch[1] !== cleanSource) {
+    const parentRef = parentLoopMatch[1];
+    const parentMissing = !existingVarNames.has(parentRef);
+    if (parentMissing) {
+      addRow('Parent context', el('span', {}, [
+        el('span', {}, parentRef),
+        el('span', { style: { fontSize: '9px', fontWeight: '600', color: '#D32F2F', marginLeft: '6px' } }, 'not in data'),
+      ]), { fontFamily: 'var(--mono)', color: '#D32F2F' });
+    } else {
+      addRow('Parent context', parentRef, { fontFamily: 'var(--mono)', color: 'var(--purple, #8250DF)' });
+    }
   }
 
   if (parsed.accessor) addRow('Accessor', parsed.accessor);
@@ -424,6 +472,19 @@ function renderResolveArea(container, dupeInfo) {
           );
         }
       }
+
+      // Show computed value for code expressions (arithmetic results)
+      if (resolveData.computedValue != null) {
+        container.appendChild(
+          el('div', { class: 'sel-resolve-computed', style: {
+            marginTop: '6px', padding: '6px 8px', background: 'var(--bg-success, #e8f5e9)',
+            borderRadius: '4px', fontSize: '12px', fontWeight: '600',
+          } }, [
+            el('span', { style: { color: 'var(--text-tertiary)', fontWeight: '400', marginRight: '6px' } }, 'Result:'),
+            resolveData.computedValue,
+          ])
+        );
+      }
     } else if (resolveData.value !== undefined) {
       // Single value result — filter info now shown in breakdown rows above
       container.appendChild(
@@ -506,14 +567,117 @@ async function resolveExpression(parsed) {
     }
   }
 
+  // ── Code expressions: arithmetic with #var references ──
+  // e.g. (#totalWeight-0)-((#pumpWeight-0)+(#baseTypeWeight-0)+(#couplingWeight-0))
+  const varRefs = [...new Set(source.match(/#\w+/g) || [])];
+  if (varRefs.length > 0 && /[+\-*/]/.test(source)) {
+    const allVars = state.get('variables') || [];
+    const depResults = [];
+    let allResolved = true;
+    for (const ref of varRefs) {
+      const refVar = allVars.find(v => v.name === ref);
+      if (!refVar) {
+        depResults.push({ name: ref, status: 'missing', value: '—' });
+        allResolved = false;
+      } else {
+        // Try to resolve each dependency
+        const refSource = refVar.source || '';
+        if (refSource.includes('getConfigurationAttribute(')) {
+          const pm = refSource.match(/getConfigurationAttribute\s*\(\s*"([^"]+)"\s*\)/);
+          if (pm) {
+            try {
+              const r = await resolveConfigAttrAcrossCPs(pm[1]);
+              const val = r.find(x => x.value && x.value !== '(error)');
+              depResults.push({ name: ref, status: val ? 'resolved' : 'no value', value: val?.value || '—' });
+              if (!val) allResolved = false;
+            } catch {
+              depResults.push({ name: ref, status: 'error', value: '—' });
+              allResolved = false;
+            }
+          } else {
+            depResults.push({ name: ref, status: 'unknown', value: '—' });
+            allResolved = false;
+          }
+        } else {
+          // Non-config dependency — just show it exists
+          depResults.push({ name: ref, status: 'exists', value: refVar.expression || refSource || '—' });
+        }
+      }
+    }
+    // Try to compute the final value if all dependencies are resolved
+    let computedValue = null;
+    if (allResolved) {
+      try {
+        let expr = source;
+        for (const dep of depResults) {
+          const numVal = parseFloat(dep.value);
+          if (!isNaN(numVal)) {
+            // Replace all occurrences of #varName with the numeric value
+            expr = expr.split(dep.name).join(String(numVal));
+          }
+        }
+        // Safety: only evaluate if the expression contains only numbers, operators, parens, spaces
+        if (/^[\d.+\-*/() \t]+$/.test(expr)) {
+          computedValue = Function('"use strict"; return (' + expr + ')')();
+          if (typeof computedValue === 'number') {
+            computedValue = Math.round(computedValue * 100) / 100; // round to 2 decimals
+          }
+        }
+      } catch (e) {
+        console.warn('[resolveExpression] Arithmetic eval failed:', e.message);
+      }
+    }
+
+    return {
+      records: depResults,
+      totalCount: depResults.length,
+      objectName: 'Dependencies',
+      fields: ['name', 'status', 'value'],
+      computedValue: computedValue != null ? String(computedValue) : null,
+    };
+  }
+
+  // ── Linked defines: ternary null-safe or simple accessor on another define ──
+  // e.g. (#headUomV!=null && #headUomV.value!=null) ? #headUomV.valueDescription : "N/A"
+  // e.g. #headUomV.value, #headUomV.valueDescription
+  if (varRefs.length > 0 && varRefs.length <= 2) {
+    const allVars = state.get('variables') || [];
+    // Check if all referenced #vars are existing defines (not object-model paths)
+    const allAreDefines = varRefs.every(ref => allVars.some(v => v.name === ref));
+    if (allAreDefines) {
+      // Resolve the first dependency to show its value
+      const refVar = allVars.find(v => v.name === varRefs[0]);
+      if (refVar && refVar.source && refVar.source.includes('getConfigurationAttribute(')) {
+        const result = await resolveExpression({ ...parsed, source: refVar.source });
+        if (result && !result.error) {
+          result.objectName = `${varRefs[0]} → ConfiguredProduct`;
+        }
+        return result;
+      }
+      // Non-config source — show dependency info
+      return {
+        records: varRefs.map(ref => {
+          const v = allVars.find(x => x.name === ref);
+          return { name: ref, type: v?.type || '—', source: v?.source?.substring(0, 60) || '—' };
+        }),
+        totalCount: varRefs.length,
+        objectName: 'Dependencies',
+        fields: ['name', 'type', 'source'],
+      };
+    }
+  }
+
   // For dot-paths like solution.opportunity.account.name
   // try to walk the model and fetch the relevant object.
   // Also handles filter syntax: .{?field=="value"}, [n]
   const model = await fetchModel();
   if (!model) return { error: 'Model not loaded' };
 
+  // ── Resolve #this. alias to the starting object type ──
+  const resolvedSource = source.replace(/^#this\./, `${startObj.toLowerCase()}.`);
+
   // ── Parse source into clean segments, extracting filters & indices ──
-  const { cleanSource, filters, filterLogic, indexAccess } = parseSourceFilters(source);
+  const { cleanSource, filters, filterLogic, indexAccess } = parseSourceFilters(resolvedSource);
   const cleanSegments = cleanSource.replace(/^#(this|cp)\./, '').split('.');
   const rootName = cleanSegments[0];
 
@@ -670,24 +834,36 @@ function _applyFiltersAndIndex(records, filters, filterLogic, indexAccess) {
 
   // Apply field filters (.{?field=="value"})
   if (filters.length > 0) {
-    records = records.filter(r => {
-      const results = filters.map(f => {
-        const val = String(r[f.field] ?? '');
-        const target = f.value;
-        switch (f.op) {
-          case '==': return val === target;
-          case '!=': return val !== target;
-          case '>':  return parseFloat(val) > parseFloat(target);
-          case '<':  return parseFloat(val) < parseFloat(target);
-          case '>=': return parseFloat(val) >= parseFloat(target);
-          case '<=': return parseFloat(val) <= parseFloat(target);
-          case 'contains': return val.toLowerCase().includes(target.toLowerCase());
-          case 'matches':  try { return new RegExp(target).test(val); } catch { return false; }
-          default: return val === target;
-        }
+    // Handle literal boolean filters: {?false} → empty, {?true} → keep all
+    const literalFilter = filters.find(f => f.field === '_literal');
+    if (literalFilter) {
+      if (literalFilter.value === 'false') return [];
+      // {?true} — keep all, skip to index access
+    } else {
+      records = records.filter(r => {
+        const results = filters.map(f => {
+          // Null checks: field is null / field is not null
+          if (f.op === 'is null') return r[f.field] == null || r[f.field] === '';
+          if (f.op === 'not null') return r[f.field] != null && r[f.field] !== '';
+          // Variable references: can't resolve at preview time, treat as pass-through
+          if (f.isVariableRef) return true;
+          const val = String(r[f.field] ?? '');
+          const target = f.value;
+          switch (f.op) {
+            case '==': return val === target;
+            case '!=': return val !== target;
+            case '>':  return parseFloat(val) > parseFloat(target);
+            case '<':  return parseFloat(val) < parseFloat(target);
+            case '>=': return parseFloat(val) >= parseFloat(target);
+            case '<=': return parseFloat(val) <= parseFloat(target);
+            case 'contains': return val.toLowerCase().includes(target.toLowerCase());
+            case 'matches':  try { return new RegExp(target).test(val); } catch { return false; }
+            default: return val === target;
+          }
+        });
+        return filterLogic === 'or' ? results.some(Boolean) : results.every(Boolean);
       });
-      return filterLogic === 'or' ? results.some(Boolean) : results.every(Boolean);
-    });
+    }
   }
 
   // Apply index access ([n])
@@ -905,7 +1081,7 @@ function renderMultiDefinePanel(defines) {
     actions.appendChild(
       el('div', { class: 'sel-multi-all-exist' }, [
         el('span', { html: icon('check', 14) }),
-        'All defines already exist in your data sets.',
+        'All defines already exist in your datasets.',
       ])
     );
   }
@@ -1007,13 +1183,28 @@ function renderMultiDefinePanel(defines) {
               varData.transforms = [];
             }
 
+            // Detect placeholder (.{?false}) in source and set flag
+            if (varData.source && varData.source.includes('.{?false}')) {
+              varData.placeholder = true;
+              varData.source = varData.source.replace(/\.\{\?false\}$/, '');
+            }
+
+            // Detect parent-child block relationship (#loopVar.rest)
+            if (varData.source) {
+              const loopVarMatch = varData.source.match(/^(#\w+)\./);
+              if (loopVarMatch) {
+                varData.parentLoopVar = loopVarMatch[1];
+                varData.source = varData.source.slice(loopVarMatch[0].length);
+              }
+            }
+
             await createVariable(varData);
             imported++;
           } catch (err) {
             console.warn('[DocGen] Bulk import skip:', d.name, err);
           }
         }
-        showCreateToast(`Imported ${imported} of ${importTargets.length} data sets`);
+        showCreateToast(`Imported ${imported} of ${importTargets.length} datasets`);
         state.set('word.selection', null);
       },
     }, [el('span', { html: icon('download', 12) }), ` ${importLabel}`]),
@@ -1037,13 +1228,13 @@ function renderMultiDefinePanel(defines) {
   panelEl.append(headerRow, summary, list, actions);
 }
 
-// ─── Create data set form ───────────────────────────────────────────
+// ─── Create dataset form ───────────────────────────────────────────
 
 function showCreateDataSetForm(parsed, dupeInfo) {
   if (!panelEl) return;
 
   const suggested = suggestDataSetFields(parsed);
-  // Generate a unique name so imports never collide with existing data sets
+  // Generate a unique name so imports never collide with existing datasets
   suggested.name = makeUniqueName(suggested.name);
   const catalogues = (state.get('catalogues') || []).filter(c => !c.readonly);
   const favId = getFavouriteCatalogue();
@@ -1215,12 +1406,46 @@ function showCreateDataSetForm(parsed, dupeInfo) {
             }
             varData.transforms = transforms;
           }
+          // Detect placeholder (.{?false}) in source and set flag
+          if (varData.source && varData.source.includes('.{?false}')) {
+            varData.placeholder = true;
+            varData.source = varData.source.replace(/\.\{\?false\}$/, '');
+          }
+          // Detect parent-child block relationship (#loopVar.rest)
+          if (varData.source) {
+            const loopVarMatch = varData.source.match(/^(#\w+)\./);
+            if (loopVarMatch) {
+              varData.parentLoopVar = loopVarMatch[1];
+              varData.source = varData.source.slice(loopVarMatch[0].length);
+            }
+          }
+
+          // ── Check for missing source dependency ─────────────────────
+          // Only check the primary source reference (the #varName the data
+          // comes FROM), not #variables inside filters which are runtime
+          // loop context variables (e.g. #currentCp in a $for loop).
+          const allVars = state.get('variables') || [];
+          const existingNames = new Set(allVars.map(v => v.name));
+          const sourceExpr = suggested.source || parsed.source || '';
+          // Extract only the leading #varName (the source), ignoring filter contents
+          const sourceRefMatch = sourceExpr.match(/^(#\w+)/);
+          const missingRefs = sourceRefMatch
+            && sourceRefMatch[1] !== name
+            && !existingNames.has(sourceRefMatch[1])
+            ? [sourceRefMatch[1]]
+            : [];
+
+          if (missingRefs.length > 0) {
+            const proceed = await showMissingDepsDialog(missingRefs, selectedCatId, selectedSectionId);
+            if (!proceed) return; // user cancelled
+          }
+
           await createVariable(varData);
           // Success → show toast and close
           showCreateToast(`Created "${name}" in catalogue`);
           renderPanel(); // back to expression view
         } catch (err) {
-          errorEl.textContent = err.message || 'Failed to create data set';
+          errorEl.textContent = err.message || 'Failed to create dataset';
           errorEl.style.display = 'block';
         }
       },
@@ -1235,7 +1460,7 @@ function showCreateDataSetForm(parsed, dupeInfo) {
     el('div', { class: 'sel-panel-header' }, [
       el('div', { class: 'sel-panel-title-row' }, [
         el('span', { class: 'sel-panel-icon', html: icon('plus', 16) }),
-        el('span', { class: 'sel-panel-title' }, 'Create data set from selection'),
+        el('span', { class: 'sel-panel-title' }, 'Create dataset from selection'),
       ]),
       el('button', {
         class: 'sel-panel-close',
@@ -1245,6 +1470,98 @@ function showCreateDataSetForm(parsed, dupeInfo) {
     ])
   );
   panelEl.appendChild(form);
+}
+
+// ─── Missing dependency dialog ──────────────────────────────────────
+
+/**
+ * Show a dialog warning that some #variable references don't exist yet.
+ * Offers to create placeholder defines for them.
+ * Returns a Promise<boolean> — true if user proceeds, false if cancelled.
+ */
+function showMissingDepsDialog(missingRefs, catalogueId, sectionId) {
+  return new Promise((resolve) => {
+    const overlay = el('div', {
+      style: {
+        position: 'fixed', inset: '0', background: 'rgba(0,0,0,.35)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        zIndex: '9999',
+      },
+    });
+
+    const refList = missingRefs.map(ref =>
+      el('div', {
+        style: {
+          display: 'flex', alignItems: 'center', gap: '6px',
+          padding: '4px 8px', background: 'var(--bg-warm, #F6F8FA)',
+          borderRadius: 'var(--radius, 4px)', fontSize: '12px', fontFamily: 'var(--mono)',
+        },
+      }, [
+        el('span', { html: icon('alertTriangle', 12), style: { color: '#E65100', flex: '0 0 auto' } }),
+        el('span', { style: { fontWeight: '600' } }, ref),
+        el('span', { style: { color: 'var(--text-tertiary)', fontSize: '10px' } }, '— not found'),
+      ])
+    );
+
+    const dialog = el('div', {
+      style: {
+        background: 'var(--card, #fff)', borderRadius: '8px', padding: '16px',
+        boxShadow: '0 8px 24px rgba(0,0,0,.18)', maxWidth: '340px', width: '100%',
+      },
+    }, [
+      el('div', { style: { fontWeight: '700', fontSize: '13px', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '6px' } }, [
+        el('span', { html: icon('alertTriangle', 16), style: { color: '#E65100' } }),
+        'Missing dependencies',
+      ]),
+      el('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '10px' } },
+        'The expression references variables that don\'t exist yet:',
+      ),
+      el('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: '12px' } }, refList),
+      el('div', { style: { fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '14px' } },
+        'Create placeholder defines so the expression can resolve? They will be added to the same catalogue.',
+      ),
+      el('div', { style: { display: 'flex', gap: '8px', justifyContent: 'flex-end' } }, [
+        el('button', {
+          class: 'btn btn-outline btn-sm',
+          onclick: () => { overlay.remove(); resolve(false); },
+        }, 'Cancel'),
+        el('button', {
+          class: 'btn btn-outline btn-sm',
+          onclick: () => {
+            // Skip — create the variable without placeholders
+            overlay.remove();
+            resolve(true);
+          },
+        }, 'Skip'),
+        el('button', {
+          class: 'btn btn-primary btn-sm',
+          onclick: async () => {
+            try {
+              for (const ref of missingRefs) {
+                await createVariable({
+                  name: ref,
+                  purpose: 'variable',
+                  type: 'define',
+                  source: '',
+                  description: '(placeholder — source not yet defined)',
+                  catalogueId,
+                  sectionId,
+                });
+              }
+              showCreateToast(`Created ${missingRefs.length} placeholder${missingRefs.length > 1 ? 's' : ''}`);
+            } catch (err) {
+              console.error('Failed to create placeholders:', err);
+            }
+            overlay.remove();
+            resolve(true);
+          },
+        }, `Create ${missingRefs.length === 1 ? 'placeholder' : `${missingRefs.length} placeholders`}`),
+      ]),
+    ]);
+
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+  });
 }
 
 // ─── Create toast ───────────────────────────────────────────────────

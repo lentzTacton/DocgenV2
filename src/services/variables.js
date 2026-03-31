@@ -13,6 +13,7 @@ import {
   reorderVariables as dbReorder,
   getCatalogues, saveCatalogue as dbSaveCatalogue, deleteCatalogue as dbDeleteCatalogue,
   getSections, getAllSections, saveSection as dbSaveSection, deleteSection as dbDeleteSection,
+  forceClearSection as dbForceClearSection,
 } from '../core/storage.js';
 
 // ─── In-memory caches ──────────────────────────────────────────────────
@@ -107,6 +108,7 @@ export async function createVariable(data) {
     sourceDefineSource: data.sourceDefineSource || '',
     _singleFilter: data._singleFilter || null,
     _singleLeafField: data._singleLeafField || null,
+    placeholder: data.placeholder || false,
     expression: '',
     order: vars.length,
     matchCount: 0,
@@ -228,6 +230,59 @@ export async function removeSection(id) {
   await loadVariables();  // variables get unassigned
 }
 
+// ─── Force-delete (cascade, bypasses guards) ────────────────────────────
+
+/**
+ * Force-delete a catalogue + all its sections + all its variables.
+ * The storage layer already cascades; this just skips canDeleteCatalogue().
+ */
+export async function forceRemoveCatalogue(id) {
+  await dbDeleteCatalogue(id);
+  await loadCatalogues();
+  await loadSections();
+  await loadVariables();
+}
+
+/**
+ * Force-delete a section + all its variables (hard delete, not unassign).
+ */
+export async function forceRemoveSection(id) {
+  await dbForceClearSection(id);
+  await loadSections();
+  await loadVariables();
+}
+
+/**
+ * Force-delete a single variable, ignoring reference checks.
+ */
+export async function forceRemoveVariable(id) {
+  await dbDelete(id);
+  await loadVariables();
+}
+
+/**
+ * Count what a force-delete would remove.
+ * Returns { sections, variables } counts.
+ */
+export function countCascadeItems(level, id) {
+  const sections = state.get('sections') || [];
+  const variables = state.get('variables') || [];
+  if (level === 'catalogue') {
+    const secs = sections.filter(s => s.catalogueId === id);
+    const vars = variables.filter(v => v.catalogueId === id);
+    return { sections: secs.length, variables: vars.length };
+  }
+  if (level === 'section') {
+    const vars = variables.filter(v => v.sectionId === id);
+    return { sections: 0, variables: vars.length };
+  }
+  // variable level — count dependents that will break
+  const target = variables.find(v => v.id === id);
+  if (!target) return { sections: 0, variables: 0 };
+  const deps = getDependents(id);
+  return { sections: 0, variables: deps.length };
+}
+
 export async function assignVariableToSection(variableId, sectionId, catalogueId) {
   const vars = state.get('variables') || [];
   const v = vars.find(v => v.id === variableId);
@@ -250,30 +305,39 @@ export function generateExpression(variable) {
     const { transforms } = variable;
     expr = source || '';
 
-    // Append collection filter if present
-    if (filters && filters.length > 0) {
-      const logic = filterLogic === 'and' ? ' && ' : ' || ';
-      const conditions = filters.map(f => {
-        const val = typeof f.value === 'string' && !f.value.match(/^[0-9.]+$/) && f.op !== '>' && f.op !== '<' && f.op !== '>=' && f.op !== '<='
-          ? `"${f.value}"`
-          : f.value;
-        if (f.op === 'contains') return `${f.field} matches '.*${f.value}.*'`;
-        if (f.op === 'not null') return `${f.field} != null`;
-        return `${f.field}${f.op}${val}`;
-      }).join(logic);
-      expr += `.{?${conditions}}`;
-    }
+    // Placeholder: append .{?false} to produce an empty collection
+    if (variable.placeholder) {
+      expr += '.{?false}';
+      // Skip all other filters/transforms — placeholder overrides everything
+    } else {
+      // Append collection filter if present
+      if (filters && filters.length > 0) {
+        const logic = filterLogic === 'and' ? ' && ' : ' || ';
+        const conditions = filters.map(f => {
+          if (f.op === 'is null') return `${f.field}==null`;
+          if (f.op === 'not null') return `${f.field} != null`;
+          if (f.op === 'contains') return `${f.field} matches '.*${f.value}.*'`;
+          // Variable references: emit without quotes (e.g. ==#varName)
+          if (f.isVariableRef) return `${f.field}${f.op}${f.value}`;
+          const val = typeof f.value === 'string' && !f.value.match(/^[0-9.]+$/) && f.op !== '>' && f.op !== '<' && f.op !== '>=' && f.op !== '<='
+            ? `"${f.value}"`
+            : f.value;
+          return `${f.field}${f.op}${val}`;
+        }).join(logic);
+        expr += `.{?${conditions}}`;
+      }
 
-    // Append transform chain
-    if (transforms && transforms.length > 0) {
-      for (const t of transforms) {
-        switch (t.type) {
-          case 'fieldExtract': expr += `.{${t.field || 'field'}}`; break;
-          case 'groupBy':      expr += `.groupBy('${t.field || 'field'}')`; break;
-          case 'flatten':      expr += '.flatten()'; break;
-          case 'sum':          expr += '.sum()'; break;
-          case 'size':         expr += '.size()'; break;
-          case 'sort':         expr += `.sort('${t.field || 'field'}')`; break;
+      // Append transform chain
+      if (transforms && transforms.length > 0) {
+        for (const t of transforms) {
+          switch (t.type) {
+            case 'fieldExtract': expr += `.{${t.field || 'field'}}`; break;
+            case 'groupBy':      expr += `.groupBy('${t.field || 'field'}')`; break;
+            case 'flatten':      expr += '.flatten()'; break;
+            case 'sum':          expr += '.sum()'; break;
+            case 'size':         expr += '.size()'; break;
+            case 'sort':         expr += `.sort('${t.field || 'field'}')`; break;
+          }
         }
       }
     }
@@ -284,6 +348,10 @@ export function generateExpression(variable) {
     const leafField = variable._singleLeafField;
     expr = source || '';
 
+    // Placeholder: append .{?false} to produce an empty collection
+    if (variable.placeholder) {
+      expr += '.{?false}';
+    } else {
     // Insert collection filter BEFORE the leaf field (not at the end)
     // e.g. solution.opportunity.name → solution.opportunity.{?name=="X"}.name
     if (singleFilter) {
@@ -291,12 +359,15 @@ export function generateExpression(variable) {
       if (singleFilter.mode === 'field') {
         // Build conditions — supports new multi-condition format and legacy single-condition
         const conds = singleFilter.conditions || (singleFilter.field ? [{ field: singleFilter.field, op: singleFilter.op, value: singleFilter.value }] : []);
-        const validConds = conds.filter(c => c.field && c.value);
+        const validConds = conds.filter(c => c.field && (c.value || c.op === 'is null' || c.op === 'not null'));
         if (validConds.length > 0) {
           const logic = singleFilter.logic === 'or' ? ' || ' : ' && ';
           const parts = validConds.map(c => {
+            if (c.op === 'is null') return `${c.field}==null`;
+            if (c.op === 'not null') return `${c.field} != null`;
             if (c.op === 'contains') return `${c.field} matches '.*${c.value}.*'`;
             if (c.op === 'matches') return `${c.field} matches '${c.value}'`;
+            if (c.isVariableRef) return `${c.field}${c.op}${c.value}`;
             const val = typeof c.value === 'string' && !c.value.match(/^[0-9.]+$/)
               && c.op !== '>' && c.op !== '<' && c.op !== '>=' && c.op !== '<='
               ? `"${c.value}"` : c.value;
@@ -324,11 +395,13 @@ export function generateExpression(variable) {
     if (filters && filters.length > 0 && !singleFilter) {
       const logic = filterLogic === 'and' ? ' && ' : ' || ';
       const conditions = filters.map(f => {
+        if (f.op === 'is null') return `${f.field}==null`;
+        if (f.op === 'not null') return `${f.field} != null`;
+        if (f.op === 'contains') return `${f.field} matches '.*${f.value}.*'`;
+        if (f.isVariableRef) return `${f.field}${f.op}${f.value}`;
         const val = typeof f.value === 'string' && !f.value.match(/^[0-9.]+$/) && f.op !== '>' && f.op !== '<' && f.op !== '>=' && f.op !== '<='
           ? `"${f.value}"`
           : f.value;
-        if (f.op === 'contains') return `${f.field} matches '.*${f.value}.*'`;
-        if (f.op === 'not null') return `${f.field} != null`;
         return `${f.field}${f.op}${val}`;
       }).join(logic);
       expr += `.{?${conditions}}`;
@@ -380,6 +453,7 @@ export function generateExpression(variable) {
         }
       }
     }
+    } // end placeholder else
   } else if (type === 'define') {
     // Linked define — references another define variable.
     // The source define (e.g. #headUomV) is a SEPARATE variable —
@@ -463,6 +537,14 @@ export function generateExpression(variable) {
     }
   }
 
+  // ── Prepend parent loop variable for child blocks ────────────────
+  // When this dataset lives inside a for-loop, prefix the expression
+  // with the loop variable (e.g. #currentAlternative.flatbom)
+  if (variable.parentLoopVar && expr) {
+    const loopVar = variable.parentLoopVar.startsWith('#') ? variable.parentLoopVar : `#${variable.parentLoopVar}`;
+    expr = `${loopVar}.${expr}`;
+  }
+
   // ── Wrap based on purpose ────────────────────────────────────────
   //
   // Variables → $define{#name=expr}$
@@ -477,7 +559,7 @@ export function generateExpression(variable) {
   //     ${#name=SOURCE}$                — Cytiva pattern
   //
   // The builder will decide HOW to insert a block. The expression
-  // stored on the data set is just the raw source.
+  // stored on the dataset is just the raw source.
 
   if (purpose === 'block') {
     return expr;
@@ -664,10 +746,10 @@ export function canDeleteCatalogue(catalogueId) {
   if (sections.length > 0 || variables.length > 0) {
     const details = [];
     if (sections.length > 0) details.push(`${sections.length} section${sections.length !== 1 ? 's' : ''}: ${sections.map(s => s.name).join(', ')}`);
-    if (variables.length > 0) details.push(`${variables.length} data set${variables.length !== 1 ? 's' : ''}: ${variables.map(v => v.name).join(', ')}`);
+    if (variables.length > 0) details.push(`${variables.length} dataset${variables.length !== 1 ? 's' : ''}: ${variables.map(v => v.name).join(', ')}`);
     return {
       ok: false,
-      reason: 'Cannot delete a catalogue that still contains sections or data sets. Remove or move them first.',
+      reason: 'Cannot delete a catalogue that still contains sections or datasets. Remove or move them first.',
       details,
     };
   }
@@ -684,8 +766,8 @@ export function canDeleteSection(sectionId) {
   if (variables.length > 0) {
     return {
       ok: false,
-      reason: 'Cannot delete a section that still contains data sets. Remove or move them first.',
-      details: [`${variables.length} data set${variables.length !== 1 ? 's' : ''}: ${variables.map(v => v.name).join(', ')}`],
+      reason: 'Cannot delete a section that still contains datasets. Remove or move them first.',
+      details: [`${variables.length} dataset${variables.length !== 1 ? 's' : ''}: ${variables.map(v => v.name).join(', ')}`],
     };
   }
   return { ok: true };
@@ -727,6 +809,19 @@ export function canDeleteVariable(variableId) {
     if (v.type === 'code' && v.source && v.source.includes(targetRef)) {
       usages.push({ type: 'raw expression', name: v.name, id: v.id });
     }
+    // Check if child blocks reference this as their parent block
+    if (v.parentBlock) {
+      const parentRef = v.parentBlock.startsWith('#') ? v.parentBlock : `#${v.parentBlock}`;
+      if (parentRef === targetRef) {
+        usages.push({ type: 'child block', name: v.name, id: v.id });
+      }
+    }
+    // Check if child blocks use this variable's name as their loop variable source
+    if (v.parentLoopVar) {
+      const loopRef = v.parentLoopVar.startsWith('#') ? v.parentLoopVar : `#${v.parentLoopVar}`;
+      // The loop variable itself isn't stored as a variable — but the parent block IS
+      // So we check if any variable's expression references this as a for-loop source
+    }
   }
 
   // Future: check builder blocks
@@ -766,14 +861,19 @@ export function getDependents(variableId) {
     if (v.type === 'code' && v.source && v.source.includes(targetRef)) {
       deps.push(v);
     }
+    // Child blocks that reference this as their parent block
+    if (v.parentBlock) {
+      const parentRef = v.parentBlock.startsWith('#') ? v.parentBlock : `#${v.parentBlock}`;
+      if (parentRef === targetRef) deps.push(v);
+    }
   }
   return deps;
 }
 
-// ─── Data Set Validation ────────────────────────────────────────────
+// ─── Dataset Validation ─────────────────────────────────────────────
 
 /**
- * Validate a data set definition and return resolvability status.
+ * Validate a dataset definition and return resolvability status.
  *
  * Checks performed:
  *  - Name is valid (#prefix, no dupes)
@@ -783,7 +883,7 @@ export function getDependents(variableId) {
  *  - Match count > 0 when live data is available (warning, not error)
  *  - Transforms reference valid fields
  *
- * @param {object} variable — The data set definition
+ * @param {object} variable — The dataset definition
  * @param {object} opts — { bomSources, bomFields, bomRecords, modelObjects }
  * @returns {{ status: 'valid'|'warning'|'error', issues: {level, message}[] }}
  */
@@ -1014,7 +1114,7 @@ export function validateDataSet(variable, opts = {}) {
 }
 
 /**
- * Batch-validate all data sets in state and return a map of id → validation result.
+ * Batch-validate all datasets in state and return a map of id → validation result.
  * @param {object} opts — { bomSources, bomFields, bomRecords, modelObjects }
  * @returns {Map<number, {status, issues}>}
  */

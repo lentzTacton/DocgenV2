@@ -28,15 +28,24 @@ import { parseExpression, parseMultipleDefines } from './expression-parser.js';
  *   Sandvik: $rowgroup{#config}$
  */
 export function buildInsertExpression(variable) {
-  if (variable.purpose === 'block') {
-    // Block expression is the raw source (no wrapper).
-    // Insert directly into a $for loop.
-    const source = variable.expression || variable.source || '';
-    return `$for{#item in ${source}}$\n  \n$endfor$`;
-  }
-
-  // Variable: expression is already the full $define{…}$
+  // Variable/inline: expression is already the full $define{…}$ or ${…}$
   return variable.expression || '';
+}
+
+/**
+ * Build the different insert variants for a block variable.
+ * Returns { loopVar, source, forExpr, ifExpr, rawExpr }
+ */
+export function buildBlockInsertVariants(variable) {
+  const source = variable.expression || variable.source || '';
+  const loopVar = variable.name && variable.name.startsWith('#') ? variable.name : `#${variable.name || 'item'}`;
+  return {
+    loopVar,
+    source,
+    forExpr: `$for{${loopVar} in ${source}}$\n  \n$endfor$`,
+    ifExpr: `$if{${source}}$\n  \n$endif$`,
+    rawExpr: `${loopVar} in ${source}`,
+  };
 }
 
 /**
@@ -44,7 +53,13 @@ export function buildInsertExpression(variable) {
  * Variables are joined with newlines in their original order.
  */
 export function buildSectionExpression(variables) {
-  return variables.map(v => buildInsertExpression(v)).join('\n');
+  return variables.map(v => {
+    if (v.purpose === 'block') {
+      const variants = buildBlockInsertVariants(v);
+      return variants.forExpr;
+    }
+    return buildInsertExpression(v);
+  }).join('\n');
 }
 
 /**
@@ -52,14 +67,14 @@ export function buildSectionExpression(variables) {
  */
 export function handleInsertSectionIntoDoc(sectionName, variables) {
   if (!variables || variables.length === 0) {
-    showInsertFeedback('Section has no data sets to insert', 'warning');
+    showInsertFeedback('Section has no datasets to insert', 'warning');
     return;
   }
   const expression = buildSectionExpression(variables);
   const warnings = [{
     icon: 'info',
     color: 'var(--tacton-blue, #0969DA)',
-    text: `This will insert ${variables.length} data set${variables.length > 1 ? 's' : ''} from section "${sectionName}" at the cursor position.`,
+    text: `This will insert ${variables.length} dataset${variables.length > 1 ? 's' : ''} from section "${sectionName}" at the cursor position.`,
   }];
   showInsertWarningDialog(sectionName, expression, warnings, null);
 }
@@ -67,7 +82,7 @@ export function handleInsertSectionIntoDoc(sectionName, variables) {
 // ─── Insert handler (entry point) ───────────────────────────────────
 
 /**
- * Main handler called when the user clicks the insert button on a data set card.
+ * Main handler called when the user clicks the insert button on a dataset card.
  * Checks for warnings and either inserts directly or shows a confirmation dialog.
  */
 export function handleInsertIntoDoc(variable, valResult) {
@@ -76,40 +91,36 @@ export function handleInsertIntoDoc(variable, valResult) {
   const hasWarnings = valResult && valResult.status === 'warning';
   const issues = (valResult && valResult.issues) || [];
 
-  const expression = buildInsertExpression(variable);
-
-  // Collect warnings
-  const warnings = [];
-
-  if (isBlock) {
-    warnings.push({
-      icon: 'info',
-      color: 'var(--orange, #e67700)',
-      text: 'This is a data block — it will insert a $for loop template. Make sure the cursor is positioned where the repeating section should start.',
-    });
-  }
-
+  // Collect validation warnings (shown for all types)
+  const valWarnings = [];
   if (hasErrors) {
-    warnings.push({
-      icon: 'info',
-      color: 'var(--danger, #CF222E)',
-      text: `Validation errors: ${issues.map(i => i.message || i).join('; ')}`,
-    });
+    valWarnings.push(`Validation errors: ${issues.map(i => i.message || i).join('; ')}`);
   } else if (hasWarnings) {
-    warnings.push({
-      icon: 'info',
-      color: 'var(--orange, #e67700)',
-      text: `Validation warnings: ${issues.map(i => i.message || i).join('; ')}`,
-    });
+    valWarnings.push(`Validation warnings: ${issues.map(i => i.message || i).join('; ')}`);
   }
 
-  // Raw source for blocks (without $for wrapper) — used by "Insert raw" option
-  const rawSource = isBlock ? (variable.expression || variable.source || '') : null;
-
-  if (warnings.length > 0) {
-    showInsertWarningDialog(variable.name, expression, warnings, rawSource);
+  if (isBlock && variable.parentBlock) {
+    // Child block — warn it should be inside a for/if, then insert with ${...}$ wrapper
+    const source = variable.expression || variable.source || '';
+    const inlineExpr = `\${${source}}$`;
+    const warnings = [
+      { icon: 'info', color: 'var(--orange, #e67700)',
+        text: `This is a child dataset — make sure the cursor is inside the parent's $for or $if block.` },
+      ...valWarnings.map(text => ({ icon: 'info', color: 'var(--danger, #CF222E)', text })),
+    ];
+    showInsertWarningDialog(variable.name, inlineExpr, warnings, null);
+  } else if (isBlock) {
+    // Parent/independent block — choice dialog: $for, $if, or raw
+    const variants = buildBlockInsertVariants(variable);
+    showBlockInsertDialog(variable.name, variants, valWarnings);
   } else {
-    insertExpressionIntoWord(expression, variable.name);
+    const expression = buildInsertExpression(variable);
+    if (valWarnings.length > 0) {
+      const warnings = valWarnings.map(text => ({ icon: 'info', color: 'var(--orange, #e67700)', text }));
+      showInsertWarningDialog(variable.name, expression, warnings, null);
+    } else {
+      insertExpressionIntoWord(expression, variable.name);
+    }
   }
 }
 
@@ -176,21 +187,131 @@ function showInsertWarningDialog(name, expression, warnings, rawSource) {
   document.body.appendChild(overlay);
 }
 
+// ─── Block insert choice dialog ─────────────────────────────────────
+
+/**
+ * Show a dialog letting the user choose how to insert a block:
+ *   $for{} loop  |  $if{} conditional  |  raw expression
+ */
+function showBlockInsertDialog(name, variants, valWarnings) {
+  const existing = document.getElementById('insert-warn-overlay');
+  if (existing) existing.remove();
+
+  const overlay = el('div', {
+    id: 'insert-warn-overlay',
+    style: {
+      position: 'fixed', inset: '0', background: 'rgba(0,0,0,.35)',
+      zIndex: '9999', display: 'flex', alignItems: 'center', justifyContent: 'center',
+    },
+    onclick: (e) => { if (e.target === overlay) overlay.remove(); },
+  });
+
+  // Preview area — updates when hovering/selecting an option
+  const previewEl = el('div', {
+    style: {
+      fontSize: '11px', color: 'var(--text-tertiary)', background: 'var(--bg)',
+      border: '1px solid var(--border-light)', borderRadius: 'var(--radius)',
+      padding: '8px 10px', marginBottom: '12px',
+      fontFamily: 'monospace', wordBreak: 'break-all', lineHeight: '1.5',
+      whiteSpace: 'pre-wrap', minHeight: '40px',
+    },
+  }, variants.forExpr);
+
+  const btnStyle = {
+    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '2px',
+    flex: '1', padding: '10px 6px', border: '1px solid var(--border-light)',
+    borderRadius: 'var(--radius)', cursor: 'pointer', background: 'var(--card, #fff)',
+    fontSize: '12px', fontWeight: '600', textAlign: 'center',
+    transition: 'border-color 0.15s, background 0.15s',
+  };
+
+  function makeChoiceBtn(label, sublabel, expr, color, cursorInside = false) {
+    const btn = el('button', {
+      type: 'button',
+      style: { ...btnStyle },
+      onmouseenter: () => { previewEl.textContent = expr; },
+      onclick: () => { overlay.remove(); insertExpressionIntoWord(expr, `${name} (${label})`, { cursorInside }); },
+    }, [
+      el('span', { style: { color, fontSize: '13px' } }, label),
+      el('span', { style: { fontSize: '10px', color: 'var(--text-tertiary)', fontWeight: '400' } }, sublabel),
+    ]);
+    return btn;
+  }
+
+  const choiceRow = el('div', { style: { display: 'flex', gap: '8px', marginBottom: '10px' } }, [
+    makeChoiceBtn('$for{}$', 'Repeat rows', variants.forExpr, 'var(--tacton-blue, #0969DA)', true),
+    makeChoiceBtn('$if{}$', 'Conditional', variants.ifExpr, 'var(--purple, #8250DF)', true),
+    makeChoiceBtn('Raw', 'Expression only', variants.rawExpr, 'var(--orange, #e67700)'),
+  ]);
+
+  const warningEls = valWarnings.map(text =>
+    el('div', { style: { display: 'flex', gap: '6px', alignItems: 'flex-start', marginBottom: '6px' } }, [
+      el('span', { style: { color: 'var(--orange, #e67700)', flexShrink: '0', marginTop: '1px' }, html: icon('info', 14) }),
+      el('span', { style: { fontSize: '11px', color: 'var(--text-secondary)', lineHeight: '1.4' } }, text),
+    ])
+  );
+
+  overlay.appendChild(
+    el('div', {
+      style: {
+        background: 'var(--card, #fff)', border: '1px solid var(--border)',
+        borderRadius: '8px', padding: '16px 18px', maxWidth: '400px', width: '90%',
+        boxShadow: '0 8px 24px rgba(0,0,0,.18)',
+      },
+    }, [
+      el('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' } }, [
+        el('span', { style: { color: 'var(--tacton-blue, #0071c8)' }, html: icon('info', 18) }),
+        el('div', { style: { fontWeight: '700', fontSize: '13px' } }, `Insert "${name}"?`),
+      ]),
+      ...warningEls,
+      choiceRow,
+      previewEl,
+      el('div', { style: { display: 'flex', justifyContent: 'flex-end' } }, [
+        el('button', { class: 'btn btn-outline btn-sm', onclick: () => overlay.remove() }, 'Cancel'),
+      ]),
+    ])
+  );
+
+  document.body.appendChild(overlay);
+}
+
 // ─── Word API insert ────────────────────────────────────────────────
 
 /**
  * Insert text into the Word document at the current cursor via Office JS.
  * Falls back gracefully in dev mode (no Office context).
  */
-async function insertExpressionIntoWord(expression, name) {
+async function insertExpressionIntoWord(expression, name, opts = {}) {
   if (!window.Word) {
     showInsertFeedback(`Dev mode — would insert: ${expression}`, 'warning');
     return;
   }
   try {
     await Word.run(async (context) => {
-      const range = context.document.getSelection();
-      range.insertText(expression, Word.InsertLocation.replace);
+      const sel = context.document.getSelection();
+
+      if (opts.cursorInside) {
+        // Insert block construct with cursor positioned between open/close tags.
+        // Split on the placeholder newlines: "open\n  \nclose" → [open, close]
+        const parts = expression.split('\n');
+        const openTag = parts[0];                          // e.g. $for{#CP in source}$
+        const closeTag = parts[parts.length - 1];          // e.g. $endfor$
+
+        // Insert: openTag ¶ ¶ closeTag — three paragraphs
+        sel.insertText(openTag, Word.InsertLocation.replace);
+        const afterOpen = sel.getRange(Word.RangeLocation.after);
+        afterOpen.insertParagraph('', Word.InsertLocation.after);
+        const bodyPara = afterOpen.getRange(Word.RangeLocation.after);
+        bodyPara.insertText('', Word.InsertLocation.after);
+        const afterBody = bodyPara.getRange(Word.RangeLocation.after);
+        afterBody.insertParagraph(closeTag, Word.InsertLocation.after);
+
+        // Select the empty middle paragraph so the user can start typing
+        bodyPara.select();
+      } else {
+        sel.insertText(expression, Word.InsertLocation.replace);
+      }
+
       await context.sync();
     });
     showInsertFeedback(`Inserted "${name}" into document`, 'success');

@@ -116,10 +116,11 @@ export function createTabs() {
       }
     });
 
-    // Preview: disabled until locked AND has at least one form element
+    // Preview: enabled when locked AND (has form element OR has variables)
     const previewTab = tabElements['preview'];
     if (previewTab) {
-      if (isLocked && hasFormElement) {
+      const hasVariables = (state.get('variables') || []).length > 0;
+      if (isLocked && (hasFormElement || hasVariables)) {
         previewTab.classList.remove('tab-disabled');
       } else {
         previewTab.classList.add('tab-disabled');
@@ -138,6 +139,7 @@ export function createTabs() {
   state.on('activeZone', updateActiveTab);
   state.on('config.locked', updateTabStates);
   state.on('builder.hasElement', updateTabStates);
+  state.on('variables', updateTabStates);
 
   // ── Initial state ──
   const initialZone = state.get('activeZone') || 'setup';

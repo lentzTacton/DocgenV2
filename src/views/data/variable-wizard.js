@@ -291,7 +291,7 @@ function updateTypeSelector() {
   const opts = document.querySelectorAll('.type-pill');
   opts.forEach(o => {
     const label = o.querySelector('.tl')?.textContent;
-    const typeMap = { 'BOM': 'bom', 'Object': 'object', 'Single': 'single', 'List': 'list' };
+    const typeMap = { 'BOM': 'bom', 'Object': 'object', 'Single': 'single', 'Config': 'config', 'List': 'list' };
     o.classList.toggle('type-pill-sel', typeMap[label] === wizState.type);
   });
 }
@@ -341,8 +341,8 @@ export function renderVariableWizard(container, existingVariable) {
 
   // Header — show catalogue context
   const headerLabel = wizState.isEditMode
-    ? 'Edit Data Set'
-    : catName ? `New data set in ${catName}` : 'New Data Set';
+    ? 'Edit dataset'
+    : catName ? `New dataset in ${catName}` : 'New dataset';
   container.appendChild(
     el('div', { class: 'wiz-header' }, [
       el('span', { class: 'icon', style: { color: 'var(--tacton-blue)' }, html: icon(wizState.isEditMode ? 'edit' : 'plus', 16) }),
@@ -350,7 +350,7 @@ export function renderVariableWizard(container, existingVariable) {
     ])
   );
 
-  // Guide text — only for new data sets
+  // Guide text — only for new datasets
   // Guide text removed to save vertical space
 
   // ── Expression preview (always visible above tabs, builds progressively) ──
@@ -363,26 +363,10 @@ export function renderVariableWizard(container, existingVariable) {
   // ── Tab 1: Classification ──
   const classPanel = el('div', { id: 'wiz-tab-classify', class: 'wiz-tab-panel', style: { display: activeTab === 'classify' ? '' : 'none' } });
 
-  // ─ Name (primary — always first) ─
-  classPanel.appendChild(el('div', { class: 'wiz-card' }, [
-    el('div', { class: 'wiz-card-label' }, 'Name'),
-    el('div', { class: 'wiz-name-row' }, [
-      el('span', { class: 'wiz-name-hash' }, '#'),
-      el('input', {
-        class: 'input', id: 'wiz-name',
-        value: wizState.name ? wizState.name.replace(/^#/, '') : '',
-        placeholder: 'e.g. pump, accessories, skidItems',
-        oninput: (e) => {
-          // Strip spaces — not allowed in variable names
-          e.target.value = e.target.value.replace(/\s/g, '');
-          wizState.name = `#${e.target.value.replace(/^#/, '')}`;
-          clearErr();
-          refreshPipeline();
-        },
-      }),
-    ]),
-    el('div', { id: 'wiz-err', class: 'wiz-err', style: { display: 'none' } }),
-  ]));
+  // ─ Name + Parent Context (merged combo control — no wiz-card wrapper) ─
+  const nameCard = el('div', { id: 'wiz-name-card', style: { marginBottom: '8px' } });
+  renderNameCombo(nameCard);
+  classPanel.appendChild(nameCard);
 
   // ─ Instance picker (which Solution / ConfiguredProduct / etc.) ─
   // Only show when fully connected with a healthy ticket token
@@ -460,6 +444,8 @@ export function renderVariableWizard(container, existingVariable) {
   ]));
 
   classPanel.appendChild(configRow);
+
+  // Parent context is now merged into the Name combo above
 
   // ─ Optional: description + tags (last) ─
   const optCard = el('div', { class: 'wiz-card wiz-card-muted' }, [
@@ -692,6 +678,7 @@ function renderTypeSelector() {
     { key: 'object', icon: 'cube', color: 'var(--purple)', label: 'Object' },
     { key: 'bom', icon: 'box', color: 'var(--orange)', label: 'BOM' },
     { key: 'single', icon: 'target', color: 'var(--success)', label: 'Single' },
+    { key: 'config', icon: 'cpu', color: 'var(--info, #0288D1)', label: 'Config' },
     { key: 'define', icon: 'link', color: 'var(--purple, #8250DF)', label: 'Define' },
     { key: 'list', icon: 'list', color: 'var(--tacton-blue)', label: 'List' },
     { key: 'code', icon: 'code', color: 'var(--text-tertiary)', label: 'Code' },
@@ -703,10 +690,11 @@ function renderTypeSelector() {
     wizState.transforms = []; wizState.sourceDefine = ''; wizState.sourceDefineSource = '';
     if (t.key === 'bom') wizState.source = wizState.bomSources[0]?.expression || wizState.bomSources[0]?.name || '#this.flatbom';
     else if (t.key === 'object' || t.key === 'single') wizState.source = '';
+    else if (t.key === 'config') { wizState.source = ''; wizState._singleSourceMode = 'config'; wizState._selectedConfigPath = null; wizState._selectedConfigAttr = null; }
     else if (t.key === 'list') wizState.source = '{""}';
     else wizState.source = '';
 
-    const autoPurpose = t.key === 'single' ? 'inline'
+    const autoPurpose = (t.key === 'single' || t.key === 'config') ? 'variable'
       : (t.key === 'list' || t.key === 'define' || t.key === 'code') ? 'variable'
       : 'block';
     wizState.purpose = autoPurpose;
@@ -727,8 +715,8 @@ function renderTypeSelector() {
         // In edit mode, warn that changing type resets source/filters/transforms
         if (wizState.isEditMode) {
           showWizConfirmDialog(
-            'Change data set type?',
-            'This will reset the source, filters, and transforms for this data set. This cannot be undone.',
+            'Change dataset type?',
+            'This will reset the source, filters, and transforms for this dataset. This cannot be undone.',
             'Change type',
             () => applyTypeChange(t, opt)
           );
@@ -790,9 +778,14 @@ function showWizConfirmDialog(title, message, confirmLabel, onConfirm) {
 function switchTypeView() {
   const bom = qs('#wiz-bom-section'), obj = qs('#wiz-obj-section'), lst = qs('#wiz-list-section');
   const def = qs('#wiz-define-section'), code = qs('#wiz-code-section');
-  const isObjLike = wizState.type === 'object' || wizState.type === 'single';
+  const isObjLike = wizState.type === 'object' || wizState.type === 'single' || wizState.type === 'config';
   if (bom) bom.style.display = wizState.type === 'bom' ? '' : 'none';
-  // Source mode toggle (Object / Configuration) — only for 'single' type
+
+  // Refresh name combo when type/purpose changes (parent candidates may change)
+  const nameCard = qs('#wiz-name-card');
+  if (nameCard) renderNameCombo(nameCard);
+
+  // Source mode toggle (Object / Configuration) — only for 'single' type (not for 'config', it goes direct)
   const toggleWrap = qs('#wiz-source-toggle');
   if (toggleWrap) {
     toggleWrap.style.display = wizState.type === 'single' ? '' : 'none';
@@ -803,7 +796,7 @@ function switchTypeView() {
   if (obj) {
     obj.style.display = isObjLike ? '' : 'none';
     if (isObjLike) {
-      if (wizState.type === 'single' && wizState._singleSourceMode === 'config') {
+      if (wizState.type === 'config' || (wizState.type === 'single' && wizState._singleSourceMode === 'config')) {
         loadConfigExplorer();
       } else {
         loadObjectExplorer();
@@ -890,6 +883,399 @@ function renderListSection(container) {
     el('div', { style: { fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '4px' } },
       'Use the Transformation tab to add/remove values visually or paste CSV data.'),
   ]));
+}
+
+
+// ═════════════════════════════════════════════════════════════════════
+//  PARENT CONTEXT SECTION (Source tab — for-loop parent block picker)
+// ═════════════════════════════════════════════════════════════════════
+
+/**
+ * Render the merged Name + Parent Context combo control.
+ *
+ * Behaviour:
+ * - Default: editable text input with # prefix → user types name (parent/normal block)
+ * - Dropdown: shows available parent blocks to nest inside
+ * - When parent selected: name auto-generates, field becomes read-only with ✕ clear button
+ * - When cleared: back to editable input
+ *
+ * Template pattern: $for{CHILD_NAME in PARENT_NAME}$
+ */
+function renderNameCombo(container) {
+  clear(container);
+
+  const allVars = state.get('variables') || [];
+  const isChild = !!wizState.parentBlock;
+  const parentVar = isChild ? allVars.find(v => v.name === wizState.parentBlock) : null;
+  const isDefineParent = parentVar && parentVar.purpose === 'variable';
+  // Lock name field only for block parents (child name = parent name).
+  // Define parents need a different loop variable name, so keep editable.
+  const nameLocked = isChild && !isDefineParent;
+
+  // Candidate parents: blocks or defines that hold a collection (can be iterated)
+  const parentCandidates = allVars.filter(v =>
+    v.name && v.name !== wizState.name
+    && (v.purpose === 'block' || v.purpose === 'variable')
+    && (v.type === 'object' || v.type === 'bom' || v.type === 'define')
+  );
+
+  container.appendChild(el('div', { class: 'wiz-card-label' }, 'Name'));
+
+  // ── Single name input: [ # | name input ] ──
+  // Parent context is shown as a subtle info line BELOW, not inside the combo.
+  const comboWrap = el('div', {
+    style: { display: 'flex', alignItems: 'center', border: '1px solid var(--border-light)', borderRadius: 'var(--radius)', overflow: 'hidden', background: 'var(--bg-input, #fff)' },
+  });
+
+  // # prefix
+  comboWrap.appendChild(el('span', {
+    style: { padding: '0 0 0 8px', fontSize: '13px', color: 'var(--text-tertiary)', fontWeight: '500', userSelect: 'none' },
+  }, '#'));
+
+  // Name input — locked for block parents, editable for define parents and normal mode
+  comboWrap.appendChild(el('input', {
+    id: 'wiz-name',
+    value: wizState.name ? wizState.name.replace(/^#/, '') : '',
+    placeholder: isDefineParent ? 'loop variable name' : 'e.g. pump, accessories, skidItems',
+    readOnly: nameLocked ? true : undefined,
+    style: {
+      flex: '1', border: 'none', outline: 'none', padding: '6px 4px', fontSize: '13px',
+      background: nameLocked ? 'var(--bg-warm, #FAFBFC)' : 'transparent',
+      color: nameLocked ? 'var(--text-secondary)' : 'inherit',
+      cursor: nameLocked ? 'default' : 'text',
+      minWidth: '0',
+    },
+    oninput: nameLocked ? undefined : (e) => {
+      e.target.value = e.target.value.replace(/\s/g, '');
+      wizState.name = `#${e.target.value.replace(/^#/, '')}`;
+      if (isChild) wizState.parentLoopVar = wizState.name;
+      clearErr();
+      refreshPipeline();
+    },
+  }));
+
+  // Right side: parent selector button (only when NOT already a child)
+  if (!isChild && parentCandidates.length > 0) {
+    const parentBtn = el('button', {
+      type: 'button',
+      style: { flex: '0 0 auto', border: 'none', borderLeft: '1px solid var(--border-light)', outline: 'none', padding: '4px 8px', fontSize: '11px', color: 'var(--text-secondary)', background: 'var(--bg-warm, #FAFBFC)', cursor: 'pointer', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: '4px' },
+      onclick: (e) => {
+        e.stopPropagation();
+        // Show parent picker panel below the combo
+        const existingPanel = qs('#wiz-parent-picker');
+        if (existingPanel) { existingPanel.remove(); return; }
+        showParentPicker(container, allVars, parentCandidates, currentObjName => {
+          renderNameCombo(container);
+          const obj = qs('#wiz-obj-section');
+          if (obj) { wizState.objectPath = []; wizState.source = ''; loadObjectExplorer(); }
+          refreshPipeline();
+        });
+      },
+    }, [
+      'child of\u2026',
+      el('span', { style: { fontSize: '9px' } }, '\u25BE'),
+    ]);
+    comboWrap.appendChild(parentBtn);
+  }
+
+  container.appendChild(comboWrap);
+
+  container.appendChild(el('div', { id: 'wiz-err', class: 'wiz-err', style: { display: 'none' } }));
+
+  // ── Subtle parent context line below the name field (child mode only) ──
+  if (isChild) {
+    container.appendChild(el('div', {
+      style: { fontSize: '11px', color: 'var(--text-secondary)', padding: '3px 0 0 0', display: 'flex', alignItems: 'center', gap: '4px' },
+    }, [
+      el('span', { class: 'icon', html: icon('link', 11) }),
+      `child of `,
+      el('strong', { style: { fontWeight: '600' } }, wizState.parentBlock),
+      wizState.parentObjectType
+        ? el('span', { style: { color: 'var(--text-tertiary)' } }, ` (${wizState.parentObjectType})`)
+        : null,
+      el('button', {
+        type: 'button', title: 'Remove parent — make independent',
+        style: { marginLeft: '4px', padding: '0 4px', fontSize: '11px', lineHeight: '1', color: 'var(--text-tertiary)', cursor: 'pointer', background: 'none', border: 'none' },
+        onclick: () => {
+          wizState.parentBlock = '';
+          wizState.parentLoopVar = '';
+          wizState.parentObjectType = '';
+          wizState.name = '';
+          renderNameCombo(container);
+          const obj = qs('#wiz-obj-section');
+          if (obj) { wizState.objectPath = []; wizState.source = ''; loadObjectExplorer(); }
+          refreshPipeline();
+        },
+      }, '✕'),
+    ]));
+  }
+}
+
+
+/**
+ * Show a rich parent picker panel below the name combo.
+ * Each candidate shows: name, type badge, and description.
+ */
+function showParentPicker(container, allVars, parentCandidates, onSelect) {
+  const existing = qs('#wiz-parent-picker');
+  if (existing) existing.remove();
+
+  const TYPE_LABELS = { object: 'OBJ', bom: 'BOM' };
+  const TYPE_COLORS = { object: '#0969DA', bom: '#E8713A' };
+  const PURPOSE_LABELS = { block: 'block', variable: 'define' };
+
+  const panel = el('div', {
+    id: 'wiz-parent-picker',
+    style: {
+      border: '1px solid var(--border)', borderRadius: 'var(--radius)',
+      background: 'var(--card, #fff)', boxShadow: '0 4px 12px rgba(0,0,0,.12)',
+      maxHeight: '220px', overflowY: 'auto', marginTop: '4px',
+    },
+  });
+
+  // --- Group candidates by section proximity ---
+  const curSection = wizState.sectionId || null;
+  const curCatalogue = wizState.catalogueId || null;
+
+  const sameSection = [];
+  const sameCatalogue = [];
+  const rest = [];
+
+  parentCandidates.forEach(v => {
+    if (curSection && String(v.sectionId) === String(curSection)) {
+      sameSection.push(v);
+    } else if (curCatalogue && String(v.catalogueId) === String(curCatalogue)) {
+      sameCatalogue.push(v);
+    } else {
+      rest.push(v);
+    }
+  });
+
+  const groups = [];
+  if (sameSection.length) groups.push({ label: 'This section', items: sameSection });
+  if (sameCatalogue.length) groups.push({ label: 'This catalogue', items: sameCatalogue });
+  if (rest.length) groups.push({ label: groups.length ? 'Other' : null, items: rest });
+  // If only one group and no meaningful label, skip headers
+  const showHeaders = groups.length > 1 || (groups.length === 1 && groups[0].label && sameSection.length + sameCatalogue.length > 0);
+
+  function buildRow(v) {
+    const typeLabel = TYPE_LABELS[v.type] || v.type;
+    const typeColor = TYPE_COLORS[v.type] || 'var(--text-tertiary)';
+    const purposeLabel = PURPOSE_LABELS[v.purpose] || v.purpose;
+    const desc = v.description || '';
+
+    return el('div', {
+      style: {
+        display: 'flex', alignItems: 'center', gap: '6px', padding: '6px 10px',
+        cursor: 'pointer', fontSize: '12px', borderBottom: '1px solid var(--border-light)',
+      },
+      onmouseenter: (e) => { e.currentTarget.style.background = 'var(--bg-warm, #F6F8FA)'; },
+      onmouseleave: (e) => { e.currentTarget.style.background = ''; },
+      onclick: () => {
+        const parentVar = allVars.find(pv => pv.name === v.name);
+        wizState.parentBlock = v.name;
+        wizState.parentLoopVar = '';
+        if (parentVar) resolveParentObjectType(parentVar);
+        autoGenerateChildName();
+        wizState.parentLoopVar = wizState.name;
+        panel.remove();
+        onSelect();
+      },
+    }, [
+      // Type badge
+      el('span', {
+        style: {
+          flex: '0 0 auto', fontSize: '9px', fontWeight: '700', color: '#fff',
+          background: typeColor, borderRadius: '3px', padding: '1px 4px',
+          lineHeight: '1.4', textTransform: 'uppercase',
+        },
+      }, typeLabel),
+      // Name + purpose
+      el('div', { style: { flex: '1', minWidth: '0' } }, [
+        el('div', { style: { fontWeight: '600', fontSize: '12px' } }, [
+          v.name.replace(/^#/, ''),
+          el('span', { style: { fontWeight: '400', fontSize: '10px', color: 'var(--text-tertiary)', marginLeft: '4px' } }, purposeLabel),
+        ]),
+        desc ? el('div', { style: { fontSize: '10px', color: 'var(--text-tertiary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, desc) : null,
+      ]),
+    ]);
+  }
+
+  groups.forEach(group => {
+    if (showHeaders && group.label) {
+      panel.appendChild(el('div', {
+        style: {
+          padding: '4px 10px', fontSize: '9px', fontWeight: '700', textTransform: 'uppercase',
+          letterSpacing: '0.5px', color: 'var(--text-tertiary)', background: 'var(--bg-warm, #F6F8FA)',
+          borderBottom: '1px solid var(--border-light)',
+        },
+      }, group.label));
+    }
+    group.items.forEach(v => panel.appendChild(buildRow(v)));
+  });
+
+  container.appendChild(panel);
+
+  // Close on outside click
+  const close = (e) => { if (!panel.contains(e.target)) { panel.remove(); document.removeEventListener('click', close); } };
+  setTimeout(() => document.addEventListener('click', close), 0);
+}
+
+/**
+ * Render the parent context selector (legacy — now merged into renderNameCombo).
+ * Kept for backward compatibility with any code that calls it.
+ */
+function renderParentContextSection(container) {
+  clear(container);
+
+  const allVars = state.get('variables') || [];
+
+  // Candidate parents: blocks or defines that hold a collection (can be iterated)
+  const parentCandidates = allVars.filter(v =>
+    v.name && v.name !== wizState.name
+    && (v.purpose === 'block' || v.purpose === 'variable')
+    && (v.type === 'object' || v.type === 'bom' || v.type === 'define')
+  );
+
+  // If no candidates and no current parent, don't show
+  if (parentCandidates.length === 0 && !wizState.parentBlock) return;
+
+  const card = el('div', { class: 'wiz-card', style: { marginBottom: '8px' } });
+  card.appendChild(el('div', { class: 'form-label', style: { display: 'flex', alignItems: 'center', gap: '6px' } }, [
+    el('span', { class: 'icon', html: icon('arrowRight', 12) }),
+    'Parent context',
+    el('span', { style: { fontSize: '10px', color: 'var(--text-tertiary)', marginLeft: 'auto', fontWeight: '400' } }, 'child of for-loop'),
+  ]));
+
+  // Parent block selector
+  const select = el('select', {
+    class: 'input', style: { fontSize: '12px', marginBottom: '6px' },
+    onchange: (e) => {
+      const selectedName = e.target.value;
+      if (!selectedName) {
+        wizState.parentBlock = '';
+        wizState.parentLoopVar = '';
+        wizState.parentObjectType = '';
+      } else {
+        const parentVar = allVars.find(v => v.name === selectedName);
+        wizState.parentBlock = selectedName;
+        // The current block's name IS the loop variable — parentLoopVar tracks
+        // the parent's name so we know how to prefix the source expression
+        wizState.parentLoopVar = wizState.name || '';
+        // Resolve parent's object type
+        if (parentVar) resolveParentObjectType(parentVar);
+      }
+      // Re-render and refresh explorer
+      renderParentContextSection(container);
+      const obj = qs('#wiz-obj-section');
+      if (obj) { wizState.objectPath = []; wizState.source = ''; loadObjectExplorer(); }
+      // Auto-generate child name from parent + path
+      autoGenerateChildName();
+      refreshPipeline();
+    },
+  }, [
+    el('option', { value: '' }, '— No parent (root context) —'),
+    ...parentCandidates.map(v =>
+      el('option', { value: v.name, selected: v.name === wizState.parentBlock || undefined },
+        `child of ${v.name} (${v.type})`)
+    ),
+  ]);
+  card.appendChild(select);
+
+  if (wizState.parentBlock) {
+    const childName = wizState.name || '#child';
+
+    // Show the template preview: $for{childName in parentName}$
+    card.appendChild(el('div', {
+      style: { fontSize: '11px', padding: '4px 8px', background: 'var(--bg-warm, #FAFBFC)', border: '1px solid var(--border-light)', borderRadius: 'var(--radius)', fontFamily: 'var(--mono)', marginBottom: '4px' },
+    }, `$for{${childName} in ${wizState.parentBlock}}$`));
+
+    // Show resolved object type
+    if (wizState.parentObjectType) {
+      card.appendChild(el('div', {
+        style: { fontSize: '11px', color: 'var(--text-secondary)', padding: '4px 0', display: 'flex', alignItems: 'center', gap: '4px' },
+      }, [
+        el('span', { class: 'icon', html: icon('target', 11) }),
+        'Explorer scoped to: ',
+        el('strong', {}, wizState.parentObjectType),
+      ]));
+    }
+  }
+
+  container.appendChild(card);
+}
+
+/**
+ * Auto-generate child dataset name from parent.
+ * The child's name becomes the loop variable in $for{childName in parentName}$.
+ *
+ * - Block parent: child name = same as parent (e.g. #CP → child #CP)
+ * - Define parent: child needs a DIFFERENT name (e.g. #listTest → child #currentItem)
+ *   because $for{#listTest in #listTest}$ would be nonsensical.
+ */
+function autoGenerateChildName() {
+  if (!wizState.parentBlock) return;
+
+  const allVars = state.get('variables') || [];
+  const parentVar = allVars.find(v => v.name === wizState.parentBlock);
+  const isDefineParent = parentVar && parentVar.purpose === 'variable';
+
+  if (isDefineParent) {
+    // Define parent: suggest "current" + capitalized parent name
+    const cleanName = wizState.parentBlock.replace(/^#/, '');
+    const suggested = `#current${cleanName.charAt(0).toUpperCase()}${cleanName.slice(1)}`;
+    wizState.name = suggested;
+  } else {
+    // Block parent: child name = same as parent
+    wizState.name = wizState.parentBlock;
+  }
+
+  wizState.parentLoopVar = wizState.name;
+  const nameInput = qs('#wiz-name');
+  if (nameInput) nameInput.value = wizState.name.replace(/^#/, '');
+}
+
+/**
+ * Resolve the object type of a parent block's collection items.
+ * E.g. if parent source is "#this.related('ConfiguredProduct','solution')",
+ * the items are of type "ConfiguredProduct".
+ */
+function resolveParentObjectType(parentVar) {
+  if (!parentVar?.source) return;
+  const source = parentVar.source;
+
+  // Pattern: related('ObjectType', 'relation') — first arg is the object type
+  const relatedMatch = source.match(/related\(\s*'([^']+)'/);
+  if (relatedMatch) {
+    wizState.parentObjectType = relatedMatch[1];
+    return;
+  }
+
+  // Pattern: dot-walk from starting object (e.g. solution.opportunity) — last segment is a ref
+  // Use the model to resolve the final object type
+  const startObj = state.get('startingObject.type') || 'Solution';
+  const model = wizState.modelObjects || [];
+  if (model.length > 0) {
+    const root = startObj.charAt(0).toLowerCase() + startObj.slice(1);
+    if (source.startsWith(root + '.')) {
+      const segments = source.slice(root.length + 1).split('.');
+      let current = startObj;
+      for (const seg of segments) {
+        const obj = model.find(o => o.name === current);
+        if (!obj) break;
+        const attr = obj.attributes.find(a => a.name === seg && a.refType);
+        if (attr) current = attr.refType;
+      }
+      wizState.parentObjectType = current;
+      return;
+    }
+  }
+
+  // For BOM sources, items are BOM records (generic)
+  if (source.includes('flatbom') || source.includes('.bom')) {
+    wizState.parentObjectType = 'BOM';
+    return;
+  }
 }
 
 
@@ -1296,6 +1682,7 @@ function updateSelectedSource() {
       catchAll: wizState.catchAll, transforms: wizState.transforms,
       sourceDefine: wizState.sourceDefine, sourceDefineSource: wizState.sourceDefineSource,
       _singleFilter: wizState._singleFilter, _singleLeafField: wizState._singleLeafField,
+      placeholder: wizState.placeholder,
     });
   } else if ((wizState.type === 'object' || wizState.type === 'single') && wizState.objectPath.length > 0) {
     // Progressive: build partial expression from current dot-walk path
@@ -1494,7 +1881,7 @@ function renderDataDrawer(parentContainer) {
   parentContainer.appendChild(drawer);
 }
 
-/** Get the current data set for the drawer (records + available fields). */
+/** Get the current dataset for the drawer (records + available fields). */
 function getDrawerData() {
   let records = [];
   let allFields = [];
@@ -1891,7 +2278,7 @@ async function loadConfigDrawerRecords() {
 // ─── Transformation Tab Controls (type-specific manipulation) ────────
 
 /** Object filter operators that map to Spring EL */
-const OBJ_FILTER_OPS = ['==', '!=', '>', '<', '>=', '<=', 'contains', 'matches', 'not null'];
+const OBJ_FILTER_OPS = ['==', '!=', '>', '<', '>=', '<=', 'contains', 'matches', 'is null', 'not null'];
 
 /** Transforms applicable to Object & Single types */
 const OBJ_TRANSFORM_TYPES = [
@@ -1919,6 +2306,53 @@ function renderDetailsControls() {
   const container = qs('#wiz-details-controls');
   if (!container) return;
   clear(container);
+
+  // ── Placeholder toggle (first item for object/single types) ──
+  if (wizState.type === 'object' || wizState.type === 'single') {
+    const placeholderCard = el('div', { class: 'wiz-transform-card', style: { marginBottom: '8px' } });
+    placeholderCard.appendChild(el('div', { class: 'wiz-transform-card-header' }, [
+      el('span', { class: 'icon', html: icon('fileText', 12) }),
+      'Placeholder (empty collection)',
+    ]));
+
+    placeholderCard.appendChild(el('label', {
+      class: 'wiz-transform-toggle',
+    }, [
+      el('input', {
+        type: 'checkbox', checked: wizState.placeholder || undefined,
+        onchange: (e) => {
+          wizState.placeholder = e.target.checked;
+          if (wizState.placeholder) {
+            // Clear all transforms when placeholder is enabled
+            wizState.filters = [];
+            wizState.transforms = [];
+            wizState.catchAll = false;
+          }
+          renderDetailsControls();
+          refreshPipeline();
+        },
+      }),
+      el('span', { style: { fontWeight: '600', flex: '1' } }, 'Start empty'),
+      el('span', { class: 'wiz-transform-hint' }, '.{?false}'),
+    ]));
+
+    if (wizState.placeholder) {
+      placeholderCard.appendChild(el('div', {
+        style: {
+          padding: '8px 12px', fontSize: '11px', color: 'var(--text-secondary)',
+          background: 'var(--bg-warm, #FFFDF5)', borderTop: '1px solid var(--border-light)',
+          lineHeight: '1.5',
+        },
+      }, 'This dataset starts as an empty collection (.{?false}). '
+        + 'Use conditional logic in your template to populate it. '
+        + 'Useful as a default placeholder that other logic can override.'));
+    }
+
+    container.appendChild(placeholderCard);
+
+    // When placeholder is active, skip all other transformation controls
+    if (wizState.placeholder) return;
+  }
 
   if (wizState.type === 'object') {
     renderObjectDetailsControls(container);
@@ -1952,7 +2386,7 @@ function renderObjectDetailsControls(container) {
   // Filter builder (Spring EL .{? condition} syntax)
   container.appendChild(renderObjectFilterBuilder());
 
-  // Catch-all remainder toggle (same as BOM — captures everything not in other data sets)
+  // Catch-all remainder toggle (same as BOM — captures everything not in other datasets)
   // Supported via Spring EL `not in` expressions in generated code
   if (wizState.purpose === 'block') {
     const catchAllWrap = el('div', { style: { marginBottom: '8px' } });
@@ -1964,10 +2398,10 @@ function renderObjectDetailsControls(container) {
         onchange: (e) => { wizState.catchAll = e.target.checked; renderDetailsControls(); refreshPipeline(); },
       }),
       el('span', { style: { fontWeight: '600' } }, 'Catch-all remainder'),
-      el('span', { style: { color: 'var(--text-tertiary)', fontSize: '11px', marginLeft: 'auto' } }, 'captures everything not in other data sets'),
+      el('span', { style: { color: 'var(--text-tertiary)', fontSize: '11px', marginLeft: 'auto' } }, 'captures everything not in other datasets'),
     ]));
 
-    // When catch-all is active, show which other data sets will be excluded
+    // When catch-all is active, show which other datasets will be excluded
     if (wizState.catchAll) {
       const sameTypeVars = (state.get('variables') || []).filter(v =>
         v.type === 'object' && !v.catchAll && v.id !== wizState.id
@@ -1985,7 +2419,7 @@ function renderObjectDetailsControls(container) {
         catchAllWrap.appendChild(exclList);
       } else {
         catchAllWrap.appendChild(el('div', { style: { padding: '4px 12px 4px 32px', fontSize: '10px', color: 'var(--text-tertiary)', fontStyle: 'italic' } },
-          'No other object data sets to exclude from — add filtered ones first.'));
+          'No other object datasets to exclude from — add filtered ones first.'));
       }
     }
     container.appendChild(catchAllWrap);
@@ -2014,7 +2448,9 @@ function renderObjectFilterBuilder() {
     wrap.appendChild(el('div', { class: 'filter-row' }, [
       el('span', { class: 'filter-field' }, f.field),
       el('span', { class: 'filter-op' }, f.op),
-      f.op !== 'not null' ? el('span', { class: 'filter-val' }, `"${f.value}"`) : null,
+      (f.op !== 'not null' && f.op !== 'is null')
+        ? el('span', { class: 'filter-val' }, f.isVariableRef ? f.value : `"${f.value}"`)
+        : null,
       el('span', { class: 'filter-x', onclick: () => { wizState.filters.splice(idx, 1); renderDetailsControls(); refreshPipeline(); }, html: icon('x', 12) }),
     ]));
   });
@@ -2027,14 +2463,18 @@ function renderObjectFilterBuilder() {
   opPicker._value = OBJ_FILTER_OPS[0];
 
   const valInput = el('input', { class: 'input', placeholder: 'value', style: { flex: '2' } });
-  opPicker._onChange = (v) => { valInput.style.display = v === 'not null' ? 'none' : ''; };
+  const isNullOp = (v) => v === 'not null' || v === 'is null';
+  opPicker._onChange = (v) => { valInput.style.display = isNullOp(v) ? 'none' : ''; };
 
   const addBtn = el('button', {
     class: 'btn btn-sm btn-primary',
     onclick: () => {
       const field = fieldPicker._value || '', op = opPicker._value || OBJ_FILTER_OPS[0], value = valInput.value.trim();
-      if (!field || (op !== 'not null' && !value)) return;
-      wizState.filters.push({ field, op, value: op === 'not null' ? '' : value });
+      if (!field || (!isNullOp(op) && !value)) return;
+      const filterEntry = { field, op, value: isNullOp(op) ? null : value };
+      // Detect variable references (#varName) in value
+      if (value && value.startsWith('#')) filterEntry.isVariableRef = true;
+      wizState.filters.push(filterEntry);
       renderDetailsControls(); refreshPipeline();
     },
   }, [el('span', { class: 'icon', html: icon('plus', 12) }), 'Add']);
@@ -2756,6 +3196,9 @@ async function handleSave(skipDupeCheck) {
     }
   }
 
+  // Config type is stored as 'single' (the template engine treats it the same)
+  if (wizState.type === 'config') wizState.type = 'single';
+
   // Resolve cpContext from the current source definition
   const srcDef = wizState.bomSources.find(s => s.expression === wizState.source || s.name === wizState.source);
   wizState.cpContext = srcDef?.cpContext || null;
@@ -2789,10 +3232,10 @@ async function handleDelete() {
   if (!check.ok) {
     // Show validation overlay with usages
     const details = (check.usages || []).map(u => `${u.name} (${u.type})`);
-    showWizValidationDialog('Cannot delete data set', check.reason, details);
+    showWizValidationDialog('Cannot delete dataset', check.reason, details);
     return;
   }
-  if (!confirm(`Delete data set "${wizState.name}"? This cannot be undone.`)) return;
+  if (!confirm(`Delete dataset "${wizState.name}"? This cannot be undone.`)) return;
   await removeVariable(wizState.id);
   state.set('activeVariable', null);
   state.set('dataView', 'list');

@@ -1,17 +1,14 @@
 /**
  * Configuration Explorer — Browses configured product attributes from the Solution API.
  *
- * UX pattern mirrors the Object Explorer:
- *   1. Flat list of all nodes (positions/assemblies) — click one to "drill in"
- *   2. Inside a node: flat list of attributes — click to select
- *   3. Breadcrumb bar to navigate back
+ * Hierarchical drill-down navigation per Tacton's getConfigurationAttribute path model:
+ *   1. Start at model level: show model attributes + top-level positions
+ *   2. Click a position → add to path, show its assembly's attributes + sub-positions
+ *   3. Click an attribute → done, path = pos1.pos2.attrName
+ *   4. Breadcrumb bar to navigate back up
  *
- * Patterns generated:
- *   getConfigurationAttribute("node.attrName")                          — raw
- *   getConfigurationAttribute("node.attrName").value                    — direct .value
- *   getConfigurationAttribute("node.attrName").valueDescription         — display value
- *   source!=null ? source.valueDescription : "N/A"                      — null-safe
- *   source.value!=null ? source.valueDescription : "N/A"                — null-safe (.value check)
+ * Path format: position names only — assembly names are NOT part of the path.
+ *   getConfigurationAttribute("pos1.pos2.attrName")
  */
 
 import { el, qs, clear } from '../../core/dom.js';
@@ -27,8 +24,7 @@ let _cpList = null;             // [{ id, displayId, name, summary, solutionName
 let _selectedCpId = null;       // currently loaded CP UUID
 let _productTree = null;        // parsed XML tree { model, bom }
 let _attrIndex = null;          // flat index from indexConfigAttributes()
-let _nodeIndex = null;          // flat list of all navigable nodes
-let _selectedNodeKey = null;    // currently drilled-in node key (null = top-level list)
+let _navStack = [];             // drill-down path: array of position names
 let _searchQuery = '';
 let _searchResults = null;
 let _refreshPipelineCallback = null;
@@ -64,7 +60,7 @@ export async function loadConfigExplorer() {
 
   try {
     // Load CP list if needed
-    if (!_cpList) {
+    if (!_cpList || _cpList.length === 0) {
       _cpList = await getConfiguredProductList();
     }
 
@@ -98,8 +94,7 @@ export async function loadConfigExplorer() {
       _productTree = await fetchConfiguredProductData(_selectedCpId);
       if (_productTree) _productTree._cpId = _selectedCpId;
       _attrIndex = _productTree ? indexConfigAttributes(_productTree) : [];
-      _nodeIndex = _productTree ? buildNodeIndex(_productTree) : [];
-      _selectedNodeKey = null;
+      _navStack = [];
       _searchQuery = '';
       _searchResults = null;
       clear(container);
@@ -127,13 +122,13 @@ export async function loadConfigExplorer() {
  * Returns an array of { cpDisplayId, cpName, solutionName, value, valueDescription }
  * for each CP that has this attribute.
  *
- * @param {string} attrPath — e.g. "nonfire_pump_node-1.pumpSeries"
+ * @param {string} attrPath — e.g. "nonfire_pump_node-1.splitCase_nonFire_assy.pumpWeight"
  * @returns {Promise<Array>}
  */
 export async function resolveConfigAttrAcrossCPs(attrPath) {
   if (!attrPath) return [];
-  if (!_cpList) {
-    try { _cpList = await getConfiguredProductList(); } catch { return []; }
+  if (!_cpList || _cpList.length === 0) {
+    try { _cpList = await getConfiguredProductList(); } catch { _cpList = null; return []; }
   }
   if (!_cpList?.length) return [];
 
@@ -144,6 +139,13 @@ export async function resolveConfigAttrAcrossCPs(attrPath) {
       if (!tree) continue;
       const index = indexConfigAttributes(tree);
       const match = index.find(a => a.path === attrPath);
+      if (!match) {
+        const leafName = attrPath.split('.').pop();
+        const similar = index.filter(a => a.attrName === leafName).map(a => a.path);
+        if (similar.length > 0) {
+          console.warn(`[resolveConfigAttr] Path "${attrPath}" NOT in index. Similar paths:`, similar);
+        }
+      }
       results.push({
         cpDisplayId: cp.displayId || cp.id,
         cpName: (cp.name && cp.name !== cp.displayId) ? cp.name : '',
@@ -177,81 +179,62 @@ export function resetConfigExplorer() {
   _selectedCpId = null;
   _productTree = null;
   _attrIndex = null;
-  _nodeIndex = null;
-  _selectedNodeKey = null;
+  _navStack = [];
   _searchQuery = '';
   _searchResults = null;
 }
 
-// ─── Build flat node index from product tree ───────────────────────
-// Each node = { key, displayName, attrCount, attrs: [{name, value, type, isCalc, fullPath}] }
+// ─── Hierarchical Navigation Helpers ──────────────────────────────
 
-function buildNodeIndex(tree) {
-  if (!tree?.model) return [];
-  const nodes = [];
+/**
+ * Get the attributes and sub-positions for the current navigation level.
+ * At model level (_navStack empty): model attrs + model positions
+ * At position level: position's assembly attrs + assembly sub-positions
+ */
+function getCurrentLevel() {
+  if (!_productTree?.model) return null;
 
-  function addNode(key, displayName, attrs, calcAttrs) {
-    const allAttrs = [];
-    if (attrs?.length) {
-      for (const a of attrs) {
-        allAttrs.push({
-          name: a.name, value: a.value || '', type: a.type || '',
-          isCalc: false, fullPath: `${key}.${a.name}`,
-        });
-      }
-    }
-    if (calcAttrs?.length) {
-      for (const a of calcAttrs) {
-        allAttrs.push({
-          name: a.name, value: a.value || '', type: a.type || '',
-          isCalc: true, fullPath: `${key}.${a.name}`,
-        });
-      }
-    }
-    if (allAttrs.length > 0) {
-      nodes.push({ key, displayName, attrCount: allAttrs.length, attrs: allAttrs });
-    }
+  if (_navStack.length === 0) {
+    // Model level
+    const m = _productTree.model;
+    return {
+      attrs: m.attrs || [],
+      calcAttrs: m.calcAttrs || [],
+      positions: m.positions || [],
+    };
   }
 
-  // Model-level attributes
-  const model = tree.model;
-  const modelKey = model.name || model.id;
-  addNode(modelKey, model.name || 'Model', model.attrs, model.calcAttrs);
-
-  // Walk positions recursively
-  function walkPositions(positions) {
-    if (!positions) return;
-    for (const pos of positions) {
-      const posKey = pos.name || pos.id;
-      const posDisplay = pos.name.replace(/-\d+$/, '');
-
-      // Position-level attributes
-      if (pos.attrs?.length) {
-        addNode(posKey, posDisplay, pos.attrs, null);
-      }
-
-      // Assembly child
-      if (pos.assembly) {
-        const assy = pos.assembly;
-        const assyKey = assy.name || assy.id;
-        const fullAssyKey = `${posKey}.${assyKey}`;
-        addNode(fullAssyKey, posDisplay, assy.attrs, assy.calcAttrs);
-        // Recurse into sub-positions
-        if (assy.positions?.length) walkPositions(assy.positions);
-      }
-
-      // Module/variant child
-      if (pos.module?.variant) {
-        const mod = pos.module;
-        const modKey = mod.name || mod.id;
-        const fullModKey = `${posKey}.${modKey}`;
-        addNode(fullModKey, posDisplay + ' (variant)', mod.variant.attrs, mod.variant.calcAttrs);
-      }
-    }
+  // Navigate to the target position by following _navStack through the tree
+  let positions = _productTree.model.positions || [];
+  let pos = null;
+  for (const name of _navStack) {
+    pos = positions.find(p => (p.name || p.id) === name);
+    if (!pos) return null;
+    // Next level of positions comes from this position's assembly
+    positions = pos.assembly?.positions || [];
   }
 
-  walkPositions(model.positions);
-  return nodes;
+  // Show position's content: assembly attrs + sub-positions + position attrs + module
+  const assy = pos.assembly;
+  return {
+    attrs: [...(pos.attrs || []), ...(assy?.attrs || [])],
+    calcAttrs: assy?.calcAttrs || [],
+    positions: assy?.positions || [],
+    module: pos.module || null,
+  };
+}
+
+/**
+ * Build the getConfigurationAttribute path for an attribute at the current nav level.
+ * Path = position chain + attrName (assembly names are NOT in the path).
+ */
+function buildAttrPath(attrName) {
+  if (_navStack.length === 0) {
+    // Model-level attribute
+    const modelName = _productTree.model.name || _productTree.model.id;
+    return `${modelName}.${attrName}`;
+  }
+  return [..._navStack, attrName].join('.');
 }
 
 // ─── Explorer Rendering ────────────────────────────────────────────
@@ -271,8 +254,7 @@ function renderExplorer(container) {
           _selectedCpId = e.target.value;
           _productTree = null;
           _attrIndex = null;
-          _nodeIndex = null;
-          _selectedNodeKey = null;
+          _navStack = [];
           loadConfigExplorer();
         },
       });
@@ -319,30 +301,53 @@ function renderExplorer(container) {
   // ── Breadcrumb navigation ──
   const modelName = _productTree.model.name || 'Product';
   const bc = el('div', { class: 'obj-path-bar' });
+  const level = getCurrentLevel();
 
-  if (_selectedNodeKey) {
-    // Drilled in: show Model link > Node name
-    const node = _nodeIndex.find(n => n.key === _selectedNodeKey);
+  if (_navStack.length > 0) {
+    // Drilled in: show clickable breadcrumb trail
     bc.appendChild(el('span', {
       class: 'obj-path-link',
-      onclick: () => { _selectedNodeKey = null; rerender(); },
+      onclick: () => { _navStack = []; rerender(); },
     }, modelName));
-    bc.appendChild(el('span', { class: 'obj-path-sep' }, ' › '));
-    bc.appendChild(el('span', { class: 'obj-path-current' }, node ? node.displayName : _selectedNodeKey));
-    if (node) bc.appendChild(el('span', { class: 'obj-path-count' }, `${node.attrCount}`));
+
+    for (let i = 0; i < _navStack.length; i++) {
+      bc.appendChild(el('span', { class: 'obj-path-sep' }, ' › '));
+      const posDisplay = _navStack[i].replace(/-\d+$/, '');
+      if (i < _navStack.length - 1) {
+        // Clickable intermediate crumb
+        const targetDepth = i + 1;
+        bc.appendChild(el('span', {
+          class: 'obj-path-link',
+          onclick: () => { _navStack = _navStack.slice(0, targetDepth); rerender(); },
+        }, posDisplay));
+      } else {
+        // Current level (non-clickable)
+        bc.appendChild(el('span', { class: 'obj-path-current' }, posDisplay));
+      }
+    }
+
+    // Show count of items at current level
+    if (level) {
+      const itemCount = (level.positions?.length || 0) + (level.attrs?.length || 0) + (level.calcAttrs?.length || 0);
+      bc.appendChild(el('span', { class: 'obj-path-count' }, `${itemCount}`));
+    }
   } else {
-    // Top level: model name + total node count
+    // Model level
     bc.appendChild(el('span', { class: 'obj-path-current' }, modelName));
-    bc.appendChild(el('span', { class: 'obj-path-count' }, `${_nodeIndex.length} nodes`));
+    if (level) {
+      bc.appendChild(el('span', { class: 'obj-path-count' }, `${level.positions.length} positions`));
+    }
   }
   container.appendChild(bc);
 
   // ── Tab bar ──
   const currentTab = wizState._configTab || 'all';
-  const totalAttrs = _attrIndex.length;
   const calcCt = _attrIndex.filter(a => a.attrType === 'calculated-attribute').length;
+  const allCount = level
+    ? (level.positions?.length || 0) + (level.attrs?.length || 0) + (level.calcAttrs?.length || 0)
+    : 0;
   const tabs = [
-    { id: 'all',    label: 'All',    count: _selectedNodeKey ? (_nodeIndex.find(n => n.key === _selectedNodeKey)?.attrCount || 0) : _nodeIndex.length },
+    { id: 'all',    label: 'All',    count: allCount },
     { id: 'calc',   label: 'Calc',   count: calcCt },
     { id: 'search', label: 'Search', count: null },
   ];
@@ -366,62 +371,108 @@ function renderExplorer(container) {
   container.appendChild(content);
 }
 
-// ─── All Tab (flat node list or drilled-in attribute list) ─────────
+// ─── All Tab (hierarchical drill-down) ───────────────────────────
 
 function renderAllTab(container) {
-  if (_selectedNodeKey) {
-    // Drilled in → show attributes for this node
-    const node = _nodeIndex.find(n => n.key === _selectedNodeKey);
-    if (!node) {
-      container.appendChild(el('div', { class: 'obj-empty' }, 'Node not found.'));
-      return;
-    }
+  const level = getCurrentLevel();
+  if (!level) {
+    container.appendChild(el('div', { class: 'obj-empty' }, 'Navigation error — could not find this position in the tree.'));
+    return;
+  }
 
-    const regulars = node.attrs.filter(a => !a.isCalc);
-    const calcs = node.attrs.filter(a => a.isCalc);
+  const { attrs, calcAttrs, positions, module } = level;
+  let hasContent = false;
 
-    if (regulars.length > 0) {
-      container.appendChild(groupHeader(`Attributes (${regulars.length})`));
-      for (const attr of regulars) renderAttrRow(container, attr);
-    }
-    if (calcs.length > 0) {
-      container.appendChild(groupHeader(`Calculated (${calcs.length})`));
-      for (const attr of calcs) renderAttrRow(container, attr);
-    }
-  } else {
-    // Top level → flat list of all nodes (like object explorer's refs list)
-    if (_nodeIndex.length === 0) {
-      container.appendChild(el('div', { class: 'obj-empty' }, 'No configuration nodes found.'));
-      return;
-    }
-    for (const node of _nodeIndex) {
-      const isActive = wizState._selectedConfigPath?.startsWith(node.key + '.');
+  // Sub-positions (drillable nodes) — shown first per Sam's model
+  if (positions.length > 0) {
+    hasContent = true;
+    container.appendChild(groupHeader(`Positions (${positions.length})`));
+    for (const pos of positions) {
+      const posName = pos.name || pos.id;
+      const posDisplay = pos.name.replace(/-\d+$/, '');
+      // Count items inside this position
+      const subAttrCt = (pos.assembly?.attrs?.length || 0) + (pos.assembly?.calcAttrs?.length || 0) + (pos.attrs?.length || 0);
+      const subPosCt = pos.assembly?.positions?.length || 0;
+      const countLabel = subPosCt > 0 ? `${subAttrCt} attrs, ${subPosCt} pos` : `${subAttrCt} attrs`;
+
+      // Highlight if selected path goes through this position
+      const pathPrefix = [..._navStack, posName].join('.');
+      const isActive = wizState._selectedConfigPath?.startsWith(pathPrefix + '.') || wizState._selectedConfigPath?.startsWith(pathPrefix);
+
       container.appendChild(el('div', {
         class: `obj-row obj-row-ref ${isActive ? 'obj-row-sel' : ''}`,
-        onclick: () => { _selectedNodeKey = node.key; wizState._configTab = 'all'; rerender(); },
+        onclick: () => { _navStack.push(posName); wizState._configTab = 'all'; rerender(); },
         style: { cursor: 'pointer' },
       }, [
-        el('span', { class: 'obj-row-name' }, node.displayName),
-        el('span', { class: 'obj-row-target' }, `${node.attrCount} attrs`),
+        el('span', { class: 'obj-row-name' }, posDisplay),
+        el('span', { class: 'obj-row-target' }, countLabel),
         el('span', { class: 'obj-row-nav', html: icon('chevron-right', 12) }),
       ]));
     }
   }
-}
 
-// ─── Attribute Row (inside drilled-in node) ─────────────────────────
+  // Regular attributes (selectable — clicking completes the path)
+  if (attrs.length > 0) {
+    hasContent = true;
+    container.appendChild(groupHeader(`Attributes (${attrs.length})`));
+    for (const attr of attrs) {
+      const fullPath = buildAttrPath(attr.name);
+      const isSelected = wizState._selectedConfigPath === fullPath;
+      container.appendChild(el('div', {
+        class: `obj-row ${isSelected ? 'obj-row-sel' : ''}`,
+        onclick: () => selectAttribute({ name: attr.name, value: attr.value, type: attr.type, fullPath, isCalc: false }),
+      }, [
+        el('span', { class: 'obj-row-name' }, attr.name),
+        attr.value ? el('span', { class: 'obj-row-type' }, truncate(attr.value, 25)) : null,
+        attr.type ? el('span', { class: 'obj-row-type', style: { opacity: '0.5' } }, attr.type) : null,
+      ]));
+    }
+  }
 
-function renderAttrRow(container, attr) {
-  const isSelected = wizState._selectedConfigPath === attr.fullPath;
-  container.appendChild(el('div', {
-    class: `obj-row ${isSelected ? 'obj-row-sel' : ''}`,
-    onclick: () => selectAttribute(attr),
-  }, [
-    el('span', { class: 'obj-row-name' }, attr.name),
-    attr.isCalc ? el('span', { class: 'cfg-calc-badge' }, 'calc') : null,
-    attr.value ? el('span', { class: 'obj-row-type' }, truncate(attr.value, 25)) : null,
-    attr.type ? el('span', { class: 'obj-row-type', style: { opacity: '0.5' } }, attr.type) : null,
-  ]));
+  // Calculated attributes
+  if (calcAttrs.length > 0) {
+    hasContent = true;
+    container.appendChild(groupHeader(`Calculated (${calcAttrs.length})`));
+    for (const attr of calcAttrs) {
+      const fullPath = buildAttrPath(attr.name);
+      const isSelected = wizState._selectedConfigPath === fullPath;
+      container.appendChild(el('div', {
+        class: `obj-row ${isSelected ? 'obj-row-sel' : ''}`,
+        onclick: () => selectAttribute({ name: attr.name, value: attr.value, type: attr.type, fullPath, isCalc: true }),
+      }, [
+        el('span', { class: 'obj-row-name' }, attr.name),
+        el('span', { class: 'cfg-calc-badge' }, 'calc'),
+        attr.value ? el('span', { class: 'obj-row-type' }, truncate(attr.value, 25)) : null,
+      ]));
+    }
+  }
+
+  // Module/variant attributes
+  if (module?.variant) {
+    const v = module.variant;
+    const varAttrs = [...(v.attrs || []), ...(v.calcAttrs || [])];
+    if (varAttrs.length > 0) {
+      hasContent = true;
+      container.appendChild(groupHeader(`Variant (${varAttrs.length})`));
+      for (const attr of varAttrs) {
+        const fullPath = buildAttrPath(attr.name);
+        const isCalc = (v.calcAttrs || []).some(ca => ca.name === attr.name);
+        const isSelected = wizState._selectedConfigPath === fullPath;
+        container.appendChild(el('div', {
+          class: `obj-row ${isSelected ? 'obj-row-sel' : ''}`,
+          onclick: () => selectAttribute({ name: attr.name, value: attr.value, type: attr.type, fullPath, isCalc }),
+        }, [
+          el('span', { class: 'obj-row-name' }, attr.name),
+          isCalc ? el('span', { class: 'cfg-calc-badge' }, 'calc') : null,
+          attr.value ? el('span', { class: 'obj-row-type' }, truncate(attr.value, 25)) : null,
+        ]));
+      }
+    }
+  }
+
+  if (!hasContent) {
+    container.appendChild(el('div', { class: 'obj-empty' }, 'No attributes or positions at this level.'));
+  }
 }
 
 // ─── Calc Tab ──────────────────────────────────────────────────────
@@ -517,7 +568,7 @@ function renderSearchResults(container) {
       el('span', { class: 'obj-row-name' }, attr.attrName),
       attr.attrType === 'calculated-attribute' ? el('span', { class: 'cfg-calc-badge' }, 'calc') : null,
       attr.value ? el('span', { class: 'obj-row-type' }, truncate(attr.value, 25)) : null,
-      el('div', { class: 'cfg-attr-path-hint' }, attr.fullNodePath),
+      el('div', { class: 'cfg-attr-path-hint' }, attr.path),
     ]));
   }
 }
@@ -526,7 +577,7 @@ function renderSearchResults(container) {
 
 function selectAttribute(attr) {
   wizState._selectedConfigPath = attr.fullPath;
-  wizState._selectedConfigNodeKey = _selectedNodeKey;
+  wizState._selectedConfigNodeKey = _navStack.join('.');
   wizState._selectedConfigAttr = { name: attr.name, value: attr.value, type: attr.type };
   wizState._selectedConfigIsCalc = attr.isCalc;
   wizState.source = `getConfigurationAttribute("${attr.fullPath}")`;
@@ -569,7 +620,7 @@ function renderManualInput(container) {
     el('input', {
       class: 'input',
       value: wizState.source || '',
-      placeholder: 'getConfigurationAttribute("node.attr")',
+      placeholder: 'getConfigurationAttribute("pos.attr")',
       style: { fontSize: '12px' },
       oninput: (e) => { wizState.source = e.target.value; refreshPipeline(); },
     }),

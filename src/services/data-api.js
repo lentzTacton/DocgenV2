@@ -6,7 +6,7 @@
  */
 
 import state from '../core/state.js';
-import { getModel, listRecords, fetchConfiguredProduct, parseConfiguredProductXml } from './api.js';
+import { getModel, listRecords, fetchConfiguredProduct, parseConfiguredProductXml, ticketFetch } from './api.js';
 import { getInstance } from '../core/storage.js';
 
 // ─── Caches ─────────────────────────────────────────────────────────
@@ -461,11 +461,11 @@ export async function describeObject(objectName) {
 /**
  * Resolve the current object name after walking a path.
  */
-export async function resolveCurrentObject(pathSegments) {
+export async function resolveCurrentObject(pathSegments, rootOverride) {
   const objects = await fetchModel();
-  if (!objects) return getStartingObject();
+  if (!objects) return rootOverride || getStartingObject();
 
-  let current = getStartingObject();
+  let current = rootOverride || getStartingObject();
   for (const seg of pathSegments) {
     const obj = objects.find(o => o.name === current);
     if (!obj) break;
@@ -623,22 +623,161 @@ export async function getConfiguredProductList() {
 
   console.log('[config] Object types:', objects.map(o => o.name).join(', '));
 
-  // Find the ConfiguredProduct object type
+  // ── Strategy 1: Find ConfiguredProduct in the object model ──
   const cpObj = objects.find(o =>
     o.name.toLowerCase().includes('configuredproduct') ||
     o.name.toLowerCase().includes('configured_product')
   );
-  if (!cpObj) {
-    console.warn('[config] No ConfiguredProduct object type found in model');
-    return [];
+
+  let records = [];
+  if (cpObj) {
+    console.log(`[config] Found CP object: ${cpObj.name}, fetching records…`);
+    records = await fetchRecords(cpObj.name);
+    console.log(`[config] ConfiguredProduct records:`, records.length);
+  } else {
+    console.warn('[config] No ConfiguredProduct object type in model — trying Solution.related lookup');
   }
 
-  // Fetch CP records
-  console.log(`[config] Found CP object: ${cpObj.name}, fetching records…`);
-  const records = await fetchRecords(cpObj.name);
-  console.log(`[config] ConfiguredProduct records:`, records.length, records.map(r => ({
-    id: r.id, _uuid: r._uuid, _resourceId: r._resourceId, name: r.name, solution: r.solution,
-  })));
+  // ── Strategy 2 (fallback): Get CPs from Solution records' related references ──
+  if (records.length === 0) {
+    try {
+      const solObj = objects.find(o => o.name === 'Solution');
+      if (solObj) {
+        const solRecords = await fetchRecords('Solution');
+        // Solution records might have a 'configuredProducts' relation or similar
+        for (const sol of solRecords) {
+          // Check all fields for CP-like references
+          for (const [key, value] of Object.entries(sol)) {
+            if (key.toLowerCase().includes('configuredproduct') && value) {
+              // Could be a single ID or comma-separated list
+              const ids = String(value).split(',').map(s => s.trim()).filter(Boolean);
+              for (const cpId of ids) {
+                records.push({
+                  _uuid: cpId,
+                  id: cpId,
+                  name: cpId,
+                  solution: sol._uuid || sol._resourceId || sol.id,
+                });
+              }
+            }
+          }
+        }
+        console.log(`[config] Found ${records.length} CPs from Solution record fields`);
+      }
+    } catch (e) {
+      console.warn('[config] Solution-based CP lookup failed:', e.message);
+    }
+  }
+
+  // ── Strategy 3 (final fallback): Discover CPs via Solution API endpoints ──
+  // The Solution API exposes configured-products either at the ticket level
+  // or nested under individual solutions.
+  if (records.length === 0) {
+    try {
+      const { instanceId, ticketId } = getConnection();
+      const instance = await getInstance(instanceId);
+      if (instance && ticketId) {
+        const apiVersions = ['solution-api-v1.3', 'solution-api', 'solution-api-v1.2'];
+
+        for (const ver of apiVersions) {
+          // 3a: Try listing configured-products at ticket level
+          console.log(`[config] Strategy 3a: trying ${ver}/configured-products …`);
+          const res = await ticketFetch(instance, ticketId, `${ver}/configured-products`);
+          if (res.ok && res.body) {
+            const cpIds = _extractCpIdsFromResponse(res.body);
+            if (cpIds.length > 0) {
+              for (const cpId of cpIds) {
+                records.push({ _uuid: cpId, id: cpId, name: cpId, solution: '' });
+              }
+              console.log(`[config] Found ${records.length} CPs from ${ver}/configured-products`);
+              break;
+            }
+          }
+
+          // 3b: Try listing solutions first, then get CPs from each solution
+          console.log(`[config] Strategy 3b: trying ${ver}/solutions …`);
+          const solRes = await ticketFetch(instance, ticketId, `${ver}/solutions`);
+          if (solRes.ok && solRes.body) {
+            const solIds = _extractIdsFromResponse(solRes.body, 'solution');
+            console.log(`[config] Found ${solIds.length} solutions via ${ver}/solutions`);
+            for (const solId of solIds) {
+              // Try to get CPs for this solution
+              const cpRes = await ticketFetch(instance, ticketId,
+                `${ver}/solutions/${solId}/configured-products`);
+              if (cpRes.ok && cpRes.body) {
+                const cpIds = _extractCpIdsFromResponse(cpRes.body);
+                for (const cpId of cpIds) {
+                  records.push({ _uuid: cpId, id: cpId, name: cpId, solution: solId });
+                }
+              }
+            }
+            if (records.length > 0) {
+              console.log(`[config] Found ${records.length} CPs from solution sub-endpoints`);
+              break;
+            }
+          }
+
+          // 3c: Try fetching solution detail which may embed CP references
+          if (records.length === 0 && solRes.ok && solRes.body) {
+            const solIds = _extractIdsFromResponse(solRes.body, 'solution');
+            for (const solId of solIds) {
+              const detailRes = await ticketFetch(instance, ticketId, `${ver}/solutions/${solId}`);
+              if (detailRes.ok && detailRes.body) {
+                const cpIds = _extractCpIdsFromResponse(detailRes.body);
+                for (const cpId of cpIds) {
+                  records.push({ _uuid: cpId, id: cpId, name: cpId, solution: solId });
+                }
+              }
+            }
+            if (records.length > 0) {
+              console.log(`[config] Found ${records.length} CPs from solution detail responses`);
+              break;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[config] Solution API CP discovery failed:', e.message);
+    }
+  }
+
+  // ── Strategy 4 (last resort): Brute-force — try fetching a known CP ID pattern ──
+  // Some instances embed CP references in the ticket URL or use predictable resource IDs.
+  // We can also try the `api-v2.2` object endpoint if it exposes ConfiguredProduct differently.
+  if (records.length === 0) {
+    try {
+      const { instanceId, ticketId } = getConnection();
+      const instance = await getInstance(instanceId);
+      if (instance && ticketId) {
+        // Try the admin-style object model listing for ConfiguredProduct
+        const cpNames = ['ConfiguredProduct', 'Configured_Product', 'configuredProduct', 'CP'];
+        for (const cpName of cpNames) {
+          try {
+            const recs = await fetchRecords(cpName);
+            if (recs.length > 0) {
+              for (const r of recs) {
+                records.push({
+                  _uuid: r._uuid || r._resourceId || r.id,
+                  id: r.id || r.Id || r._uuid,
+                  name: r.name || r.Name || r.id || r._uuid,
+                  solution: r.solution || r.Solution || '',
+                });
+              }
+              console.log(`[config] Found ${records.length} CPs via fetchRecords('${cpName}')`);
+              break;
+            }
+          } catch { /* continue */ }
+        }
+      }
+    } catch (e) {
+      console.warn('[config] Strategy 4 failed:', e.message);
+    }
+  }
+
+  if (records.length === 0) {
+    console.warn('[config] No configured products found by any strategy');
+    return [];
+  }
 
   // Build a Solution ID → name map so we can label each CP with its parent Solution
   const solMap = {};
@@ -712,38 +851,43 @@ export function indexConfigAttributes(productTree) {
     }
   }
 
-  function walkPositions(positions, parentPath, depth) {
+  // posChain: dot-joined chain of position names built during traversal.
+  // Tacton paths = pos1.pos2.attrName — only position names, assembly names are NOT in the path.
+  // Assemblies are implicit containers accessed via their parent position.
+  function walkPositions(positions, displayPath, depth, posChain) {
     if (!positions) return;
     for (const pos of positions) {
       const posName = pos.name || pos.id;
       const displayName = pos.name.replace(/-\d+$/, '');
-      const posPath = parentPath ? `${parentPath} > ${displayName}` : displayName;
+      const posPath = displayPath ? `${displayPath} > ${displayName}` : displayName;
+
+      // Build position chain: pos1.pos2.pos3...
+      const currentChain = posChain ? `${posChain}.${posName}` : posName;
 
       // Position-level attributes
-      if (pos.attrs?.length) processAttrs(pos.attrs, posName, 'position', depth, posPath, false);
+      if (pos.attrs?.length) processAttrs(pos.attrs, currentChain, 'position', depth, posPath, false);
 
       // Assembly child (recursive)
       if (pos.assembly) {
         const assy = pos.assembly;
-        const assyName = assy.name || assy.id;
-        const assyPath = `${posPath} > ${assy.name}`;
-        if (assy.attrs?.length) processAttrs(assy.attrs, `${posName}.${assyName}`, 'assembly', depth + 1, assyPath, false);
-        if (assy.calcAttrs?.length) processAttrs(assy.calcAttrs, `${posName}.${assyName}`, 'assembly', depth + 1, assyPath, true);
-        // Recurse into sub-positions
-        if (assy.positions?.length) walkPositions(assy.positions, assyPath, depth + 2);
+        const assyPath = `${posPath} > ${assy.name || assy.id}`;
+        // Assembly attributes use position chain — assembly name is NOT in the path
+        if (assy.attrs?.length) processAttrs(assy.attrs, currentChain, 'assembly', depth + 1, assyPath, false);
+        if (assy.calcAttrs?.length) processAttrs(assy.calcAttrs, currentChain, 'assembly', depth + 1, assyPath, true);
+        // Recurse into assembly's sub-positions, carrying the position chain forward
+        if (assy.positions?.length) walkPositions(assy.positions, assyPath, depth + 2, currentChain);
       }
 
       // Module child (leaf with variant)
       if (pos.module) {
         const mod = pos.module;
-        const modName = mod.name || mod.id;
-        const modPath = `${posPath} > ${mod.name}`;
-        // Module may have a variant with attributes
+        const modPath = `${posPath} > ${mod.name || mod.id}`;
         if (mod.variant) {
           const v = mod.variant;
-          const vPath = `${modPath} > ${v.name}`;
-          if (v.attrs?.length) processAttrs(v.attrs, `${posName}.${modName}`, 'variant', depth + 2, vPath, false);
-          if (v.calcAttrs?.length) processAttrs(v.calcAttrs, `${posName}.${modName}`, 'variant', depth + 2, vPath, true);
+          const vPath = `${modPath} > ${v.name || v.id}`;
+          // Variant attributes also use position chain
+          if (v.attrs?.length) processAttrs(v.attrs, currentChain, 'variant', depth + 2, vPath, false);
+          if (v.calcAttrs?.length) processAttrs(v.calcAttrs, currentChain, 'variant', depth + 2, vPath, true);
         }
       }
     }
@@ -754,10 +898,117 @@ export function indexConfigAttributes(productTree) {
   if (m.attrs?.length) processAttrs(m.attrs, m.name || m.id, 'model', 0, m.name, false);
   if (m.calcAttrs?.length) processAttrs(m.calcAttrs, m.name || m.id, 'model', 0, m.name, true);
 
-  // Walk positions
-  walkPositions(m.positions, '', 1);
+  // Walk positions (posChain starts empty — each top-level position becomes its own root)
+  walkPositions(m.positions, '', 1, '');
 
   return index;
+}
+
+// ─── CP Discovery Helpers ──────────────────────────────────────────
+
+/**
+ * Extract configured-product IDs from an API response (JSON or XML).
+ * Handles multiple response formats.
+ */
+function _extractCpIdsFromResponse(body) {
+  const ids = [];
+
+  // Try JSON first
+  try {
+    const data = JSON.parse(body);
+    const items = Array.isArray(data)
+      ? data
+      : data.items || data.configuredProducts || data['configured-products'] || [];
+    for (const item of items) {
+      const id = item.id || item._uuid || item.resourceId || item.reference;
+      if (id) ids.push(id);
+    }
+    if (ids.length > 0) return ids;
+  } catch { /* not JSON */ }
+
+  // Try XML — look for <configured-product>, <configuredProduct>, <resource>, etc.
+  try {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(body, 'application/xml');
+    if (!doc.querySelector('parsererror')) {
+      // Check <configured-product reference="..."> or <configured-product id="...">
+      const cpEls = doc.querySelectorAll(
+        'configured-product, configuredProduct, product-configuration'
+      );
+      for (const el of cpEls) {
+        const id = el.getAttribute('reference') || el.getAttribute('id')
+                || el.getAttribute('resource-id') || el.getAttribute('resourceId');
+        if (id) ids.push(id);
+      }
+      // Also check <resource> or <item> with type containing "configured"
+      if (ids.length === 0) {
+        const resources = doc.querySelectorAll('resource, item, entry');
+        for (const r of resources) {
+          const type = (r.getAttribute('type') || '').toLowerCase();
+          if (type.includes('configured') || type.includes('cp')) {
+            const id = r.getAttribute('id') || r.getAttribute('reference') || r.textContent?.trim();
+            if (id) ids.push(id);
+          }
+        }
+      }
+      // Check for href attributes that contain configured-product IDs
+      if (ids.length === 0) {
+        const links = doc.querySelectorAll('[href*="configured-product"]');
+        for (const link of links) {
+          const href = link.getAttribute('href') || '';
+          const match = href.match(/configured-product\/([a-f0-9-]+)/);
+          if (match) ids.push(match[1]);
+        }
+      }
+    }
+  } catch { /* not XML */ }
+
+  // Last resort: regex scan for UUID-like patterns after "configured-product"
+  if (ids.length === 0) {
+    const regex = /configured-product[\/\s"':=]+([a-f0-9]{32}|[a-f0-9-]{36})/gi;
+    let m;
+    while ((m = regex.exec(body)) !== null) {
+      ids.push(m[1]);
+    }
+  }
+
+  return [...new Set(ids)]; // deduplicate
+}
+
+/**
+ * Extract solution/resource IDs from an API response.
+ */
+function _extractIdsFromResponse(body, resourceType) {
+  const ids = [];
+
+  // Try JSON
+  try {
+    const data = JSON.parse(body);
+    const items = Array.isArray(data)
+      ? data
+      : data.items || data.solutions || data[resourceType + 's'] || [];
+    for (const item of items) {
+      const id = item.id || item._uuid || item.resourceId || item.reference;
+      if (id) ids.push(id);
+    }
+    if (ids.length > 0) return ids;
+  } catch { /* not JSON */ }
+
+  // Try XML
+  try {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(body, 'application/xml');
+    if (!doc.querySelector('parsererror')) {
+      const els = doc.querySelectorAll(`${resourceType}, resource, item, entry`);
+      for (const el of els) {
+        const id = el.getAttribute('id') || el.getAttribute('reference')
+                || el.getAttribute('resource-id');
+        if (id) ids.push(id);
+      }
+    }
+  } catch { /* not XML */ }
+
+  return [...new Set(ids)];
 }
 
 // ─── Starting-Object Instance Helpers ──────────────────────────────

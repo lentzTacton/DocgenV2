@@ -4,7 +4,7 @@
  * Structure:
  *   Data Catalogues (instance / ticket / shared)
  *     └─ Sections (collapsible, named, with description + tags)
- *         └─ Data Sets (cards)
+ *         └─ Datasets (cards)
  *
  * Coverage bar at bottom shows BOM item distribution.
  */
@@ -20,12 +20,16 @@ import {
   assignVariableToSection,
   canDeleteCatalogue, canDeleteSection, canDeleteVariable,
   validateDataSet, getDependents,
+  forceRemoveCatalogue, forceRemoveSection, forceRemoveVariable,
+  countCascadeItems,
 } from '../../services/variables.js';
-import { isConnected, getBomSources, getBomFields, fetchBomRecords, fetchModel } from '../../services/data-api.js';
+// PDF preview moved to Preview tab — import kept for potential future use
+// import { generateCataloguePdf } from './pdf-preview-beta.js';
+import { isConnected, getBomSources, getBomFields, fetchBomRecords, fetchModel, getConfiguredProductList, fetchConfiguredProductData, indexConfigAttributes } from '../../services/data-api.js';
 import {
   exportCatalogue, downloadJson, importCatalogue, readJsonFile,
 } from '../../services/catalogue-io.js';
-import { handleInsertIntoDoc, handleInsertSectionIntoDoc, buildSectionExpression } from '../../services/word-api.js';
+import { handleInsertIntoDoc, handleInsertSectionIntoDoc, buildSectionExpression, buildInsertExpression, buildBlockInsertVariants } from '../../services/word-api.js';
 import { wizState } from './wizard-state.js';
 import { createTagPicker } from '../../components/tag-picker.js';
 
@@ -111,6 +115,10 @@ async function ensureValidationCtx() {
     if (variables.some(v => v.type === 'bom')) {
       loadBomValidationInBackground();
     }
+    // Load config attribute paths if there are single/define variables using getConfigurationAttribute
+    if (variables.some(v => v.source && v.source.includes('getConfigurationAttribute('))) {
+      loadConfigAttrPathsInBackground();
+    }
   } catch (e) { console.warn('[validation] Failed to load context:', e); }
 }
 
@@ -125,6 +133,26 @@ async function loadBomValidationInBackground() {
     validationCtx.bomRecords = records || [];
     rerender();
   } catch (e) { console.warn('[validation] BOM data load failed:', e); }
+}
+
+/** Load config attribute paths in background — validates getConfigurationAttribute() expressions */
+async function loadConfigAttrPathsInBackground() {
+  try {
+    const cpList = await getConfiguredProductList();
+    if (!cpList || cpList.length === 0) return;
+    const allPaths = new Set();
+    for (const cp of cpList) {
+      const tree = await fetchConfiguredProductData(cp.id);
+      if (!tree) continue;
+      const index = indexConfigAttributes(tree);
+      for (const entry of index) {
+        allPaths.add(entry.path);
+      }
+    }
+    validationCtx.configAttrPaths = allPaths;
+    console.log(`[validation] Loaded ${allPaths.size} config attribute paths from ${cpList.length} CPs`);
+    rerender();
+  } catch (e) { console.warn('[validation] Config attr path load failed:', e); }
 }
 
 // Map of variable id → { status, issues }
@@ -159,7 +187,7 @@ document.addEventListener('mouseout', (e) => {
   const target = e.target.closest('[data-val-tip]');
   if (target && _valTip) { _valTip.remove(); _valTip = null; }
 });
-// Dismiss all tooltips on any state navigation (click into data set, back, etc.)
+// Dismiss all tooltips on any state navigation (click into dataset, back, etc.)
 state.on('dataView', dismissAllTooltips);
 state.on('activeVariable', dismissAllTooltips);
 
@@ -210,7 +238,7 @@ export function renderVariableList(container) {
       el('div', { class: 'callout callout-info' }, [
         el('span', { class: 'icon', html: icon('info', 14) }),
         el('div', { class: 'callout-text' },
-          'Complete Setup to enable live BOM data. You can still define data sets now.'
+          'Complete Setup to enable live BOM data. You can still define datasets now.'
         ),
       ])
     );
@@ -237,17 +265,18 @@ export function renderVariableList(container) {
   container.appendChild(renderSearchFilter(allTags));
 
   // ── Catalogues ──
-  if (catalogues.length === 0 && variables.length === 0) {
+  const ownedCats = catalogues.filter(c => !c.readonly);
+  const ownedVars = variables.filter(v => !v.readonly);
+  if (ownedCats.length === 0 && ownedVars.length === 0) {
     container.appendChild(
       el('div', { class: 'data-empty' }, [
-        el('div', { class: 'data-empty-icon', html: icon('database', 36) }),
-        el('div', { class: 'data-empty-text' }, 'No data sets defined yet'),
-        el('div', { style: { fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' } },
-          'Create a data catalogue to organize your data sets, or add a data set directly.'
-        ),
+        el('div', { class: 'data-empty-icon', html: icon('folder', 36) }),
+        el('button', {
+          class: 'sec-add-btn data-empty-add-btn',
+          onclick: () => showNewCatalogueInline(container),
+        }, [el('span', { class: 'icon', html: icon('plus', 12) }), 'Add catalogue']),
       ])
     );
-    return;
   }
 
   // Apply search/tag filters
@@ -401,11 +430,47 @@ function renderCatalogue(catalogue, sections, variables) {
 
   headerChildren.push(rightGroup);
 
-  frag.appendChild(el('div', {
+  const catHeader = el('div', {
     class: `cat-header ${isReadonly ? 'cat-header-readonly' : ''}`,
     onclick: () => { toggleCollapse(catKey); rerender(); },
     style: { cursor: 'pointer' },
-  }, headerChildren));
+  }, headerChildren);
+
+  // Allow dropping datasets onto catalogue header → move as loose variable
+  if (!isReadonly) {
+    catHeader.addEventListener('dragover', (e) => {
+      if (e.dataTransfer.types.includes('application/x-docgen-sec-id')) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      catHeader.classList.add('sec-header-drop-target');
+    });
+    catHeader.addEventListener('dragleave', (e) => {
+      if (!catHeader.contains(e.relatedTarget)) {
+        catHeader.classList.remove('sec-header-drop-target');
+      }
+    });
+    catHeader.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      catHeader.classList.remove('sec-header-drop-target');
+
+      // Handle cookbook drags
+      const cookbookId = e.dataTransfer.getData('application/x-docgen-cookbook-id');
+      if (cookbookId) {
+        const allVars = state.get('variables') || [];
+        const srcVar = allVars.find(v => String(v.id) === cookbookId);
+        if (srcVar) await copyToCatalogue(srcVar, catalogue.id, null);
+        return;
+      }
+
+      // Handle variable drags — move into catalogue as loose (no section)
+      const varIds = _extractDraggedIds(e);
+      if (varIds.length === 0) return;
+      await performMultiDrop(varIds, catalogue.id, null, null);
+    });
+  }
+
+  frag.appendChild(catHeader);
 
   if (collapsed) return frag;
 
@@ -425,14 +490,35 @@ function renderCatalogue(catalogue, sections, variables) {
   // Variables not in any section (directly in catalogue)
   const looseCatVars = variables.filter(v => !v.sectionId);
   if (looseCatVars.length > 0 || !isReadonly) {
-    const cardList = el('div', { class: 'var-card-list' });
+    const cardList = el('div', { class: 'var-card-list cat-loose-vars' });
     looseCatVars.forEach(v => cardList.appendChild(renderVarCard(v, isReadonly)));
     if (!isReadonly) makeDropZone(cardList, catalogue.id, null);
     body.appendChild(cardList);
   }
 
-  // Footer actions (not for readonly)
-  if (!isReadonly) {
+  // Empty-state actions — show when catalogue has no loose vars and no sections
+  const looseCatCount = variables.filter(v => !v.sectionId).length;
+  const isEmpty = sections.length === 0 && looseCatCount === 0;
+  if (!isReadonly && isEmpty) {
+    body.appendChild(
+      el('div', { class: 'cat-empty-actions' }, [
+        el('button', {
+          class: 'sec-add-btn',
+          onclick: () => {
+            wizState.catalogueId = catalogue.id;
+            wizState.sectionId = null;
+            state.set('dataView', 'new');
+          },
+        }, [el('span', { class: 'icon', html: icon('plus', 10) }), 'Add dataset']),
+        el('button', {
+          class: 'sec-add-btn',
+          onclick: () => showNewSectionInline(body, catalogue.id),
+        }, [el('span', { class: 'icon', html: icon('plus', 10) }), 'Add section']),
+      ])
+    );
+  }
+  // Always show "Add section" when catalogue has content but user might want more sections
+  if (!isReadonly && !isEmpty) {
     body.appendChild(
       el('div', { class: 'cat-footer-actions' }, [
         el('button', {
@@ -506,7 +592,7 @@ function renderSection(section, variables, catalogue) {
     // Lock icon for locked sections
     isLocked ? el('span', {
       class: 'sec-lock-icon',
-      title: 'Section is locked — data sets cannot be edited',
+      title: 'Section is locked — datasets cannot be edited',
       html: icon('lock', 10),
     }) : null,
     el('div', { class: 'sec-info' }, [
@@ -525,7 +611,7 @@ function renderSection(section, variables, catalogue) {
   headerChildren.push(
     el('button', {
       class: 'sec-insert-btn',
-      title: `Insert all ${variables.length} data sets into document`,
+      title: `Insert all ${variables.length} datasets into document`,
       onclick: (e) => { e.stopPropagation(); handleInsertSectionIntoDoc(section.name, variables); },
       html: icon('chevronLeft', 10),
     })
@@ -592,7 +678,7 @@ function renderSection(section, variables, catalogue) {
         const names = lockedVars.map(vid => allVars.find(x => String(x.id) === vid)?.name).filter(Boolean);
         showConfirmDialog(
           `Move out of locked section?`,
-          `${names.length} data set${names.length > 1 ? 's are' : ' is'} in a locked section. Moving will remove protection.`,
+          `${names.length} dataset${names.length > 1 ? 's are' : ' is'} in a locked section. Moving will remove protection.`,
           async () => { await performMultiDrop(varIds, section.catalogueId, section.id, null); },
           'Move'
         );
@@ -616,9 +702,9 @@ function renderSection(section, variables, catalogue) {
       wizState.catalogueId = section.catalogueId;
       wizState.sectionId = section.id;
       state.set('dataView', 'new');
-    }}, [el('span', { class: 'icon', html: icon('plus', 10) }), 'Add data set']));
+    }}, [el('span', { class: 'icon', html: icon('plus', 10) }), 'Add dataset']));
   } else if (variables.length === 0) {
-    cardList.appendChild(el('div', { class: 'sec-empty' }, 'No data sets in this section'));
+    cardList.appendChild(el('div', { class: 'sec-empty' }, 'No datasets in this section'));
   }
   frag.appendChild(cardList);
 
@@ -794,13 +880,13 @@ function renderVarCard(variable, isReadonly = false, sectionLocked = false) {
     }));
     // Duplicate
     actionButtons.appendChild(el('button', {
-      class: 'row-action-btn', title: 'Duplicate data set',
+      class: 'row-action-btn', title: 'Duplicate dataset',
       onclick: (e) => { e.stopPropagation(); duplicateVariable(variable); },
       html: icon('copy', 14),
     }));
     // Delete
     actionButtons.appendChild(el('button', {
-      class: 'row-action-btn row-action-danger', title: 'Delete data set',
+      class: 'row-action-btn row-action-danger', title: 'Delete dataset',
       onclick: (e) => { e.stopPropagation(); handleDeleteVariable(variable); },
       html: icon('trash', 14),
     }));
@@ -869,6 +955,23 @@ function renderVarCard(variable, isReadonly = false, sectionLocked = false) {
       el('div', { class: 'var-info' }, [
         el('div', { class: 'var-name' }, [
           variable.name.replace(/^#/, ''),
+          // Parent-child badges (display-only — not part of expression name)
+          // A child block cannot also be a source — child badge takes priority
+          variable.parentBlock
+            ? el('span', {
+                class: 'badge badge-child',
+                title: `Child of ${variable.parentBlock}`,
+              }, 'child')
+            : (() => {
+                const allVars = state.get('variables') || [];
+                const hasChildren = allVars.some(v => v.id !== variable.id && v.parentBlock === variable.name);
+                return hasChildren
+                  ? el('span', {
+                      class: 'badge badge-parent',
+                      title: 'Source block — iterated by child blocks',
+                    }, 'source')
+                  : null;
+              })(),
           isSource
             ? el('span', {
                 class: 'badge badge-source',
@@ -877,6 +980,12 @@ function renderVarCard(variable, isReadonly = false, sectionLocked = false) {
                 el('span', { html: icon('link', 9) }),
                 ' SRC',
               ])
+            : null,
+          variable.placeholder
+            ? el('span', {
+                class: 'badge badge-placeholder',
+                title: 'Empty define — placeholder awaiting expression',
+              }, 'empty')
             : null,
         ]),
         el('div', { class: 'var-meta' }, [
@@ -891,15 +1000,19 @@ function renderVarCard(variable, isReadonly = false, sectionLocked = false) {
       actionButtons,
     ]),
     // Expression preview row — background tinted by validation status
-    variable.expression
-      ? el('div', { class: `var-expr ${exprStatusClass}${showExpr ? ' var-expr-visible' : ''}`, title: variable.expression }, [
-          el('span', { class: 'var-expr-text' }, variable.expression),
-          // Show warning/error icon with hover tooltip when not valid
-          valResult && valResult.status !== 'valid'
-            ? makeExprIssueIcon(valResult)
-            : null,
-        ])
-      : null,
+    // For blocks: show "#name in source" (the $for pattern), not just the raw source
+    (() => {
+      if (!variable.expression) return null;
+      const displayExpr = variable.purpose === 'block'
+        ? `${variable.name} in ${variable.expression}`
+        : variable.expression;
+      return el('div', { class: `var-expr ${exprStatusClass}${showExpr ? ' var-expr-visible' : ''}`, title: displayExpr }, [
+        el('span', { class: 'var-expr-text' }, displayExpr),
+        valResult && valResult.status !== 'valid'
+          ? makeExprIssueIcon(valResult)
+          : null,
+      ]);
+    })(),
     // Stats row
     statsChildren.length > 0
       ? el('div', { class: 'var-stats' }, statsChildren)
@@ -925,7 +1038,13 @@ function renderVarCard(variable, isReadonly = false, sectionLocked = false) {
       e.dataTransfer.effectAllowed = 'copyMove';
     }
     // Expression text for Word drops (external targets)
-    e.dataTransfer.setData('text/plain', variable.expression || variable.name);
+    // Blocks: raw format "#name in source", others: full expression
+    if (variable.purpose === 'block') {
+      const variants = buildBlockInsertVariants(variable);
+      e.dataTransfer.setData('text/plain', variants.rawExpr);
+    } else {
+      e.dataTransfer.setData('text/plain', buildInsertExpression(variable));
+    }
     card.classList.add('var-card-dragging');
     // Multi-drag: dim all selected cards and show count badge as drag image
     if (selectedVarIds.size > 1 && selectedVarIds.has(varIdStr)) {
@@ -936,7 +1055,7 @@ function renderVarCard(variable, isReadonly = false, sectionLocked = false) {
       // Custom drag image with count
       const ghost = document.createElement('div');
       ghost.style.cssText = 'position:fixed;top:-100px;left:-100px;background:var(--tacton-blue,#0A6DC2);color:#fff;padding:4px 10px;border-radius:12px;font-size:12px;font-weight:700;white-space:nowrap;pointer-events:none;z-index:99999';
-      ghost.textContent = `${selectedVarIds.size} data sets`;
+      ghost.textContent = `${selectedVarIds.size} datasets`;
       document.body.appendChild(ghost);
       e.dataTransfer.setDragImage(ghost, 40, 14);
       requestAnimationFrame(() => ghost.remove());
@@ -958,7 +1077,20 @@ function showNewCatalogueInline(container) {
   const existing = qs('#cat-inline-form');
   if (existing) existing.remove();
 
+  // Hide the empty-state placeholder while form is open
+  const emptyState = container.querySelector('.data-empty');
+  if (emptyState) emptyState.style.display = 'none';
+
   const form = el('div', { class: 'cat-inline-form', id: 'cat-inline-form' });
+
+  // Restore empty state when form is removed (cancel / create / escape)
+  const obs = new MutationObserver(() => {
+    if (!form.parentNode) {
+      obs.disconnect();
+      if (emptyState && emptyState.parentNode) emptyState.style.display = '';
+    }
+  });
+  obs.observe(container, { childList: true });
 
   const nameInput = el('input', {
     class: 'input', placeholder: 'Catalogue name',
@@ -1112,8 +1244,8 @@ function showNewSectionInline(body, catalogueId) {
 
 /**
  * Show export dialog with scope options:
- *   - All data sets (all user catalogues)
- *   - Selected data sets (multi-select)
+ *   - All datasets (all user catalogues)
+ *   - Selected datasets (multi-select)
  *   - Per catalogue
  */
 function showDataExportDialog(catalogues, variables, sections) {
@@ -1129,15 +1261,15 @@ function showDataExportDialog(catalogues, variables, sections) {
   // (1) All user catalogues
   scopeOptions.push({
     key: 'all',
-    label: `All data sets (${variables.length})`,
+    label: `All datasets (${variables.length})`,
     checked: !hasSelection,
   });
 
-  // (2) Selected data sets (only if multi-select active)
+  // (2) Selected datasets (only if multi-select active)
   if (hasSelection) {
     scopeOptions.push({
       key: 'selected',
-      label: `Selected data sets (${selectedVarIds.size})`,
+      label: `Selected datasets (${selectedVarIds.size})`,
       checked: true,
     });
   }
@@ -1267,7 +1399,7 @@ function triggerImport() {
       const data = await readJsonFile(input.files[0]);
       const results = await importCatalogue(data);
       const total = results.reduce((s, r) => s + r.variableCount, 0);
-      alert(`Imported ${results.length} catalogue(s) with ${total} data set(s).`);
+      alert(`Imported ${results.length} catalogue(s) with ${total} dataset(s).`);
     } catch (e) {
       alert('Import failed: ' + e.message);
     }
@@ -1285,7 +1417,7 @@ function showCatalogueMenu(catalogue, anchor) {
   const isReadonly = !!catalogue.readonly;
 
   if (!isReadonly) {
-    menu.appendChild(menuItem('plus', 'New data set', () => {
+    menu.appendChild(menuItem('plus', 'New dataset', () => {
       dismissMenus();
       wizState.catalogueId = catalogue.id;
       state.set('dataView', 'new');
@@ -1314,7 +1446,12 @@ function showCatalogueMenu(catalogue, anchor) {
       dismissMenus();
       const check = canDeleteCatalogue(catalogue.id);
       if (!check.ok) {
-        showValidationDialog('Cannot delete catalogue', check.reason, check.details);
+        const counts = countCascadeItems('catalogue', catalogue.id);
+        showForceDeleteDialog(
+          'catalogue', catalogue.name, counts,
+          check.details,
+          () => forceRemoveCatalogue(catalogue.id),
+        );
         return;
       }
       showConfirmDialog(`Delete catalogue "${catalogue.name}"?`, 'This cannot be undone.', () => {
@@ -1333,9 +1470,9 @@ function showSectionMenu(section, catalogue, anchor) {
   const menu = el('div', { class: 'ctx-menu', id: 'ctx-menu' });
   const isLocked = !!section.locked;
 
-  // New data set — pre-target this section + catalogue
+  // New dataset — pre-target this section + catalogue
   if (!isLocked && !catalogue.readonly) {
-    menu.appendChild(menuItem('plus', 'New data set', () => {
+    menu.appendChild(menuItem('plus', 'New dataset', () => {
       dismissMenus();
       wizState.catalogueId = catalogue.id;
       wizState.sectionId = section.id;
@@ -1383,7 +1520,12 @@ function showSectionMenu(section, catalogue, anchor) {
       dismissMenus();
       const check = canDeleteSection(section.id);
       if (!check.ok) {
-        showValidationDialog('Cannot delete section', check.reason, check.details);
+        const counts = countCascadeItems('section', section.id);
+        showForceDeleteDialog(
+          'section', section.name, counts,
+          check.details,
+          () => forceRemoveSection(section.id),
+        );
         return;
       }
       showConfirmDialog(`Delete section "${section.name}"?`, 'This cannot be undone.', () => {
@@ -1423,10 +1565,15 @@ function handleDeleteVariable(variable) {
   const check = canDeleteVariable(variable.id);
   if (!check.ok) {
     const details = (check.usages || []).map(u => `${u.name} (${u.type})`);
-    showValidationDialog('Cannot delete data set', check.reason, details);
+    showForceDeleteDialog(
+      'dataset', variable.name,
+      { sections: 0, variables: details.length },
+      details,
+      () => forceRemoveVariable(variable.id),
+    );
     return;
   }
-  showConfirmDialog(`Delete data set "${variable.name}"?`, 'This cannot be undone.', () => {
+  showConfirmDialog(`Delete dataset "${variable.name}"?`, 'This cannot be undone.', () => {
     removeVariable(variable.id);
   });
 }
@@ -1458,7 +1605,7 @@ function showMoveMenu(variable, anchor) {
   const sections = state.get('sections') || [];
 
   if (catalogues.length === 0) {
-    alert('Create a data catalogue first to move data sets into it.');
+    alert('Create a data catalogue first to move datasets into it.');
     return;
   }
 
@@ -1561,7 +1708,7 @@ function makeDropZone(container, catalogueId, sectionId) {
       const names = lockedVars.map(vid => allVars.find(x => String(x.id) === vid)?.name).filter(Boolean);
       showConfirmDialog(
         `Move out of locked section?`,
-        `${names.length} data set${names.length > 1 ? 's are' : ' is'} in a locked section. Moving will remove protection.`,
+        `${names.length} dataset${names.length > 1 ? 's are' : ' is'} in a locked section. Moving will remove protection.`,
         async () => { await performMultiDrop(varIds, catalogueId, sectionId, container); },
         'Move'
       );
@@ -1755,6 +1902,222 @@ function showValidationDialog(title, reason, details) {
   );
 
   document.body.appendChild(overlay);
+}
+
+// ─── Force-delete: Step 1 (validation + Force delete button) ────────────
+// ─── Force-delete: Step 2 (type DELETE to confirm) ──────────────────────
+
+/**
+ * Step 1: Show what's blocking the delete, with OK to dismiss
+ * and a red "Force delete" button that opens the type-DELETE confirmation.
+ */
+function showForceDeleteDialog(level, name, counts, details, onConfirm) {
+  const existing = document.getElementById('val-dialog-overlay');
+  if (existing) existing.remove();
+
+  const overlay = el('div', {
+    id: 'val-dialog-overlay',
+    style: {
+      position: 'fixed', inset: '0', background: 'rgba(0,0,0,.35)',
+      zIndex: '9999', display: 'flex', alignItems: 'center', justifyContent: 'center',
+    },
+    onclick: (e) => { if (e.target === overlay) overlay.remove(); },
+  });
+
+  // Build a title like "Cannot delete catalogue"
+  const title = `Cannot delete ${level}`;
+  const reason = level === 'dataset'
+    ? 'This item is referenced by other definitions. Remove those references first, or force delete.'
+    : `Cannot delete a ${level} that still contains items. Remove or move them first, or force delete.`;
+
+  const children = [
+    el('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' } }, [
+      el('span', { class: 'icon', style: { color: 'var(--danger, #CF222E)' }, html: icon('info', 18) }),
+      el('div', { style: { fontWeight: '700', fontSize: '13px' } }, title),
+    ]),
+    el('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '10px', lineHeight: '1.5' } }, reason),
+  ];
+
+  if (details && details.length > 0) {
+    const detailList = el('div', {
+      style: {
+        fontSize: '11px', color: 'var(--text-tertiary)', background: 'var(--bg)',
+        border: '1px solid var(--border-light)', borderRadius: 'var(--radius)',
+        padding: '8px 10px', marginBottom: '10px', maxHeight: '120px', overflowY: 'auto',
+      },
+    });
+    details.forEach(d => {
+      detailList.appendChild(el('div', { style: { marginBottom: '3px' } }, `• ${d}`));
+    });
+    children.push(detailList);
+  }
+
+  children.push(
+    el('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: '6px' } }, [
+      el('button', {
+        class: 'btn btn-primary btn-sm',
+        onclick: () => overlay.remove(),
+      }, 'OK'),
+      el('button', {
+        class: 'btn btn-sm',
+        style: { background: '#CF222E', color: '#fff', border: 'none', fontWeight: '600' },
+        onclick: () => {
+          overlay.remove();
+          showForceDeleteConfirm(level, name, counts, details, onConfirm);
+        },
+      }, 'Force delete'),
+    ])
+  );
+
+  overlay.appendChild(
+    el('div', {
+      style: {
+        background: 'var(--card, #fff)', border: '1px solid var(--border)',
+        borderRadius: '8px', padding: '16px 18px', maxWidth: '360px', width: '90%',
+        boxShadow: '0 8px 24px rgba(0,0,0,.18)',
+      },
+    }, children)
+  );
+
+  document.body.appendChild(overlay);
+}
+
+/**
+ * Step 2: Type DELETE to confirm — only shown after clicking "Force delete" in step 1.
+ */
+function showForceDeleteConfirm(level, name, counts, details, onConfirm) {
+  const existing = document.getElementById('force-del-overlay');
+  if (existing) existing.remove();
+
+  const overlay = el('div', {
+    id: 'force-del-overlay',
+    style: {
+      position: 'fixed', inset: '0', background: 'rgba(0,0,0,.45)',
+      zIndex: '9999', display: 'flex', alignItems: 'center', justifyContent: 'center',
+    },
+    onclick: (e) => { if (e.target === overlay) overlay.remove(); },
+  });
+
+  // Build summary of what gets destroyed
+  const summaryParts = [];
+  if (counts.sections > 0) summaryParts.push(`${counts.sections} section${counts.sections !== 1 ? 's' : ''}`);
+  if (counts.variables > 0) summaryParts.push(`${counts.variables} dataset${counts.variables !== 1 ? 's' : ''}`);
+  const summaryText = summaryParts.length > 0
+    ? `This will permanently delete ${summaryParts.join(' and ')} inside this ${level}.`
+    : `This will permanently delete the ${level}.`;
+
+  // Delete button — starts disabled
+  const deleteBtn = el('button', {
+    class: 'btn btn-sm',
+    disabled: true,
+    style: {
+      background: '#999', color: '#fff', border: 'none',
+      fontWeight: '700', cursor: 'not-allowed', transition: 'background .15s',
+    },
+    onclick: () => { overlay.remove(); onConfirm(); },
+  }, 'Force delete');
+
+  // Text input
+  const input = el('input', {
+    type: 'text',
+    placeholder: 'Type DELETE to confirm',
+    autocomplete: 'off',
+    spellcheck: 'false',
+    style: {
+      width: '100%', padding: '7px 10px', fontSize: '12px',
+      border: '2px solid var(--border)', borderRadius: '4px',
+      outline: 'none', boxSizing: 'border-box',
+      fontFamily: 'monospace',
+    },
+    oninput: () => {
+      const match = input.value.trim() === 'DELETE';
+      deleteBtn.disabled = !match;
+      deleteBtn.style.background = match ? '#CF222E' : '#999';
+      deleteBtn.style.cursor = match ? 'pointer' : 'not-allowed';
+      input.style.borderColor = match ? '#CF222E' : 'var(--border)';
+    },
+    onkeydown: (e) => {
+      if (e.key === 'Enter' && input.value.trim() === 'DELETE') {
+        overlay.remove();
+        onConfirm();
+      }
+    },
+  });
+
+  const children = [
+    // Header with warning icon
+    el('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' } }, [
+      el('span', { class: 'icon', style: { color: '#CF222E' }, html: icon('warning', 18) }),
+      el('div', { style: { fontWeight: '700', fontSize: '14px', color: '#CF222E' } },
+        `Force delete ${level}`),
+    ]),
+    // Name
+    el('div', {
+      style: {
+        fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px',
+        padding: '6px 8px', background: 'var(--bg)', borderRadius: '4px',
+        fontWeight: '600', wordBreak: 'break-all',
+      },
+    }, name),
+    // Summary
+    el('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px', lineHeight: '1.5' } },
+      summaryText),
+  ];
+
+  // Detail list
+  if (details && details.length > 0) {
+    const detailList = el('div', {
+      style: {
+        fontSize: '11px', color: '#CF222E', background: '#FFF5F5',
+        border: '1px solid #FECACA', borderRadius: 'var(--radius)',
+        padding: '8px 10px', marginBottom: '10px', maxHeight: '120px', overflowY: 'auto',
+      },
+    });
+    details.forEach(d => {
+      detailList.appendChild(el('div', { style: { marginBottom: '3px' } }, `• ${d}`));
+    });
+    children.push(detailList);
+  }
+
+  // Warning text
+  children.push(
+    el('div', {
+      style: { fontSize: '11px', color: '#CF222E', fontWeight: '600', marginBottom: '8px' },
+    }, 'This action cannot be undone. All data will be permanently removed.')
+  );
+
+  // Type DELETE input
+  children.push(
+    el('div', { style: { marginBottom: '12px' } }, [
+      el('div', { style: { fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '4px' } },
+        'Type DELETE to confirm:'),
+      input,
+    ])
+  );
+
+  // Buttons
+  children.push(
+    el('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: '6px' } }, [
+      el('button', {
+        class: 'btn btn-outline btn-sm',
+        onclick: () => overlay.remove(),
+      }, 'Cancel'),
+      deleteBtn,
+    ])
+  );
+
+  overlay.appendChild(
+    el('div', {
+      style: {
+        background: 'var(--card, #fff)', border: '1px solid #FECACA',
+        borderRadius: '8px', padding: '16px 18px', maxWidth: '380px', width: '90%',
+        boxShadow: '0 8px 24px rgba(0,0,0,.22)',
+      },
+    }, children)
+  );
+
+  document.body.appendChild(overlay);
+  setTimeout(() => input.focus(), 50);
 }
 
 // ─── Inline editing (replaces prompt()) ─────────────────────────────────
@@ -1969,7 +2332,7 @@ function renderSearchFilter(allTags) {
   const input = el('input', {
     type: 'text',
     class: 'data-search-input',
-    placeholder: 'Search data sets, catalogues\u2026',
+    placeholder: 'Search datasets, catalogues\u2026',
     value: searchQuery,
   });
   input.addEventListener('input', (e) => {

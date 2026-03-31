@@ -26,6 +26,8 @@ export const wizState = {
   instanceLabel: null,
   instanceSolution: null,
   catchAll: false,
+  placeholder: false,
+  // loopVarName removed — the child block's own name (with #) IS the loop variable
   excludeVars: [],
   catalogueId: null,
   sectionId: null,
@@ -37,9 +39,15 @@ export const wizState = {
   sourceDefine: '',           // name of the referenced define (e.g. '#headUomV')
   sourceDefineSource: '',     // the original source of the referenced define (for two-define generation)
 
+  // Parent-child block state (for loop iteration context)
+  parentBlock: '',            // name of the parent block variable (e.g. '#listOfAlternativeToPrimary')
+  parentLoopVar: '',          // the loop variable name (e.g. '#currentAlternative')
+  parentObjectType: '',       // resolved object type of the loop variable (e.g. 'ConfiguredProduct')
+
   // Object explorer state
   objectPath: [],      // [{name, refType, reverse?, fromObject?}]
   explorerTab: 'all',  // 'all' | 'fav' | 'ref'
+  explorerSearch: '',   // search/filter text for object explorer
   explorerFavs: new Set(),
   currentObjDesc: null, // result of describeObject()
 
@@ -72,7 +80,7 @@ export const wizState = {
  * @param {Object} existing - existing variable to edit, or null for new
  */
 export function resetWiz(existing) {
-  // Preserve pre-set catalogueId and sectionId (set by "New data set" menu)
+  // Preserve pre-set catalogueId and sectionId (set by "New dataset" menu)
   const presetCatalogueId = wizState.catalogueId;
   const presetSectionId = wizState.sectionId;
 
@@ -95,6 +103,7 @@ export function resetWiz(existing) {
     wizState.instanceLabel = copy.instanceLabel ?? null;
     wizState.instanceSolution = copy.instanceSolution ?? null;
     wizState.catchAll = copy.catchAll || false;
+    wizState.placeholder = copy.placeholder || false;
     wizState.excludeVars = copy.excludeVars || [];
     wizState.catalogueId = copy.catalogueId ?? null;
     wizState.sectionId = copy.sectionId ?? null;
@@ -104,9 +113,46 @@ export function resetWiz(existing) {
     wizState.previewColumns = copy.previewColumns || [];
     wizState.sourceDefine = copy.sourceDefine || '';
     wizState.sourceDefineSource = copy.sourceDefineSource || '';
+    wizState.parentBlock = copy.parentBlock || '';
+    wizState.parentLoopVar = copy.parentLoopVar || '';
+    wizState.parentObjectType = copy.parentObjectType || '';
     wizState._singleFilter = copy._singleFilter || null;
     wizState._singleLeafField = copy._singleLeafField || null;
     wizState.id = copy.id;
+
+    // Auto-detect placeholder from source if not explicitly saved
+    // (backward compat: older variables may have .{?false} in source but no placeholder flag)
+    if (!wizState.placeholder && wizState.source && wizState.source.includes('.{?false}')) {
+      wizState.placeholder = true;
+      // Strip .{?false} from source so the object path explorer works correctly
+      wizState.source = wizState.source.replace(/\.\{\?false\}$/, '');
+      wizState.filters = [];
+      wizState.transforms = [];
+    }
+
+    // Auto-detect config type: if a 'single' variable uses getConfigurationAttribute,
+    // switch to 'config' type so the Config Explorer loads directly on edit.
+    if (wizState.type === 'single' && wizState.source && wizState.source.includes('getConfigurationAttribute(')) {
+      wizState.type = 'config';
+      wizState._singleSourceMode = 'config';
+    }
+
+    // Auto-detect parent-child block relationship from source
+    // If source starts with #loopVar. (e.g. #currentAlternative.flatbom), link to parent
+    if (!wizState.parentLoopVar && wizState.source) {
+      const loopVarMatch = wizState.source.match(/^(#\w+)\./);
+      if (loopVarMatch) {
+        const loopVarName = loopVarMatch[1];
+        // Find the for-loop that uses this variable — look for a block whose source
+        // is iterated by a $for{loopVarName in parentBlock}$ construct.
+        // We can infer this from existing variables: find one where the expression
+        // would produce this loop variable. For now, store the loop var and resolve
+        // the parent block & object type later when the model is loaded.
+        wizState.parentLoopVar = loopVarName;
+        // Strip the loop var prefix from source for the explorer
+        wizState.source = wizState.source.slice(loopVarName.length + 1); // strip "#var."
+      }
+    }
   } else {
     // New variable defaults
     wizState.purpose = 'block';
@@ -122,6 +168,7 @@ export function resetWiz(existing) {
     wizState.instanceLabel = null;
     wizState.instanceSolution = null;
     wizState.catchAll = false;
+    wizState.placeholder = false;
     wizState.excludeVars = [];
     wizState.catalogueId = presetCatalogueId || null;
     wizState.sectionId = presetSectionId || null;
@@ -131,6 +178,9 @@ export function resetWiz(existing) {
     wizState.previewColumns = [];
     wizState.sourceDefine = '';
     wizState.sourceDefineSource = '';
+    wizState.parentBlock = '';
+    wizState.parentLoopVar = '';
+    wizState.parentObjectType = '';
     wizState.id = null;
   }
 
@@ -144,6 +194,7 @@ export function resetWiz(existing) {
   // Reset object explorer state (objectPath rebuilt later by rebuildObjectPath)
   wizState.objectPath = [];
   wizState.explorerTab = 'all';
+  wizState.explorerSearch = '';
   wizState.explorerFavs = new Set();
   wizState.currentObjDesc = null;
 
@@ -221,15 +272,19 @@ export function rebuildObjectPath(modelObjects) {
   if (wizState.type !== 'object' && wizState.type !== 'single') return;
   if (wizState._singleSourceMode === 'config') return;
 
-  const startObj = state.get('startingObject.type') || 'Solution';
+  // Use parent object type as root when in child block context
+  const startObj = wizState.parentObjectType || state.get('startingObject.type') || 'Solution';
   const root = startObj.charAt(0).toLowerCase() + startObj.slice(1);
   const source = wizState.source;
 
-  if (!source.startsWith(root)) return;
+  // For child blocks, source is relative to parent type (e.g. 'flatbom' not 'configuredProduct.flatbom')
+  // Skip the root prefix check if in parent context — source starts directly with attributes
+  if (!wizState.parentObjectType && !source.startsWith(root)) return;
 
   // Tokenise: split on dots but keep .related('X','Y') as single tokens
   const tokens = [];
-  let rest = source.slice(root.length); // strip root prefix
+  // For child blocks, source is relative — don't strip root prefix
+  let rest = wizState.parentObjectType ? (source.startsWith('.') ? source : '.' + source) : source.slice(root.length);
   while (rest.length > 0) {
     if (rest.startsWith('.related(')) {
       // Parse .related('FromObject','attribute')
@@ -307,6 +362,7 @@ export function getWizSnapshot() {
     instanceLabel: wizState.instanceLabel,
     instanceSolution: wizState.instanceSolution,
     catchAll: wizState.catchAll,
+    placeholder: wizState.placeholder,
     excludeVars: wizState.excludeVars,
     catalogueId: wizState.catalogueId,
     sectionId: wizState.sectionId,
@@ -316,6 +372,9 @@ export function getWizSnapshot() {
     previewColumns: wizState.previewColumns || [],
     sourceDefine: wizState.sourceDefine || '',
     sourceDefineSource: wizState.sourceDefineSource || '',
+    parentBlock: wizState.parentBlock || '',
+    parentLoopVar: wizState.parentLoopVar || '',
+    parentObjectType: wizState.parentObjectType || '',
     _singleFilter: wizState._singleFilter || null,
     _singleLeafField: wizState._singleLeafField || null,
   };

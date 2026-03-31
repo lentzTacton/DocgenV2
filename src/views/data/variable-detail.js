@@ -402,7 +402,7 @@ async function handleSave() {
 }
 
 async function handleDelete() {
-  if (!confirm(`Delete data set "${edit.name}"?`)) return;
+  if (!confirm(`Delete dataset "${edit.name}"?`)) return;
   await removeVariable(edit.id);
   state.set('activeVariable', null);
   state.set('dataView', 'list');
