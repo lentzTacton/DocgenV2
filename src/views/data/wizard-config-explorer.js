@@ -1,11 +1,19 @@
 /**
  * Configuration Explorer — Browses configured product attributes from the Solution API.
  *
- * Hierarchical drill-down navigation per Tacton's getConfigurationAttribute path model:
+ * Hierarchical drill-down navigation per Sam's / Tacton's getConfigurationAttribute path model:
  *   1. Start at model level: show model attributes + top-level positions
- *   2. Click a position → add to path, show its assembly's attributes + sub-positions
+ *   2. Click a position → add to path, show its ASSEMBLY's attributes + assembly sub-positions
+ *      (position-level attributes are NOT shown — only the assembly's attrs and sub-positions)
  *   3. Click an attribute → done, path = pos1.pos2.attrName
  *   4. Breadcrumb bar to navigate back up
+ *
+ * Tabs:
+ *   - All:        Everything at current drill level (positions + attrs + calc)
+ *   - Nodes:      Flat outline of all tree nodes (positions/assemblies) grouped by depth
+ *   - Attributes: Only regular attributes at current drill level
+ *   - Positions:  Only drillable positions at current drill level
+ *   - Calculated: Flat list of all calculated attributes across the tree
  *
  * Path format: position names only — assembly names are NOT part of the path.
  *   getConfigurationAttribute("pos1.pos2.attrName")
@@ -25,8 +33,7 @@ let _selectedCpId = null;       // currently loaded CP UUID
 let _productTree = null;        // parsed XML tree { model, bom }
 let _attrIndex = null;          // flat index from indexConfigAttributes()
 let _navStack = [];             // drill-down path: array of position names
-let _searchQuery = '';
-let _searchResults = null;
+let _searchQuery = '';          // inline search filter
 let _refreshPipelineCallback = null;
 
 // ─── Public API ────────────────────────────────────────────────────
@@ -59,7 +66,6 @@ export async function loadConfigExplorer() {
   container.appendChild(el('div', { class: 'obj-empty', style: { color: 'var(--text-tertiary)' } }, 'Loading configured products...'));
 
   try {
-    // Load CP list if needed
     if (!_cpList || _cpList.length === 0) {
       _cpList = await getConfiguredProductList();
     }
@@ -75,7 +81,6 @@ export async function loadConfigExplorer() {
       return;
     }
 
-    // Auto-select first CP if none selected
     if (!_selectedCpId) {
       _selectedCpId = _cpList[0].id;
     }
@@ -96,7 +101,6 @@ export async function loadConfigExplorer() {
       _attrIndex = _productTree ? indexConfigAttributes(_productTree) : [];
       _navStack = [];
       _searchQuery = '';
-      _searchResults = null;
       clear(container);
     }
 
@@ -108,7 +112,15 @@ export async function loadConfigExplorer() {
       return;
     }
 
+    // Auto-navigate to selected attribute in edit mode
+    if (wizState._selectedConfigPath && _navStack.length === 0) {
+      autoNavigateToPath(wizState._selectedConfigPath);
+    }
+
     renderExplorer(container);
+
+    // Scroll selected attribute into center of view
+    scrollSelectedIntoView();
   } catch (err) {
     clear(container);
     console.error('[config-explorer] Error:', err);
@@ -118,12 +130,47 @@ export async function loadConfigExplorer() {
 }
 
 /**
+ * Auto-navigate _navStack to show the level containing the selected attribute.
+ * For path "pos1.pos2.attrName", sets _navStack = ['pos1', 'pos2'] so the explorer
+ * renders at the level where "attrName" is visible and highlighted.
+ */
+function autoNavigateToPath(selectedPath) {
+  if (!selectedPath || !_productTree?.model) return;
+
+  const segments = selectedPath.split('.');
+  if (segments.length < 2) return; // model-level attr, no navigation needed
+
+  // The last segment is the attribute name; everything before is the position chain
+  const posSegments = segments.slice(0, -1);
+
+  // Verify the position chain is valid by walking the tree
+  let positions = _productTree.model.positions || [];
+  const validChain = [];
+
+  for (const posName of posSegments) {
+    const pos = positions.find(p => (p.name || p.id) === posName);
+    if (!pos) break;
+    validChain.push(posName);
+    positions = pos.assembly?.positions || [];
+  }
+
+  _navStack = validChain;
+}
+
+/**
+ * After rendering, scroll the selected attribute row to the center of the scrollable content.
+ */
+function scrollSelectedIntoView() {
+  requestAnimationFrame(() => {
+    const selected = document.querySelector('#wiz-obj-section .obj-row-sel');
+    if (selected) {
+      selected.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  });
+}
+
+/**
  * Resolve a config attribute path across all configured products.
- * Returns an array of { cpDisplayId, cpName, solutionName, value, valueDescription }
- * for each CP that has this attribute.
- *
- * @param {string} attrPath — e.g. "nonfire_pump_node-1.splitCase_nonFire_assy.pumpWeight"
- * @returns {Promise<Array>}
  */
 export async function resolveConfigAttrAcrossCPs(attrPath) {
   if (!attrPath) return [];
@@ -181,21 +228,22 @@ export function resetConfigExplorer() {
   _attrIndex = null;
   _navStack = [];
   _searchQuery = '';
-  _searchResults = null;
 }
 
 // ─── Hierarchical Navigation Helpers ──────────────────────────────
 
 /**
  * Get the attributes and sub-positions for the current navigation level.
- * At model level (_navStack empty): model attrs + model positions
- * At position level: position's assembly attrs + assembly sub-positions
+ *
+ * Per Sam's model:
+ *   - Model level (_navStack empty): model attrs + model positions
+ *   - Position level: position's ASSEMBLY attrs + assembly sub-positions
+ *     (position-level attrs are NOT shown — only what's inside the assembly)
  */
 function getCurrentLevel() {
   if (!_productTree?.model) return null;
 
   if (_navStack.length === 0) {
-    // Model level
     const m = _productTree.model;
     return {
       attrs: m.attrs || [],
@@ -204,20 +252,17 @@ function getCurrentLevel() {
     };
   }
 
-  // Navigate to the target position by following _navStack through the tree
   let positions = _productTree.model.positions || [];
   let pos = null;
   for (const name of _navStack) {
     pos = positions.find(p => (p.name || p.id) === name);
     if (!pos) return null;
-    // Next level of positions comes from this position's assembly
     positions = pos.assembly?.positions || [];
   }
 
-  // Show position's content: assembly attrs + sub-positions + position attrs + module
   const assy = pos.assembly;
   return {
-    attrs: [...(pos.attrs || []), ...(assy?.attrs || [])],
+    attrs: assy?.attrs || [],
     calcAttrs: assy?.calcAttrs || [],
     positions: assy?.positions || [],
     module: pos.module || null,
@@ -226,21 +271,46 @@ function getCurrentLevel() {
 
 /**
  * Build the getConfigurationAttribute path for an attribute at the current nav level.
- * Path = position chain + attrName (assembly names are NOT in the path).
  */
 function buildAttrPath(attrName) {
   if (_navStack.length === 0) {
-    // Model-level attribute
     const modelName = _productTree.model.name || _productTree.model.id;
     return `${modelName}.${attrName}`;
   }
   return [..._navStack, attrName].join('.');
 }
 
+/**
+ * Collect all tree nodes (positions) recursively for the Nodes tab.
+ * Returns flat array of { name, displayName, depth, path (posChain), attrCount, subPosCount }
+ */
+function collectAllNodes() {
+  if (!_productTree?.model) return [];
+  const nodes = [];
+
+  function walk(positions, depth, chain) {
+    if (!positions) return;
+    for (const pos of positions) {
+      const posName = pos.name || pos.id;
+      const displayName = posName.replace(/-\d+$/, '');
+      const currentChain = chain ? `${chain}.${posName}` : posName;
+      const attrCount = (pos.assembly?.attrs?.length || 0) + (pos.assembly?.calcAttrs?.length || 0);
+      const subPosCount = pos.assembly?.positions?.length || 0;
+      nodes.push({ name: posName, displayName, depth, path: currentChain, attrCount, subPosCount });
+      if (pos.assembly?.positions?.length) {
+        walk(pos.assembly.positions, depth + 1, currentChain);
+      }
+    }
+  }
+
+  walk(_productTree.model.positions, 0, '');
+  return nodes;
+}
+
 // ─── Explorer Rendering ────────────────────────────────────────────
 
 function renderExplorer(container) {
-  // ── CP picker — always show so user knows which CP is loaded ──
+  // ── CP picker ──
   {
     const picker = el('div', { class: 'form-group', style: { marginBottom: '8px' } });
     picker.appendChild(el('div', { class: 'form-label', style: { fontSize: '11px' } }, 'Configured Product'));
@@ -304,35 +374,30 @@ function renderExplorer(container) {
   const level = getCurrentLevel();
 
   if (_navStack.length > 0) {
-    // Drilled in: show clickable breadcrumb trail
     bc.appendChild(el('span', {
       class: 'obj-path-link',
-      onclick: () => { _navStack = []; rerender(); },
+      onclick: () => { _navStack = []; _searchQuery = ''; rerender(); },
     }, modelName));
 
     for (let i = 0; i < _navStack.length; i++) {
-      bc.appendChild(el('span', { class: 'obj-path-sep' }, ' › '));
+      bc.appendChild(el('span', { class: 'obj-path-sep' }, ' > '));
       const posDisplay = _navStack[i].replace(/-\d+$/, '');
       if (i < _navStack.length - 1) {
-        // Clickable intermediate crumb
         const targetDepth = i + 1;
         bc.appendChild(el('span', {
           class: 'obj-path-link',
-          onclick: () => { _navStack = _navStack.slice(0, targetDepth); rerender(); },
+          onclick: () => { _navStack = _navStack.slice(0, targetDepth); _searchQuery = ''; rerender(); },
         }, posDisplay));
       } else {
-        // Current level (non-clickable)
         bc.appendChild(el('span', { class: 'obj-path-current' }, posDisplay));
       }
     }
 
-    // Show count of items at current level
     if (level) {
       const itemCount = (level.positions?.length || 0) + (level.attrs?.length || 0) + (level.calcAttrs?.length || 0);
       bc.appendChild(el('span', { class: 'obj-path-count' }, `${itemCount}`));
     }
   } else {
-    // Model level
     bc.appendChild(el('span', { class: 'obj-path-current' }, modelName));
     if (level) {
       bc.appendChild(el('span', { class: 'obj-path-count' }, `${level.positions.length} positions`));
@@ -343,19 +408,24 @@ function renderExplorer(container) {
   // ── Tab bar ──
   const currentTab = wizState._configTab || 'all';
   const calcCt = _attrIndex.filter(a => a.attrType === 'calculated-attribute').length;
-  const allCount = level
-    ? (level.positions?.length || 0) + (level.attrs?.length || 0) + (level.calcAttrs?.length || 0)
-    : 0;
+  const levelAttrs = level ? (level.attrs?.length || 0) : 0;
+  const levelCalc = level ? (level.calcAttrs?.length || 0) : 0;
+  const levelPos = level ? (level.positions?.length || 0) : 0;
+  const allNodes = collectAllNodes();
+
   const tabs = [
-    { id: 'all',    label: 'All',    count: allCount },
-    { id: 'calc',   label: 'Calc',   count: calcCt },
-    { id: 'search', label: 'Search', count: null },
+    { id: 'all',        label: 'All',   count: null },
+    { id: 'nodes',      label: 'Nodes', count: allNodes.length },
+    { id: 'attrs',      label: 'Attr.',  count: levelAttrs + levelCalc },
+    { id: 'positions',  label: 'Pos.',   count: levelPos },
+    { id: 'calc',       label: 'Calc.',  count: calcCt },
   ];
+
   const tabBar = el('div', { class: 'obj-tab-bar' });
   tabs.forEach(t => {
     tabBar.appendChild(el('button', {
       class: `obj-tab ${currentTab === t.id ? 'obj-tab-active' : ''}`,
-      onclick: () => { wizState._configTab = t.id; rerender(); },
+      onclick: () => { wizState._configTab = t.id; _searchQuery = ''; rerender(); },
     }, [
       t.label,
       t.count != null ? el('span', { class: 'obj-tab-count' }, String(t.count)) : null,
@@ -363,15 +433,51 @@ function renderExplorer(container) {
   });
   container.appendChild(tabBar);
 
+  // ── Inline search filter ──
+  const placeholders = {
+    all: 'Filter attributes & positions...',
+    nodes: 'Filter nodes...',
+    attrs: 'Filter attributes...',
+    positions: 'Filter positions...',
+    calc: 'Filter calculated attributes...',
+  };
+  const searchWrap = el('div', { style: { position: 'relative', marginBottom: '6px' } });
+  const searchInput = el('input', {
+    class: 'input',
+    type: 'text',
+    placeholder: placeholders[currentTab] || 'Filter...',
+    value: _searchQuery,
+    style: { fontSize: '12px', paddingLeft: '26px', paddingRight: _searchQuery ? '26px' : '8px' },
+    oninput: (e) => {
+      _searchQuery = e.target.value;
+      rerender();
+    },
+  });
+  searchWrap.appendChild(el('span', {
+    style: { position: 'absolute', left: '8px', top: '50%', transform: 'translateY(-50%)', opacity: '0.4', pointerEvents: 'none' },
+    html: icon('search', 13),
+  }));
+  if (_searchQuery) {
+    searchWrap.appendChild(el('span', {
+      style: { position: 'absolute', right: '8px', top: '50%', transform: 'translateY(-50%)', cursor: 'pointer', opacity: '0.5' },
+      html: icon('x', 13),
+      onclick: () => { _searchQuery = ''; rerender(); },
+    }));
+  }
+  searchWrap.appendChild(searchInput);
+  container.appendChild(searchWrap);
+
   // ── Tab content ──
   const content = el('div', { class: 'obj-content' });
   if (currentTab === 'all') renderAllTab(content);
+  else if (currentTab === 'nodes') renderNodesTab(content, allNodes);
+  else if (currentTab === 'attrs') renderAttrsTab(content);
+  else if (currentTab === 'positions') renderPositionsTab(content);
   else if (currentTab === 'calc') renderCalcTab(content);
-  else if (currentTab === 'search') renderSearchTab(content);
   container.appendChild(content);
 }
 
-// ─── All Tab (hierarchical drill-down) ───────────────────────────
+// ─── All Tab (hierarchical drill-down — everything at current level) ──
 
 function renderAllTab(container) {
   const level = getCurrentLevel();
@@ -381,101 +487,179 @@ function renderAllTab(container) {
   }
 
   const { attrs, calcAttrs, positions, module } = level;
+  const q = _searchQuery.toLowerCase();
   let hasContent = false;
 
-  // Sub-positions (drillable nodes) — shown first per Sam's model
-  if (positions.length > 0) {
+  // Positions (drillable)
+  const filteredPositions = q
+    ? positions.filter(p => (p.name || p.id).toLowerCase().includes(q))
+    : positions;
+
+  if (filteredPositions.length > 0) {
     hasContent = true;
-    container.appendChild(groupHeader(`Positions (${positions.length})`));
-    for (const pos of positions) {
-      const posName = pos.name || pos.id;
-      const posDisplay = pos.name.replace(/-\d+$/, '');
-      // Count items inside this position
-      const subAttrCt = (pos.assembly?.attrs?.length || 0) + (pos.assembly?.calcAttrs?.length || 0) + (pos.attrs?.length || 0);
-      const subPosCt = pos.assembly?.positions?.length || 0;
-      const countLabel = subPosCt > 0 ? `${subAttrCt} attrs, ${subPosCt} pos` : `${subAttrCt} attrs`;
-
-      // Highlight if selected path goes through this position
-      const pathPrefix = [..._navStack, posName].join('.');
-      const isActive = wizState._selectedConfigPath?.startsWith(pathPrefix + '.') || wizState._selectedConfigPath?.startsWith(pathPrefix);
-
-      container.appendChild(el('div', {
-        class: `obj-row obj-row-ref ${isActive ? 'obj-row-sel' : ''}`,
-        onclick: () => { _navStack.push(posName); wizState._configTab = 'all'; rerender(); },
-        style: { cursor: 'pointer' },
-      }, [
-        el('span', { class: 'obj-row-name' }, posDisplay),
-        el('span', { class: 'obj-row-target' }, countLabel),
-        el('span', { class: 'obj-row-nav', html: icon('chevron-right', 12) }),
-      ]));
+    container.appendChild(groupHeader(`Positions (${filteredPositions.length})`));
+    for (const pos of filteredPositions) {
+      renderPositionRow(container, pos);
     }
   }
 
-  // Regular attributes (selectable — clicking completes the path)
-  if (attrs.length > 0) {
+  // Regular attributes
+  const filteredAttrs = q
+    ? attrs.filter(a => a.name.toLowerCase().includes(q) || (a.value && a.value.toLowerCase().includes(q)))
+    : attrs;
+
+  if (filteredAttrs.length > 0) {
     hasContent = true;
-    container.appendChild(groupHeader(`Attributes (${attrs.length})`));
-    for (const attr of attrs) {
-      const fullPath = buildAttrPath(attr.name);
-      const isSelected = wizState._selectedConfigPath === fullPath;
-      container.appendChild(el('div', {
-        class: `obj-row ${isSelected ? 'obj-row-sel' : ''}`,
-        onclick: () => selectAttribute({ name: attr.name, value: attr.value, type: attr.type, fullPath, isCalc: false }),
-      }, [
-        el('span', { class: 'obj-row-name' }, attr.name),
-        attr.value ? el('span', { class: 'obj-row-type' }, truncate(attr.value, 25)) : null,
-        attr.type ? el('span', { class: 'obj-row-type', style: { opacity: '0.5' } }, attr.type) : null,
-      ]));
+    container.appendChild(groupHeader(`Attributes (${filteredAttrs.length})`));
+    for (const attr of filteredAttrs) {
+      renderAttrRow(container, attr, false);
     }
   }
 
   // Calculated attributes
-  if (calcAttrs.length > 0) {
+  const filteredCalc = q
+    ? calcAttrs.filter(a => a.name.toLowerCase().includes(q) || (a.value && a.value.toLowerCase().includes(q)))
+    : calcAttrs;
+
+  if (filteredCalc.length > 0) {
     hasContent = true;
-    container.appendChild(groupHeader(`Calculated (${calcAttrs.length})`));
-    for (const attr of calcAttrs) {
-      const fullPath = buildAttrPath(attr.name);
-      const isSelected = wizState._selectedConfigPath === fullPath;
-      container.appendChild(el('div', {
-        class: `obj-row ${isSelected ? 'obj-row-sel' : ''}`,
-        onclick: () => selectAttribute({ name: attr.name, value: attr.value, type: attr.type, fullPath, isCalc: true }),
-      }, [
-        el('span', { class: 'obj-row-name' }, attr.name),
-        el('span', { class: 'cfg-calc-badge' }, 'calc'),
-        attr.value ? el('span', { class: 'obj-row-type' }, truncate(attr.value, 25)) : null,
-      ]));
+    container.appendChild(groupHeader(`Calculated (${filteredCalc.length})`));
+    for (const attr of filteredCalc) {
+      renderAttrRow(container, attr, true);
     }
   }
 
-  // Module/variant attributes
+  // Module/variant
   if (module?.variant) {
-    const v = module.variant;
-    const varAttrs = [...(v.attrs || []), ...(v.calcAttrs || [])];
-    if (varAttrs.length > 0) {
-      hasContent = true;
-      container.appendChild(groupHeader(`Variant (${varAttrs.length})`));
-      for (const attr of varAttrs) {
-        const fullPath = buildAttrPath(attr.name);
-        const isCalc = (v.calcAttrs || []).some(ca => ca.name === attr.name);
-        const isSelected = wizState._selectedConfigPath === fullPath;
-        container.appendChild(el('div', {
-          class: `obj-row ${isSelected ? 'obj-row-sel' : ''}`,
-          onclick: () => selectAttribute({ name: attr.name, value: attr.value, type: attr.type, fullPath, isCalc }),
-        }, [
-          el('span', { class: 'obj-row-name' }, attr.name),
-          isCalc ? el('span', { class: 'cfg-calc-badge' }, 'calc') : null,
-          attr.value ? el('span', { class: 'obj-row-type' }, truncate(attr.value, 25)) : null,
-        ]));
-      }
-    }
+    renderVariantSection(container, module.variant, q);
+    hasContent = true;
   }
 
   if (!hasContent) {
-    container.appendChild(el('div', { class: 'obj-empty' }, 'No attributes or positions at this level.'));
+    container.appendChild(el('div', { class: 'obj-empty' },
+      q ? 'No matching items.' : 'No attributes or positions at this level.'));
   }
 }
 
-// ─── Calc Tab ──────────────────────────────────────────────────────
+// ─── Nodes Tab (flat outline of all tree positions) ─────────────
+
+function renderNodesTab(container, allNodes) {
+  const q = _searchQuery.toLowerCase();
+  const filtered = q
+    ? allNodes.filter(n => n.displayName.toLowerCase().includes(q) || n.path.toLowerCase().includes(q))
+    : allNodes;
+
+  if (filtered.length === 0) {
+    container.appendChild(el('div', { class: 'obj-empty' },
+      q ? 'No matching nodes.' : 'No positions found in the configuration tree.'));
+    return;
+  }
+
+  for (const node of filtered) {
+    // Highlight if selected path goes through this node
+    const isActive = wizState._selectedConfigPath?.startsWith(node.path + '.') || wizState._selectedConfigPath === node.path;
+
+    const indent = node.depth * 14;
+    const countParts = [];
+    if (node.attrCount > 0) countParts.push(`${node.attrCount} attrs`);
+    if (node.subPosCount > 0) countParts.push(`${node.subPosCount} pos`);
+
+    container.appendChild(el('div', {
+      class: `obj-row obj-row-ref ${isActive ? 'obj-row-sel' : ''}`,
+      style: { paddingLeft: `${8 + indent}px`, cursor: 'pointer' },
+      onclick: () => {
+        // Navigate to this node
+        const segments = node.path.split('.');
+        _navStack = segments;
+        wizState._configTab = 'all';
+        _searchQuery = '';
+        rerender();
+      },
+    }, [
+      el('span', { class: 'obj-row-name' }, node.displayName),
+      countParts.length > 0
+        ? el('span', { class: 'obj-row-target' }, countParts.join(', '))
+        : null,
+      el('span', { class: 'obj-row-nav', html: icon('chevron-right', 12) }),
+    ]));
+  }
+}
+
+// ─── Attributes Tab (only attrs at current level, no positions) ──
+
+function renderAttrsTab(container) {
+  const level = getCurrentLevel();
+  if (!level) {
+    container.appendChild(el('div', { class: 'obj-empty' }, 'Navigation error.'));
+    return;
+  }
+
+  const { attrs, calcAttrs, module } = level;
+  const q = _searchQuery.toLowerCase();
+  let hasContent = false;
+
+  const filteredAttrs = q
+    ? attrs.filter(a => a.name.toLowerCase().includes(q) || (a.value && a.value.toLowerCase().includes(q)))
+    : attrs;
+
+  if (filteredAttrs.length > 0) {
+    hasContent = true;
+    container.appendChild(groupHeader(`Attributes (${filteredAttrs.length})`));
+    for (const attr of filteredAttrs) {
+      renderAttrRow(container, attr, false);
+    }
+  }
+
+  const filteredCalc = q
+    ? calcAttrs.filter(a => a.name.toLowerCase().includes(q) || (a.value && a.value.toLowerCase().includes(q)))
+    : calcAttrs;
+
+  if (filteredCalc.length > 0) {
+    hasContent = true;
+    container.appendChild(groupHeader(`Calculated (${filteredCalc.length})`));
+    for (const attr of filteredCalc) {
+      renderAttrRow(container, attr, true);
+    }
+  }
+
+  if (module?.variant) {
+    renderVariantSection(container, module.variant, q);
+    hasContent = true;
+  }
+
+  if (!hasContent) {
+    container.appendChild(el('div', { class: 'obj-empty' },
+      q ? 'No matching attributes.' : 'No attributes at this level.'));
+  }
+}
+
+// ─── Positions Tab (only drillable positions at current level) ───
+
+function renderPositionsTab(container) {
+  const level = getCurrentLevel();
+  if (!level) {
+    container.appendChild(el('div', { class: 'obj-empty' }, 'Navigation error.'));
+    return;
+  }
+
+  const { positions } = level;
+  const q = _searchQuery.toLowerCase();
+  const filtered = q
+    ? positions.filter(p => (p.name || p.id).toLowerCase().includes(q))
+    : positions;
+
+  if (filtered.length === 0) {
+    container.appendChild(el('div', { class: 'obj-empty' },
+      q ? 'No matching positions.' : 'No sub-positions at this level.'));
+    return;
+  }
+
+  for (const pos of filtered) {
+    renderPositionRow(container, pos);
+  }
+}
+
+// ─── Calc Tab (flat list of all calculated attrs across tree) ────
 
 function renderCalcTab(container) {
   const calcAttrs = _attrIndex.filter(a => a.attrType === 'calculated-attribute');
@@ -484,9 +668,23 @@ function renderCalcTab(container) {
     return;
   }
 
-  // Group by node
+  const q = _searchQuery.toLowerCase();
+  const filtered = q
+    ? calcAttrs.filter(a =>
+        a.attrName.toLowerCase().includes(q) ||
+        a.nodeName.toLowerCase().includes(q) ||
+        a.path.toLowerCase().includes(q) ||
+        (a.value && a.value.toLowerCase().includes(q)))
+    : calcAttrs;
+
+  if (filtered.length === 0) {
+    container.appendChild(el('div', { class: 'obj-empty', style: { fontSize: '11px' } },
+      'No matching calculated attributes.'));
+    return;
+  }
+
   const groups = {};
-  for (const attr of calcAttrs) {
+  for (const attr of filtered) {
     const key = attr.fullNodePath || 'Model';
     if (!groups[key]) groups[key] = [];
     groups[key].push(attr);
@@ -508,68 +706,55 @@ function renderCalcTab(container) {
   }
 }
 
-// ─── Search Tab ────────────────────────────────────────────────────
+// ─── Shared row renderers ─────────────────────────────────────────
 
-function renderSearchTab(container) {
-  const searchInput = el('input', {
-    class: 'input',
-    type: 'text',
-    placeholder: 'Search attributes...',
-    value: _searchQuery,
-    style: { fontSize: '12px', marginBottom: '8px' },
-    oninput: (e) => {
-      _searchQuery = e.target.value;
-      _searchResults = performSearch(_searchQuery);
-      const resultsDiv = container.querySelector('#cfg-search-results');
-      if (resultsDiv) { clear(resultsDiv); renderSearchResults(resultsDiv); }
-    },
-  });
-  container.appendChild(searchInput);
+function renderPositionRow(container, pos) {
+  const posName = pos.name || pos.id;
+  const posDisplay = posName.replace(/-\d+$/, '');
+  const subAttrCt = (pos.assembly?.attrs?.length || 0) + (pos.assembly?.calcAttrs?.length || 0);
+  const subPosCt = pos.assembly?.positions?.length || 0;
+  const countLabel = subPosCt > 0 ? `${subAttrCt} attrs, ${subPosCt} pos` : `${subAttrCt} attrs`;
 
-  const resultsDiv = el('div', { id: 'cfg-search-results' });
-  container.appendChild(resultsDiv);
+  const pathPrefix = [..._navStack, posName].join('.');
+  const isActive = wizState._selectedConfigPath?.startsWith(pathPrefix + '.') || wizState._selectedConfigPath === pathPrefix;
 
-  if (_searchQuery) {
-    if (!_searchResults) _searchResults = performSearch(_searchQuery);
-    renderSearchResults(resultsDiv);
-  } else {
-    resultsDiv.appendChild(el('div', { class: 'obj-empty', style: { fontSize: '11px' } },
-      'Type to search across all configuration attributes.'));
-  }
+  container.appendChild(el('div', {
+    class: `obj-row obj-row-ref ${isActive ? 'obj-row-sel' : ''}`,
+    onclick: () => { _navStack.push(posName); wizState._configTab = 'all'; _searchQuery = ''; rerender(); scrollSelectedIntoView(); },
+    style: { cursor: 'pointer' },
+  }, [
+    el('span', { class: 'obj-row-name' }, posDisplay),
+    el('span', { class: 'obj-row-target' }, countLabel),
+    el('span', { class: 'obj-row-nav', html: icon('chevron-right', 12) }),
+  ]));
 }
 
-function performSearch(query) {
-  if (!query || !_attrIndex) return [];
-  const q = query.toLowerCase();
-  return _attrIndex.filter(a =>
-    a.attrName.toLowerCase().includes(q) ||
-    a.nodeName.toLowerCase().includes(q) ||
-    a.path.toLowerCase().includes(q) ||
-    (a.value && a.value.toLowerCase().includes(q))
-  ).slice(0, 100);
+function renderAttrRow(container, attr, isCalc) {
+  const fullPath = buildAttrPath(attr.name);
+  const isSelected = wizState._selectedConfigPath === fullPath;
+  container.appendChild(el('div', {
+    class: `obj-row ${isSelected ? 'obj-row-sel' : ''}`,
+    onclick: () => selectAttribute({ name: attr.name, value: attr.value, type: attr.type, fullPath, isCalc }),
+  }, [
+    el('span', { class: 'obj-row-name' }, attr.name),
+    isCalc ? el('span', { class: 'cfg-calc-badge' }, 'calc') : null,
+    attr.value ? el('span', { class: 'obj-row-type' }, truncate(attr.value, 25)) : null,
+    !isCalc && attr.type ? el('span', { class: 'obj-row-type', style: { opacity: '0.5' } }, attr.type) : null,
+  ]));
 }
 
-function renderSearchResults(container) {
-  if (!_searchResults || _searchResults.length === 0) {
-    container.appendChild(el('div', { class: 'obj-empty', style: { fontSize: '11px' } },
-      _searchQuery ? 'No matching attributes found.' : 'Type to search across all configuration attributes.'));
-    return;
-  }
+function renderVariantSection(container, variant, q) {
+  const varAttrs = [...(variant.attrs || []), ...(variant.calcAttrs || [])];
+  const filtered = q
+    ? varAttrs.filter(a => a.name.toLowerCase().includes(q) || (a.value && a.value.toLowerCase().includes(q)))
+    : varAttrs;
 
-  container.appendChild(el('div', { style: { fontSize: '10px', color: 'var(--text-tertiary)', marginBottom: '4px' } },
-    `${_searchResults.length} result${_searchResults.length !== 1 ? 's' : ''}`));
-
-  for (const attr of _searchResults) {
-    const isSelected = wizState._selectedConfigPath === attr.path;
-    container.appendChild(el('div', {
-      class: `obj-row ${isSelected ? 'obj-row-sel' : ''}`,
-      onclick: () => selectAttributeFromIndex(attr),
-    }, [
-      el('span', { class: 'obj-row-name' }, attr.attrName),
-      attr.attrType === 'calculated-attribute' ? el('span', { class: 'cfg-calc-badge' }, 'calc') : null,
-      attr.value ? el('span', { class: 'obj-row-type' }, truncate(attr.value, 25)) : null,
-      el('div', { class: 'cfg-attr-path-hint' }, attr.path),
-    ]));
+  if (filtered.length > 0) {
+    container.appendChild(groupHeader(`Variant (${filtered.length})`));
+    for (const attr of filtered) {
+      const isCalc = (variant.calcAttrs || []).some(ca => ca.name === attr.name);
+      renderAttrRow(container, attr, isCalc);
+    }
   }
 }
 
@@ -586,6 +771,21 @@ function selectAttribute(attr) {
 }
 
 function selectAttributeFromIndex(indexEntry) {
+  // Navigate the explorer to the correct level for this attribute
+  const segments = indexEntry.path.split('.');
+  if (segments.length >= 2) {
+    const posSegments = segments.slice(0, -1);
+    let positions = _productTree?.model?.positions || [];
+    const validChain = [];
+    for (const posName of posSegments) {
+      const pos = positions.find(p => (p.name || p.id) === posName);
+      if (!pos) break;
+      validChain.push(posName);
+      positions = pos.assembly?.positions || [];
+    }
+    _navStack = validChain;
+  }
+
   wizState._selectedConfigPath = indexEntry.path;
   wizState._selectedConfigNodeKey = indexEntry.nodeName;
   wizState._selectedConfigAttr = {
@@ -595,6 +795,8 @@ function selectAttributeFromIndex(indexEntry) {
   };
   wizState._selectedConfigIsCalc = indexEntry.attrType === 'calculated-attribute';
   wizState.source = `getConfigurationAttribute("${indexEntry.path}")`;
+  wizState._configTab = 'all';
+  _searchQuery = '';
   rerender();
   refreshPipeline();
 }

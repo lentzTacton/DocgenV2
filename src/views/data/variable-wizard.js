@@ -466,7 +466,7 @@ export function renderVariableWizard(container, existingVariable) {
   const sourcePanel = el('div', { id: 'wiz-tab-source', class: 'wiz-tab-panel', style: { display: activeTab === 'source' ? '' : 'none' } });
   sourcePanel.appendChild(el('div', { id: 'wiz-bom-section', style: { display: wizState.type === 'bom' ? '' : 'none' } }));
   sourcePanel.appendChild(el('div', { id: 'wiz-source-toggle', style: { display: wizState.type === 'single' ? '' : 'none' } }));
-  sourcePanel.appendChild(el('div', { id: 'wiz-obj-section', style: { display: (wizState.type === 'object' || wizState.type === 'single') ? '' : 'none' } }));
+  sourcePanel.appendChild(el('div', { id: 'wiz-obj-section', style: { display: (wizState.type === 'object' || wizState.type === 'single' || wizState.type === 'config') ? '' : 'none' } }));
   sourcePanel.appendChild(el('div', { id: 'wiz-list-section', style: { display: wizState.type === 'list' ? '' : 'none' } }));
   sourcePanel.appendChild(el('div', { id: 'wiz-define-section', style: { display: wizState.type === 'define' ? '' : 'none' } }));
   sourcePanel.appendChild(el('div', { id: 'wiz-code-section', style: { display: wizState.type === 'code' ? '' : 'none' } }));
@@ -648,7 +648,7 @@ async function bootAsync() {
   // Render the active type section
   if (wizState.type === 'bom') {
     renderBomSection(bomSection);
-  } else if (wizState.type === 'single' && wizState._singleSourceMode === 'config') {
+  } else if (wizState.type === 'config' || (wizState.type === 'single' && wizState._singleSourceMode === 'config')) {
     loadConfigExplorer();
   } else if (wizState.type === 'object' || wizState.type === 'single') {
     loadObjectExplorer();
@@ -662,8 +662,8 @@ async function bootAsync() {
   refreshPipeline();
 
   // Pre-load drawer records for edit mode (already have a source configured)
-  if (wizState.source && (wizState.type === 'object' || wizState.type === 'single')) {
-    if (wizState._singleSourceMode === 'config' && wizState._selectedConfigPath) {
+  if (wizState.source && (wizState.type === 'object' || wizState.type === 'single' || wizState.type === 'config')) {
+    if (wizState.type === 'config' || (wizState._singleSourceMode === 'config' && wizState._selectedConfigPath)) {
       loadConfigDrawerRecords();
     } else if (wizState._singleSourceMode !== 'config') {
       loadDrawerRecords();
@@ -1427,13 +1427,22 @@ function renderCodeSection(container) {
   // Look up pre-computed validation results from the list view (stored in state)
   const valResults = state.get('validationResults') || {};
 
+  // Resolved values cache (populated when toggle is on or resolve is clicked)
+  let _resolvedValues = wizState._codeResolvedValues || {};
+  let _showValues = wizState._codeShowValues || false;
+
   function getRefStatus(refName) {
     const refVar = allVars.find(v => v.name === refName);
     if (!refVar) return { status: 'missing', tooltip: `"${refName}" does not exist`, cls: 'wiz-code-chip-missing' };
-    // Use pre-computed result from the list (has live data context)
+
+    // If we have a resolved value, that takes priority over pre-computed validation
+    if (_resolvedValues[refName] !== undefined) {
+      return { status: 'valid', tooltip: `${refName} = ${_resolvedValues[refName]}`, cls: 'wiz-code-chip-valid' };
+    }
+
     const result = valResults[refVar.id];
     if (!result || result.status === 'unchecked') {
-      return { status: 'unchecked', tooltip: `${refName}: not verified — connect to validate`, cls: '' };
+      return { status: 'unchecked', tooltip: `${refName}: not yet resolved`, cls: '' };
     }
     if (result.status === 'error') {
       return { status: 'error', tooltip: `${refName}: ${result.issues.map(i => i.message).join('; ')}`, cls: 'wiz-code-chip-error' };
@@ -1451,12 +1460,34 @@ function renderCodeSection(container) {
     defineSelect.appendChild(el('option', { value: v.name }, `${v.name}  (${v.type})`));
   });
 
+  // Show values toggle
+  const valuesToggle = el('label', { class: 'wiz-code-values-toggle' }, [
+    el('input', {
+      type: 'checkbox',
+      checked: _showValues,
+      onchange: (e) => {
+        _showValues = e.target.checked;
+        wizState._codeShowValues = _showValues;
+        if (_showValues && Object.keys(_resolvedValues).length === 0) {
+          resolveAllDeps();
+        } else {
+          refreshEditorContent();
+          renderCodeRefs(refsContainer, _resolvedValues);
+        }
+      },
+    }),
+    'Values',
+  ]);
+
   const toolbar = el('div', { class: 'wiz-code-toolbar' }, [
     el('div', { class: 'form-label', style: { margin: 0 } }, [
       el('span', { class: 'icon', style: { color: 'var(--text-tertiary)' }, html: icon('code', 12) }),
       'Expression',
     ]),
-    defineSelect,
+    el('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } }, [
+      valuesToggle,
+      defineSelect,
+    ]),
   ]);
 
   // ── Editable surface ──
@@ -1472,8 +1503,19 @@ function renderCodeSection(container) {
     return src.replace(/#\w+/g, (match) => {
       const ref = getRefStatus(match);
       const tip = ref.tooltip.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-      return `<span class="wiz-code-chip ${ref.cls}" contenteditable="false" data-define="${match}" data-tip="${tip}">${match}</span>`;
+      // Show resolved value badge inside the chip when toggle is on
+      let valueLabel = '';
+      if (_showValues && _resolvedValues[match] !== undefined) {
+        const v = _resolvedValues[match];
+        valueLabel = `<span style="margin-left:3px;opacity:0.7;font-weight:400">= ${v}</span>`;
+      }
+      return `<span class="wiz-code-chip ${ref.cls}" contenteditable="false" data-define="${match}" data-tip="${tip}">${match}${valueLabel}</span>`;
     });
+  }
+
+  function refreshEditorContent() {
+    // Save cursor position concept (we'll just re-render; cursor resets but that's ok for toggle)
+    editor.innerHTML = sourceToHTML(wizState.source || '');
   }
 
   // Extract plain text from editor DOM (chips → their data-define text)
@@ -1509,7 +1551,6 @@ function renderCodeSection(container) {
     const rect = chip.getBoundingClientRect();
     chipTip.style.left = `${rect.left}px`;
     chipTip.style.top = `${rect.top - chipTip.offsetHeight - 6}px`;
-    // Flip below if off-screen top
     if (rect.top - chipTip.offsetHeight - 6 < 4) {
       chipTip.style.top = `${rect.bottom + 6}px`;
     }
@@ -1523,10 +1564,12 @@ function renderCodeSection(container) {
   editor.addEventListener('input', () => {
     wizState.source = editorToSource();
     refreshPipeline();
-    renderCodeRefs(refsContainer);
+    renderCodeRefs(refsContainer, _resolvedValues);
+    // Clear computed result on edit
+    clear(resultContainer);
   });
 
-  // Prevent Enter from creating divs — insert newline text node instead
+  // Prevent Enter from creating divs
   editor.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
@@ -1553,25 +1596,27 @@ function renderCodeSection(container) {
     if (!val) return;
     defineSelect.value = '';
 
-    // Remove placeholder if present
     const ph = editor.querySelector('.wiz-code-placeholder');
     if (ph) editor.innerHTML = '';
 
-    // Insert chip at cursor (or end) — colored by validation status
     const ref = getRefStatus(val);
+    let valueLabel = '';
+    if (_showValues && _resolvedValues[val] !== undefined) {
+      valueLabel = `<span style="margin-left:3px;opacity:0.7;font-weight:400">= ${_resolvedValues[val]}</span>`;
+    }
     const chip = el('span', {
       class: `wiz-code-chip ${ref.cls}`,
       contentEditable: 'false',
       'data-define': val,
       'data-tip': ref.tooltip,
-    }, val);
+    });
+    chip.innerHTML = `${val}${valueLabel}`;
 
     const sel = window.getSelection();
     if (sel.rangeCount > 0 && editor.contains(sel.anchorNode)) {
       const range = sel.getRangeAt(0);
       range.deleteContents();
       range.insertNode(chip);
-      // Move cursor after chip
       range.setStartAfter(chip);
       range.collapse(true);
       sel.removeAllRanges();
@@ -1582,24 +1627,142 @@ function renderCodeSection(container) {
 
     wizState.source = editorToSource();
     refreshPipeline();
-    renderCodeRefs(refsContainer);
+    renderCodeRefs(refsContainer, _resolvedValues);
     editor.focus();
   });
+
+  // ── Result container (shows computed value after resolve) ──
+  const resultContainer = el('div', { id: 'wiz-code-result' });
+
+  // ── Resolve button ──
+  const resolveBtn = el('button', {
+    class: 'wiz-code-resolve-btn',
+    onclick: () => resolveAllDeps(),
+  }, [
+    el('span', { class: 'icon', html: icon('play', 12) }),
+    'Calculate',
+  ]);
+
+  // ── Resolve all dependencies and compute expression ──
+  async function resolveAllDeps() {
+    const source = wizState.source || '';
+    const refs = [...new Set((source.match(/#\w+/g) || []))];
+    if (refs.length === 0) return;
+
+    resolveBtn.disabled = true;
+    resolveBtn.innerHTML = '';
+    resolveBtn.appendChild(el('span', { class: 'icon', html: icon('loader', 12) }));
+    resolveBtn.appendChild(document.createTextNode('Resolving…'));
+
+    const newValues = {};
+    let allResolved = true;
+
+    for (const refName of refs) {
+      const refVar = allVars.find(v => v.name === refName);
+      if (!refVar) { allResolved = false; continue; }
+
+      const refSource = refVar.source || '';
+      if (refSource.includes('getConfigurationAttribute(')) {
+        const pm = refSource.match(/getConfigurationAttribute\s*\(\s*"([^"]+)"\s*\)/);
+        if (pm) {
+          try {
+            const { resolveConfigAttrAcrossCPs } = await import('./wizard-config-explorer.js');
+            const r = await resolveConfigAttrAcrossCPs(pm[1]);
+            const val = r.find(x => x.value && x.value !== '(error)');
+            if (val) {
+              newValues[refName] = val.value;
+            } else {
+              allResolved = false;
+            }
+          } catch {
+            allResolved = false;
+          }
+        }
+      }
+    }
+
+    _resolvedValues = newValues;
+    wizState._codeResolvedValues = newValues;
+
+    // Update toggle state
+    _showValues = true;
+    wizState._codeShowValues = true;
+    const cb = valuesToggle.querySelector('input');
+    if (cb) cb.checked = true;
+
+    // Refresh editor with values
+    refreshEditorContent();
+    renderCodeRefs(refsContainer, _resolvedValues);
+
+    // Compute the final arithmetic result
+    clear(resultContainer);
+    if (allResolved && Object.keys(newValues).length > 0) {
+      try {
+        let expr = source;
+        for (const [name, val] of Object.entries(newValues)) {
+          const numVal = parseFloat(val);
+          if (!isNaN(numVal)) {
+            expr = expr.split(name).join(String(numVal));
+          }
+        }
+        if (/^[\d.+\-*/() \t]+$/.test(expr)) {
+          let computed = Function('"use strict"; return (' + expr + ')')();
+          if (typeof computed === 'number') {
+            computed = Math.round(computed * 100) / 100;
+          }
+          resultContainer.appendChild(el('div', { class: 'wiz-code-result wiz-code-result-ok' }, [
+            el('span', { class: 'icon', html: icon('check', 14) }),
+            `Result: ${computed}`,
+          ]));
+        } else {
+          resultContainer.appendChild(el('div', { class: 'wiz-code-result wiz-code-result-err' }, [
+            el('span', { class: 'icon', html: icon('alert-circle', 14) }),
+            `Expression: ${expr}`,
+          ]));
+        }
+      } catch (e) {
+        resultContainer.appendChild(el('div', { class: 'wiz-code-result wiz-code-result-err' }, [
+          el('span', { class: 'icon', html: icon('alert-circle', 14) }),
+          `Eval error: ${e.message}`,
+        ]));
+      }
+    } else if (!allResolved) {
+      const missing = refs.filter(r => newValues[r] === undefined);
+      resultContainer.appendChild(el('div', { class: 'wiz-code-result wiz-code-result-err' }, [
+        el('span', { class: 'icon', html: icon('alert-circle', 14) }),
+        `Cannot compute — unresolved: ${missing.join(', ')}`,
+      ]));
+    }
+
+    resolveBtn.disabled = false;
+    resolveBtn.innerHTML = '';
+    resolveBtn.appendChild(el('span', { class: 'icon', html: icon('play', 12) }));
+    resolveBtn.appendChild(document.createTextNode('Calculate'));
+  }
 
   container.appendChild(el('div', { class: 'form-group' }, [
     toolbar,
     editor,
-    el('div', { style: { fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '4px' } },
-      'Visual expression editor — type freely or insert defines as blocks. Supports arithmetic, ternary, and template syntax.'),
+    el('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '4px' } }, [
+      el('div', { style: { fontSize: '10px', color: 'var(--text-tertiary)' } },
+        'Type freely or insert defines. Supports arithmetic.'),
+      resolveBtn,
+    ]),
+    resultContainer,
   ]));
 
   // ── Referenced defines list ──
   const refsContainer = el('div', { class: 'wiz-code-refs' });
-  renderCodeRefs(refsContainer);
+  renderCodeRefs(refsContainer, _resolvedValues);
   container.appendChild(refsContainer);
+
+  // Auto-resolve if in edit mode and connected
+  if (wizState.isEditMode && isConnected() && Object.keys(_resolvedValues).length === 0) {
+    resolveAllDeps();
+  }
 }
 
-function renderCodeRefs(container) {
+function renderCodeRefs(container, resolvedValues) {
   if (!container) return;
   clear(container);
 
@@ -1609,6 +1772,7 @@ function renderCodeRefs(container) {
 
   const allVars = state.get('variables') || [];
   const valResults = state.get('validationResults') || {};
+  const resolved = resolvedValues || {};
 
   container.appendChild(el('div', { class: 'form-label', style: { marginTop: '8px' } }, [
     el('span', { class: 'icon', html: icon('link', 12) }),
@@ -1632,7 +1796,6 @@ function renderCodeRefs(container) {
       status = 'missing';
       detail = 'not found';
     } else {
-      // Use pre-computed validation from list view (has live data context)
       const result = valResults[refVar.id];
       if (!result) {
         status = 'unchecked';
@@ -1645,6 +1808,8 @@ function renderCodeRefs(container) {
       }
     }
 
+    const hasValue = resolved[refName] !== undefined;
+
     list.appendChild(el('div', {
       class: `wiz-code-ref-item`,
       style: { color: statusColors[status] },
@@ -1652,9 +1817,11 @@ function renderCodeRefs(container) {
     }, [
       el('span', { class: 'icon', html: icon(statusIcons[status], 11) }),
       el('code', {}, refName),
-      status !== 'valid' && status !== 'unchecked'
-        ? el('span', { class: 'wiz-code-ref-warn', style: { color: statusColors[status] } }, detail)
-        : null,
+      hasValue
+        ? el('span', { style: { marginLeft: 'auto', fontFamily: 'var(--mono, monospace)', fontWeight: '600', color: 'var(--success, #1A7F37)' } }, resolved[refName])
+        : (status !== 'valid' && status !== 'unchecked'
+          ? el('span', { class: 'wiz-code-ref-warn', style: { color: statusColors[status] } }, detail)
+          : null),
     ]));
   });
   container.appendChild(list);
@@ -1740,7 +1907,7 @@ function updateSelectedSource() {
 function refreshPipeline() {
   _drawerLoadAttempted = false; // allow fresh auto-load on source change
   // Clear stale drawer records when source changes (config or object)
-  if (wizState.type === 'single' && wizState._singleSourceMode === 'config') {
+  if (wizState.type === 'config' || (wizState.type === 'single' && wizState._singleSourceMode === 'config')) {
     wizState.objectRecords = [];
   }
   updateSelectedSource();
@@ -1906,7 +2073,7 @@ function getDrawerData() {
     const values = parseListValues(wizState.source);
     records = values.map((v, i) => ({ '#': i + 1, value: v }));
     allFields = ['#', 'value'];
-  } else if (wizState.type === 'single' && wizState._singleSourceMode === 'config') {
+  } else if (wizState.type === 'config' || (wizState.type === 'single' && wizState._singleSourceMode === 'config')) {
     // Config attribute mode — show resolved values across all configured products
     records = wizState.objectRecords || [];
     if (records.length > 0) {
@@ -1984,8 +2151,8 @@ function updateDrawerBar() {
     count.className = 'data-drawer-bar-count data-drawer-count-empty';
     // Auto-trigger record load for Object/Single when source is newly set
     // Guard: only trigger if we haven't already tried (prevents infinite loop)
-    if ((wizState.type === 'object' || wizState.type === 'single') && isConnected() && !_drawerLoadAttempted) {
-      if (wizState._singleSourceMode === 'config') {
+    if ((wizState.type === 'object' || wizState.type === 'single' || wizState.type === 'config') && isConnected() && !_drawerLoadAttempted) {
+      if (wizState.type === 'config' || wizState._singleSourceMode === 'config') {
         loadConfigDrawerRecords();
       } else {
         loadDrawerRecords();
@@ -2053,8 +2220,8 @@ function renderDrawerDataTab(body, actions) {
 
   // Try to load records if empty and we have a source (only once per source)
   if (records.length === 0 && wizState.source && !_drawerLoading && !_drawerLoadAttempted) {
-    if (wizState.type === 'object' || wizState.type === 'single') {
-      if (wizState._singleSourceMode === 'config') {
+    if (wizState.type === 'object' || wizState.type === 'single' || wizState.type === 'config') {
+      if (wizState.type === 'config' || wizState._singleSourceMode === 'config') {
         loadConfigDrawerRecords();
       } else {
         loadDrawerRecords();

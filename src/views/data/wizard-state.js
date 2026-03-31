@@ -63,7 +63,7 @@ export const wizState = {
   _singleSourceMode: 'object',
 
   // Config explorer state (getConfigurationAttribute sources)
-  _configTab: 'all',            // 'all' | 'calc' | 'search'
+  _configTab: 'all',            // 'all' | 'nodes' | 'attrs' | 'positions' | 'calc'
   _selectedConfigPath: null,     // e.g. "nonfire_pump_node-1.pumpSeries"
   _selectedConfigNodeKey: null,
   _selectedConfigAttr: null,

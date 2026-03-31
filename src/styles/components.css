@@ -5158,18 +5158,64 @@ select.input {
   width: 100%; min-height: 60px; max-height: 180px; overflow-y: auto;
   font-size: 12px; font-family: var(--mono, monospace);
   line-height: 1.8; padding: 8px 10px;
-  border: 1px solid var(--border-light); border-radius: var(--radius);
-  background: var(--surface); color: var(--text-primary);
+  border: 1px solid #3c3c3c; border-radius: var(--radius);
+  background: #1e1e1e; color: #d4d4d4;
   outline: none; white-space: pre-wrap; word-break: break-all;
   transition: border-color 0.15s;
   resize: vertical;
 }
 .wiz-code-editor:focus {
-  border-color: var(--tacton-blue, #0969DA);
-  box-shadow: 0 0 0 2px rgba(9, 105, 218, 0.15);
+  border-color: #007acc;
+  box-shadow: 0 0 0 2px rgba(0, 122, 204, 0.25);
 }
+/* IDE-themed chips inside dark editor */
+.wiz-code-editor .wiz-code-chip {
+  background: #264f78; color: #9cdcfe; border-color: #3c8dbc;
+}
+.wiz-code-editor .wiz-code-chip-valid {
+  background: #1e3a1e; color: #6a9955; border-color: #3a6e3a;
+}
+.wiz-code-editor .wiz-code-chip-warn {
+  background: #3e3a1e; color: #dcdcaa; border-color: #6e6a3a;
+}
+.wiz-code-editor .wiz-code-chip-error,
+.wiz-code-editor .wiz-code-chip-missing {
+  background: #3e1e1e; color: #f48771; border-color: #6e3a3a;
+}
+/* Resolve button */
+.wiz-code-resolve-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; font-weight: 600; padding: 4px 10px;
+  border: 1px solid var(--border-light); border-radius: var(--radius);
+  background: var(--surface); color: var(--text-secondary);
+  cursor: pointer; transition: all 0.15s;
+}
+.wiz-code-resolve-btn:hover {
+  background: var(--tacton-blue, #0969DA); color: #fff; border-color: var(--tacton-blue);
+}
+/* Resolve result badge */
+.wiz-code-result {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 10px; margin-top: 6px;
+  border-radius: var(--radius); font-size: 12px; font-weight: 600;
+  font-family: var(--mono, monospace);
+}
+.wiz-code-result-ok {
+  background: var(--success-bg, #E8F5E9); color: var(--success, #1A7F37);
+  border: 1px solid rgba(26, 127, 55, 0.2);
+}
+.wiz-code-result-err {
+  background: #FFEAEA; color: var(--danger, #CF222E);
+  border: 1px solid rgba(207, 34, 46, 0.2);
+}
+/* Values toggle */
+.wiz-code-values-toggle {
+  display: flex; align-items: center; gap: 4px;
+  font-size: 10px; color: var(--text-tertiary); cursor: pointer; user-select: none;
+}
+.wiz-code-values-toggle input { margin: 0; cursor: pointer; }
 .wiz-code-placeholder {
-  color: var(--text-tertiary); font-style: italic; pointer-events: none;
+  color: #6a737d; font-style: italic; pointer-events: none;
 }
 .wiz-code-chip {
   display: inline-flex; align-items: center;
