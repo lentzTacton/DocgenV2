@@ -200,16 +200,16 @@ function renderPurposeSelector() {
         if (p.key === 'block' && (wizState.type === 'single' || wizState.type === 'list')) {
           wizState.type = 'bom';
           wizState.source = wizState.bomSources[0]?.expression || wizState.bomSources[0]?.name || '#this.flatbom';
-          if (!wizState.isEditMode) switchTypeView();
           updateTypeSelector();
         }
         // Inline behaves like variable for type selection purposes
         if (p.key === 'inline' && wizState.type === 'bom') {
           wizState.type = 'single';
           wizState.source = '';
-          if (!wizState.isEditMode) switchTypeView();
           updateTypeSelector();
         }
+        // Always refresh source sections when purpose changes (define picker visibility depends on purpose)
+        switchTypeView();
         refreshPipeline();
       },
     }, [
@@ -463,12 +463,15 @@ export function renderVariableWizard(container, existingVariable) {
   container.appendChild(classPanel);
 
   // ── Tab 2: Source (type-specific config) ──
+  // Inline expressions can use a define as source — show define picker for all inline types
+  const _initShowDefine = wizState.type === 'define' || wizState.purpose === 'inline';
+  const _isObjLike = wizState.type === 'object' || wizState.type === 'single' || wizState.type === 'config';
   const sourcePanel = el('div', { id: 'wiz-tab-source', class: 'wiz-tab-panel', style: { display: activeTab === 'source' ? '' : 'none' } });
   sourcePanel.appendChild(el('div', { id: 'wiz-bom-section', style: { display: wizState.type === 'bom' ? '' : 'none' } }));
+  sourcePanel.appendChild(el('div', { id: 'wiz-define-section', style: { display: _initShowDefine ? '' : 'none' } }));
   sourcePanel.appendChild(el('div', { id: 'wiz-source-toggle', style: { display: wizState.type === 'single' ? '' : 'none' } }));
-  sourcePanel.appendChild(el('div', { id: 'wiz-obj-section', style: { display: (wizState.type === 'object' || wizState.type === 'single' || wizState.type === 'config') ? '' : 'none' } }));
+  sourcePanel.appendChild(el('div', { id: 'wiz-obj-section', style: { display: _isObjLike ? '' : 'none' } }));
   sourcePanel.appendChild(el('div', { id: 'wiz-list-section', style: { display: wizState.type === 'list' ? '' : 'none' } }));
-  sourcePanel.appendChild(el('div', { id: 'wiz-define-section', style: { display: wizState.type === 'define' ? '' : 'none' } }));
   sourcePanel.appendChild(el('div', { id: 'wiz-code-section', style: { display: wizState.type === 'code' ? '' : 'none' } }));
   container.appendChild(sourcePanel);
 
@@ -646,6 +649,10 @@ async function bootAsync() {
   }
 
   // Render the active type section
+  // Inline expressions always get the define picker (plus the model explorer below)
+  if (wizState.type === 'define' || wizState.purpose === 'inline') {
+    renderDefineSection(qs('#wiz-define-section'));
+  }
   if (wizState.type === 'bom') {
     renderBomSection(bomSection);
   } else if (wizState.type === 'config' || (wizState.type === 'single' && wizState._singleSourceMode === 'config')) {
@@ -654,8 +661,6 @@ async function bootAsync() {
     loadObjectExplorer();
   } else if (wizState.type === 'list') {
     renderListSection(qs('#wiz-list-section'));
-  } else if (wizState.type === 'define') {
-    renderDefineSection(qs('#wiz-define-section'));
   } else if (wizState.type === 'code') {
     renderCodeSection(qs('#wiz-code-section'));
   }
@@ -785,7 +790,10 @@ function switchTypeView() {
   const nameCard = qs('#wiz-name-card');
   if (nameCard) renderNameCombo(nameCard);
 
-  // Source mode toggle (Object / Configuration) — only for 'single' type (not for 'config', it goes direct)
+  // Show define section for 'define' type OR for all inline expressions (can pick a define as source)
+  const showDefine = wizState.type === 'define' || wizState.purpose === 'inline';
+
+  // Source mode toggle (Object / Configuration) — only for 'single' type
   const toggleWrap = qs('#wiz-source-toggle');
   if (toggleWrap) {
     toggleWrap.style.display = wizState.type === 'single' ? '' : 'none';
@@ -804,7 +812,7 @@ function switchTypeView() {
     }
   }
   if (lst) { lst.style.display = wizState.type === 'list' ? '' : 'none'; renderListSection(lst); }
-  if (def) { def.style.display = wizState.type === 'define' ? '' : 'none'; renderDefineSection(def); }
+  if (def) { def.style.display = showDefine ? '' : 'none'; renderDefineSection(def); }
   if (code) { code.style.display = wizState.type === 'code' ? '' : 'none'; renderCodeSection(code); }
   if (wizState.type === 'bom') renderBomSection(bom);
 }
@@ -1288,25 +1296,37 @@ function renderDefineSection(container) {
   clear(container);
 
   // Get all existing define-type variables (potential sources)
+  // For inline expressions, allow same-name defines (the inline ${#x}$ references define $define{#x=...}$)
   const allVars = state.get('variables') || [];
-  const defineSourceVars = allVars.filter(v =>
-    v.name && v.name !== wizState.name && v.purpose === 'variable'
-  );
+  const defineSourceVars = allVars.filter(v => {
+    if (!v.name || v.purpose !== 'variable') return false;
+    // Exclude self (same id), but allow same-name if different variable (inline→define link)
+    if (wizState.id && v.id === wizState.id) return false;
+    if (!wizState.id && v.name === wizState.name && v.purpose === wizState.purpose) return false;
+    return true;
+  });
 
   // Source define picker
   const sourceSelect = el('select', {
     class: 'input',
     style: { fontSize: '12px' },
     onchange: (e) => {
-      wizState.sourceDefine = e.target.value;
-      // Find and cache the original source of the selected define
-      const refVar = allVars.find(v => v.name === e.target.value);
-      wizState.sourceDefineSource = refVar?.source || '';
-      wizState.source = e.target.value;
+      const val = e.target.value;
+      wizState.sourceDefine = val;
+      if (val) {
+        const refVar = allVars.find(v => v.name === val);
+        wizState.sourceDefineSource = refVar?.source || '';
+        wizState.source = val;
+      } else {
+        // Cleared → allow model explorer to take over
+        wizState.sourceDefineSource = '';
+        wizState.source = '';
+      }
+      renderDefineSection(container); // refresh ref-info
       refreshPipeline();
     },
   });
-  sourceSelect.appendChild(el('option', { value: '' }, '— Select a define —'));
+  sourceSelect.appendChild(el('option', { value: '' }, '— None (use model below) —'));
 
   defineSourceVars.forEach(v => {
     const opt = el('option', { value: v.name }, `${v.name}  (${v.type})`);
@@ -1314,11 +1334,14 @@ function renderDefineSection(container) {
     sourceSelect.appendChild(opt);
   });
 
+  const helpText = wizState.purpose === 'inline'
+    ? 'Pick a define variable as source, or use the model explorer below.'
+    : 'Select another define variable to use as the source.';
+
   container.appendChild(el('div', { class: 'form-group' }, [
     el('div', { class: 'form-label' }, [el('span', { class: 'icon', style: { color: 'var(--purple, #8250DF)' }, html: icon('link', 12) }), 'Source define']),
     sourceSelect,
-    el('div', { style: { fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '4px' } },
-      'Select another define variable to use as the source. The accessor and null-safe transforms let you extract a value from it.'),
+    el('div', { style: { fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '4px' } }, helpText),
   ]));
 
   // Show what the source define resolves to

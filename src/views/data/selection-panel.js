@@ -384,7 +384,11 @@ function buildBreakdownRows(parsed) {
   if (parsed.nullSafeFallback != null) addRow('Fallback', `"${parsed.nullSafeFallback}"`);
   if (parsed.loopVar) addRow('Loop var', parsed.loopVar);
   if (parsed.loopSource) addRow('Loop source', parsed.loopSource);
-  if (parsed.purpose) addRow('Purpose', parsed.purpose);
+  // Use suggested purpose (corrects 'variable' → 'inline' for ${...}$ expressions)
+  const effectivePurpose = parsed.type === 'inline'
+    ? 'inline'
+    : parsed.purpose;
+  if (effectivePurpose) addRow('Purpose', effectivePurpose);
   if (parsed.dataType) addRow('Data type', parsed.dataType);
   if (parsed.path) addRow('Path', parsed.path.join(' → '));
 
@@ -492,19 +496,19 @@ function renderResolveArea(container, dupeInfo) {
           ])
         );
       }
-    // Missing dependency hint — when inline ref points to a variable that doesn't exist yet
-    if (resolveData.hasMissing && resolveData.missingVars?.length > 0) {
-      container.appendChild(
-        el('div', { class: 'sel-resolve-missing', style: {
-          marginTop: '6px', padding: '6px 8px', background: 'var(--bg-warning, #fff8e1)',
-          borderRadius: '4px', fontSize: '11px', color: 'var(--text-secondary)',
-        } }, [
-          el('span', { html: icon('alertTriangle', 12), style: { marginRight: '4px' } }),
-          `Missing: ${resolveData.missingVars.join(', ')} — create define first`,
-        ])
-      );
-    }
 
+      // Missing dependency hint — when inline ref points to a variable that doesn't exist yet
+      if (resolveData.hasMissing && resolveData.missingVars?.length > 0) {
+        container.appendChild(
+          el('div', { class: 'sel-resolve-missing', style: {
+            marginTop: '6px', padding: '6px 8px', background: 'var(--bg-warning, #fff8e1)',
+            borderRadius: '4px', fontSize: '11px', color: 'var(--text-secondary)',
+          } }, [
+            el('span', { html: icon('alertTriangle', 12), style: { marginRight: '4px' } }),
+            `Missing: ${resolveData.missingVars.join(', ')} — create define first`,
+          ])
+        );
+      }
     } else if (resolveData.value !== undefined) {
       // Single value result — filter info now shown in breakdown rows above
       container.appendChild(
@@ -1144,9 +1148,20 @@ function checkDuplicates(parsed) {
     matches.push({ ...v, catalogueName: cat ? cat.name : null });
   };
 
-  // Check by name match
+  // Check by name match — scoped by expression type:
+  // $define{#x=...}$ matches define-purpose variables, ${#x}$ matches inline-purpose variables
   if (parsed.name) {
-    variables.filter(v => v.name === parsed.name).forEach(addMatch);
+    const isInlineRef = parsed.type === 'inline' && /^#\w+$/.test(parsed.source || parsed.name);
+    const isDefine = parsed.type === 'define';
+    variables.filter(v => {
+      if (v.name !== parsed.name) return false;
+      // Inline ref → only match inline-purpose entries
+      if (isInlineRef) return v.purpose === 'inline';
+      // Define → only match variable/define-purpose entries (not inlines)
+      if (isDefine) return v.purpose !== 'inline';
+      // Other types → match any
+      return true;
+    }).forEach(addMatch);
   }
 
   // Check by source / expression match
@@ -1227,18 +1242,35 @@ function renderMultiDefinePanel(defines) {
   const typeColors = { single: 'var(--success)', object: 'var(--orange)', bom: 'var(--orange)', list: 'var(--tacton-blue)', define: 'var(--purple, #8250DF)', code: 'var(--text-tertiary)' };
   const purposeLabels = { inline: 'inline', variable: 'variable', block: 'block' };
 
+  // Build a lookup of define names in this batch — for detecting source relationships
+  const batchDefineNames = new Set(defines.filter(d => d.type === 'define').map(d => d.name));
+
   const list = el('div', { class: 'sel-multi-list' });
   for (const d of defines) {
     const exists = existingNames.has(d.name);
     const suggested = suggestDataSetFields(d);
     const iType = suggested.type || 'single';
     const iPurpose = suggested.purpose || 'variable';
+
+    // Detect inline refs that have a matching define in this batch
+    const isInlineRef = d.type === 'inline' && /^#\w+$/.test(d.source || d.name);
+    const sourceDefName = isInlineRef ? (d.source || d.name) : null;
+    const hasSourceInBatch = sourceDefName && batchDefineNames.has(sourceDefName);
+
+    // Source display: for inline refs with a batch define, show the link icon + define name
+    const sourceDisplay = hasSourceInBatch
+      ? el('span', { class: 'sel-multi-row-source sel-multi-row-linked', title: `References define ${sourceDefName}` }, [
+          el('span', { html: icon('link', 10), style: { marginRight: '2px', opacity: '0.6' } }),
+          sourceDefName,
+        ])
+      : el('span', { class: 'sel-multi-row-source' }, d.source.length > 40 ? d.source.slice(0, 37) + '…' : d.source);
+
     list.appendChild(
       el('div', { class: `sel-multi-row ${exists ? 'sel-multi-row-exists' : 'sel-multi-row-new'}` }, [
         el('span', { class: 'sel-multi-row-status', html: icon(exists ? 'check' : 'plus', 11) }),
         el('span', { class: 'sel-multi-row-type', style: { color: typeColors[iType] || '' }, html: icon(typeIcons[iType] || 'target', 10), title: iType }),
         el('code', { class: 'sel-multi-row-name' }, d.name),
-        el('span', { class: 'sel-multi-row-source' }, d.source.length > 40 ? d.source.slice(0, 37) + '…' : d.source),
+        sourceDisplay,
         exists
           ? el('span', { class: 'sel-multi-row-badge' }, 'exists')
           : el('span', { class: 'sel-multi-row-badges' }, [
@@ -1330,7 +1362,16 @@ function renderMultiDefinePanel(defines) {
     const definesByName = {};
     for (const d of defines) { definesByName[d.name] = d; }
 
-    for (const d of defines) {
+    // Sort: defines/variables first, then inline refs — so sourceDefine targets exist before refs
+    const sorted = [...defines].sort((a, b) => {
+      const aIsInline = a.type === 'inline' && !a.source?.includes('getConfigurationAttribute(');
+      const bIsInline = b.type === 'inline' && !b.source?.includes('getConfigurationAttribute(');
+      if (aIsInline && !bIsInline) return 1;
+      if (!aIsInline && bIsInline) return -1;
+      return 0;
+    });
+
+    for (const d of sorted) {
       try {
         const suggested = suggestDataSetFields(d);
         const baseName = suggested.name.startsWith('#') ? suggested.name : `#${suggested.name}`;
@@ -1370,6 +1411,20 @@ function renderMultiDefinePanel(defines) {
           varData.source = rp.sourceDefine;
         } else if (suggested.type === 'code' && rp) {
           varData.transforms = [];
+        }
+
+        // Inline #variable reference → set up sourceDefine relationship
+        // e.g. ${#lengthUom}$ has source '#lengthUom' pointing to $define{#lengthUom=...}$
+        if (suggested.purpose === 'inline' && varData.source && /^#\w+$/.test(varData.source)) {
+          // Fresh lookup — the define may have been created earlier in this batch
+          const currentVars = state.get('variables') || [];
+          const sourceVar = currentVars.find(v => v.name === varData.source && v.purpose !== 'inline');
+          varData.sourceDefine = varData.source;
+          if (sourceVar) {
+            varData.sourceDefineSource = sourceVar.sourceDefine || sourceVar.source || '';
+          }
+          // If the define was just created in this batch, the name already exists.
+          // The inline keeps the same name — two entries with different purposes is correct.
         }
 
         // Detect placeholder (.{?false}) in source and set flag
@@ -1631,6 +1686,20 @@ function showCreateDataSetForm(parsed, dupeInfo) {
           if (_solutionFilter) {
             varData.instanceSolution = _solutionFilter;
           }
+
+          // ── Inline #variable reference → set up sourceDefine relationship ──
+          // When ${#lengthUom}$ is created, the source is '#lengthUom' which
+          // refers to a $define{#lengthUom=...}$ variable. Link them via sourceDefine
+          // so the system knows this inline output draws from the define chain.
+          if (suggested.purpose === 'inline' && varData.source && /^#\w+$/.test(varData.source)) {
+            const allVarsForLink = state.get('variables') || [];
+            const sourceVar = allVarsForLink.find(v => v.name === varData.source);
+            varData.sourceDefine = varData.source;
+            if (sourceVar) {
+              varData.sourceDefineSource = sourceVar.sourceDefine || sourceVar.source || '';
+            }
+          }
+
           // Detect placeholder (.{?false}) in source and set flag
           if (varData.source && varData.source.includes('.{?false}')) {
             varData.placeholder = true;

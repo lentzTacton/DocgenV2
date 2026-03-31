@@ -5125,6 +5125,10 @@ select.input {
 .sel-multi-row-badge-purpose {
   background: var(--bg-secondary, #f0f0f0); color: var(--text-secondary);
 }
+.sel-multi-row-linked {
+  color: var(--purple, #8250DF); font-weight: 500;
+  display: flex; align-items: center;
+}
 .sel-multi-all-exist {
   display: flex; align-items: center; gap: 6px;
   padding: 10px 12px; font-size: 12px; color: var(--text-secondary);

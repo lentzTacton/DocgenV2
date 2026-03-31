@@ -1037,7 +1037,7 @@ export function validateDataSet(variable, opts = {}) {
         if (parts.length > 0) {
           const startObj = parts[0].toLowerCase();
           const knownObj = modelObjects.find(o => o.name.toLowerCase() === startObj);
-          if (!knownObj && startObj !== 'solution' && startObj !== '#this') {
+          if (!knownObj && startObj !== 'solution' && startObj !== '#this' && !variable.sourceDefine && !startObj.startsWith('#')) {
             issues.push({ level: 'warning', message: `Starting object "${parts[0]}" not found in model` });
           }
         }
