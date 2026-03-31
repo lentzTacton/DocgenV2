@@ -82,7 +82,20 @@ export async function loadConfigExplorer() {
     }
 
     if (!_selectedCpId) {
-      _selectedCpId = _cpList[0].id;
+      // Restore from wizState if editing an existing variable with a saved CP
+      if (wizState._selectedCpId && _cpList.some(cp => cp.id === wizState._selectedCpId)) {
+        _selectedCpId = wizState._selectedCpId;
+      } else {
+        _selectedCpId = _cpList[0].id;
+      }
+    }
+    // Always sync wizState so the CP is saved even if user never changes the dropdown
+    wizState._selectedCpId = _selectedCpId;
+    const cpInfo = _cpList.find(cp => cp.id === _selectedCpId);
+    if (cpInfo) {
+      wizState._selectedCpDisplayId = cpInfo.displayId || _selectedCpId;
+      // Also persist the solution name so the selection panel can auto-select it
+      if (cpInfo.solutionName) wizState.instanceSolution = cpInfo.solutionName;
     }
 
     // Pre-populate config explorer state from existing transforms (edit mode)
@@ -322,6 +335,11 @@ function renderExplorer(container) {
         style: { fontSize: '12px' },
         onchange: (e) => {
           _selectedCpId = e.target.value;
+          // Persist selected CP to wizState so it's saved with the variable
+          wizState._selectedCpId = _selectedCpId;
+          const cpInfo = _cpList.find(cp => cp.id === _selectedCpId);
+          wizState._selectedCpDisplayId = cpInfo?.displayId || _selectedCpId;
+          if (cpInfo?.solutionName) wizState.instanceSolution = cpInfo.solutionName;
           _productTree = null;
           _attrIndex = null;
           _navStack = [];

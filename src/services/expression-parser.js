@@ -605,6 +605,47 @@ export function parseMultipleDefines(text) {
 }
 
 /**
+ * Detect multiple expressions in a block of selected text — handles
+ * $define{…}$, ${…}$, and $for{…}$ patterns.
+ *
+ * Designed for table selections where the user selects an entire table
+ * containing many inline expressions like:
+ *   ${getConfigurationAttribute("path")!=null?getConfigurationAttribute("path").valueDescription:"N/A"}$
+ *
+ * Deduplicates by expression name to avoid importing the same expression twice.
+ * Returns an array of parsed results, or null if fewer than 2 found.
+ */
+export function parseMultipleExpressions(text) {
+  if (!text || typeof text !== 'string') return null;
+  const raw = normaliseWordText(text.trim());
+  if (!raw) return null;
+
+  // Match all expression patterns — order matters: $define{} first, then $for{}, then ${}
+  // Use a combined regex to find all patterns in one pass
+  const exprRegex = /\$(define\{.+?\}|for\{.+?\}|\{.+?\})\$/g;
+  const matches = [];
+  const seenNames = new Set();
+  let m;
+
+  while ((m = exprRegex.exec(raw)) !== null) {
+    // Reconstruct the full expression with $ wrapper
+    const fullExpr = `$${m[1]}$`;
+    const parsed = parseExpression(fullExpr);
+    if (parsed && parsed.type !== 'endfor') {
+      // Deduplicate by type+name (e.g. #pumpSeries appearing in multiple cells)
+      // A define and an inline ref with the same name are distinct expressions
+      const key = `${parsed.type}:${parsed.name || parsed.raw}`;
+      if (!seenNames.has(key)) {
+        seenNames.add(key);
+        matches.push(parsed);
+      }
+    }
+  }
+
+  return matches.length >= 2 ? matches : null;
+}
+
+/**
  * Extract a suggested name and source from a parsed expression
  * for use when creating a new dataset.
  */
@@ -637,11 +678,12 @@ export function suggestDataSetFields(parsed) {
       };
 
     case 'inline': {
-      // Inline expression — may have null-safe info from parser
+      // Inline expression — parsed from ${expr}$ syntax.
+      // All ${...}$ expressions are inline outputs (not defines), so purpose = 'inline'.
       const result = {
         name: parsed.name && parsed.name.startsWith('#') ? parsed.name : `#${(parsed.name || 'value').replace(/^#/, '')}`,
         source: parsed.source || parsed.name,
-        purpose: 'variable',
+        purpose: 'inline',
         type: parsed.dataType || 'single',
       };
       // Pass through null-safe / accessor info for the wizard

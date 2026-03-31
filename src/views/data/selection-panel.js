@@ -43,6 +43,7 @@ let isOpen = false;
 let currentParsed = null;
 let resolveData = null;
 let isResolving = false;
+let _solutionFilter = null;  // Client-side solution name filter for config data
 
 // ─── Favourite catalogue (persisted via localStorage) ───────────────
 
@@ -102,6 +103,7 @@ export function initSelectionPanel() {
     } else if (sel && sel.parsed) {
       currentParsed = sel.parsed;
       resolveData = null;
+      _solutionFilter = null;
       openPanel();
       renderPanel();
       // Auto-resolve
@@ -413,11 +415,16 @@ function renderResolveArea(container, dupeInfo) {
         ])
       );
     } else if (resolveData.records && resolveData.records.length > 0) {
+      // Apply client-side solution filter if active
+      const filteredRecords = _solutionFilter
+        ? resolveData.records.filter(r => r.solutionName === _solutionFilter)
+        : resolveData.records;
+
       // Show record count — with filtered context if applicable
-      const count = resolveData.totalCount ?? resolveData.records.length;
-      const unfilt = resolveData.unfilteredCount;
-      const countText = unfilt && unfilt !== count
-        ? `${count} / ${unfilt} record${unfilt !== 1 ? 's' : ''}`
+      const count = filteredRecords.length;
+      const unfiltTotal = _solutionFilter ? resolveData.records.length : resolveData.unfilteredCount;
+      const countText = unfiltTotal && unfiltTotal !== count
+        ? `${count} / ${unfiltTotal} record${unfiltTotal !== 1 ? 's' : ''}`
         : `${count} record${count !== 1 ? 's' : ''} found`;
 
       // Instance-scoped badge: shows when data is narrowed to a specific instance
@@ -447,7 +454,7 @@ function renderResolveArea(container, dupeInfo) {
 
       // Use existing variable's column preferences when available
       const dupeColumns = dupeInfo?.previewColumns;
-      const sample = resolveData.records.slice(0, 3);
+      const sample = filteredRecords.slice(0, 3);
       const availableFields = resolveData.fields
         ? resolveData.fields
         : Object.keys(sample[0] || {}).filter(k => !k.startsWith('_') && k !== 'id' && k !== 'href');
@@ -466,9 +473,9 @@ function renderResolveArea(container, dupeInfo) {
         );
         container.append(thead, ...tbody);
 
-        if (resolveData.records.length > 3) {
+        if (filteredRecords.length > 3) {
           container.appendChild(
-            el('div', { class: 'sel-resolve-more' }, `+${resolveData.records.length - 3} more…`)
+            el('div', { class: 'sel-resolve-more' }, `+${filteredRecords.length - 3} more…`)
           );
         }
       }
@@ -485,6 +492,19 @@ function renderResolveArea(container, dupeInfo) {
           ])
         );
       }
+    // Missing dependency hint — when inline ref points to a variable that doesn't exist yet
+    if (resolveData.hasMissing && resolveData.missingVars?.length > 0) {
+      container.appendChild(
+        el('div', { class: 'sel-resolve-missing', style: {
+          marginTop: '6px', padding: '6px 8px', background: 'var(--bg-warning, #fff8e1)',
+          borderRadius: '4px', fontSize: '11px', color: 'var(--text-secondary)',
+        } }, [
+          el('span', { html: icon('alertTriangle', 12), style: { marginRight: '4px' } }),
+          `Missing: ${resolveData.missingVars.join(', ')} — create define first`,
+        ])
+      );
+    }
+
     } else if (resolveData.value !== undefined) {
       // Single value result — filter info now shown in breakdown rows above
       container.appendChild(
@@ -528,6 +548,87 @@ async function autoResolve(parsed) {
   isResolving = false;
   const resolveEl2 = qs('#sel-resolve-area');
   if (resolveEl2) renderResolveArea(resolveEl2);
+
+  // ── Populate Solution dropdown from resolved config data ──
+  // Config attribute results include solutionName per record.
+  // Back-fill the instance picker with those solution names so the user
+  // can filter by solution without a separate API call.
+  if (resolveData?.records?.length > 0) {
+    const sel = qs('#sel-instance-select');
+    if (sel && sel.options.length <= 1) {
+      const solNames = [...new Set(
+        resolveData.records.map(r => r.solutionName).filter(Boolean)
+      )];
+      for (const name of solNames) {
+        sel.appendChild(el('option', { value: `sol:${name}` }, name));
+      }
+    }
+
+    // ── Auto-select solution from existing dataset or single-solution data ──
+    // Priority:
+    //   1. Existing variable has instanceSolution saved → select that
+    //   2. Existing variable has selectedCpDisplayId → derive solution from resolved records
+    //   3. Fallback: only ONE unique solution in resolved data → auto-select it
+    if (sel && resolveData?.records?.length > 0) {
+      let targetSol = null;
+
+      // Check existing variable for saved solution context
+      if (currentParsed) {
+        const dupeMatches = checkDuplicates(currentParsed);
+        if (dupeMatches.length > 0) {
+          const existing = dupeMatches[0];
+          // 1. Direct instanceSolution
+          if (existing.instanceSolution) {
+            targetSol = existing.instanceSolution;
+          }
+          // 2. Derive from selectedCpDisplayId
+          if (!targetSol && existing.selectedCpDisplayId) {
+            const cpRec = resolveData.records.find(r => r.cpDisplayId === existing.selectedCpDisplayId);
+            if (cpRec?.solutionName) targetSol = cpRec.solutionName;
+          }
+        }
+      }
+
+      // 3. Fallback: if only one unique solution in the data, auto-select it
+      //    Also auto-select the first solution when there's an existing variable
+      //    match but no saved instanceSolution (legacy data migration path).
+      if (!targetSol) {
+        const uniqueSols = [...new Set(resolveData.records.map(r => r.solutionName).filter(Boolean))];
+        if (uniqueSols.length === 1) {
+          targetSol = uniqueSols[0];
+        } else if (uniqueSols.length > 1 && currentParsed) {
+          // 4. Existing variable with no saved solution → pick the first solution
+          const dupeMatches = checkDuplicates(currentParsed);
+          if (dupeMatches.length > 0) {
+            targetSol = uniqueSols[0];
+          }
+        }
+      }
+
+      if (targetSol) {
+        let matched = false;
+        for (const opt of sel.options) {
+          if (opt.value === `sol:${targetSol}`) {
+            sel.value = opt.value;
+            _solutionFilter = targetSol;
+            matched = true;
+            break;
+          }
+          const optName = opt.textContent.replace(/\s+\(.*\)$/, '').trim();
+          if (optName === targetSol) {
+            sel.value = opt.value;
+            _solutionFilter = targetSol;
+            matched = true;
+            break;
+          }
+        }
+        if (matched) {
+          const resolveEl = qs('#sel-resolve-area');
+          if (resolveEl) renderResolveArea(resolveEl);
+        }
+      }
+    }
+  }
 }
 
 /**
@@ -637,23 +738,48 @@ async function resolveExpression(parsed) {
     };
   }
 
-  // ── Linked defines: ternary null-safe or simple accessor on another define ──
+  // ── Linked defines / inline #variable references ──
   // e.g. (#headUomV!=null && #headUomV.value!=null) ? #headUomV.valueDescription : "N/A"
   // e.g. #headUomV.value, #headUomV.valueDescription
+  // e.g. ${#lengthUom}$ → #lengthUom → #lengthUomV → getConfigurationAttribute(...)
   if (varRefs.length > 0 && varRefs.length <= 2) {
     const allVars = state.get('variables') || [];
-    // Check if all referenced #vars are existing defines (not object-model paths)
-    const allAreDefines = varRefs.every(ref => allVars.some(v => v.name === ref));
-    if (allAreDefines) {
-      // Resolve the first dependency to show its value
-      const refVar = allVars.find(v => v.name === varRefs[0]);
-      if (refVar && refVar.source && refVar.source.includes('getConfigurationAttribute(')) {
-        const result = await resolveExpression({ ...parsed, source: refVar.source });
-        if (result && !result.error) {
-          result.objectName = `${varRefs[0]} → ConfiguredProduct`;
+
+    // Check which #vars exist and which are missing
+    const foundVars = varRefs.filter(ref => allVars.some(v => v.name === ref));
+    const missingVars = varRefs.filter(ref => !allVars.some(v => v.name === ref));
+
+    // If ALL referenced #vars exist — follow the define chain to resolve
+    if (missingVars.length === 0) {
+      // Follow the define chain to find the underlying config attribute source.
+      // Walk: #lengthUom → source #lengthUomV → source getConfigurationAttribute(...)
+      const chain = [];
+      let current = allVars.find(v => v.name === varRefs[0]);
+      const visited = new Set();
+      while (current && chain.length < 5) {
+        chain.push(current.name);
+        visited.add(current.name);
+        const curSource = current.sourceDefine || current.source || '';
+
+        // Found a config attribute — resolve it
+        if (curSource.includes('getConfigurationAttribute(')) {
+          const result = await resolveExpression({ ...parsed, source: curSource });
+          if (result && !result.error) {
+            result.objectName = `${chain.join(' → ')} → ConfiguredProduct`;
+          }
+          return result;
         }
-        return result;
+
+        // Source is another #variable — follow the chain
+        const nextRef = curSource.match(/^#(\w+)$/)?.[0]
+          || (curSource.match(/#(\w+)/g) || []).find(r => !visited.has(r));
+        if (nextRef && !visited.has(nextRef)) {
+          current = allVars.find(v => v.name === nextRef);
+        } else {
+          break;
+        }
       }
+
       // Non-config source — show dependency info
       return {
         records: varRefs.map(ref => {
@@ -665,6 +791,24 @@ async function resolveExpression(parsed) {
         fields: ['name', 'type', 'source'],
       };
     }
+
+    // Some or all #vars are missing — report which exist and which are missing
+    return {
+      records: varRefs.map(ref => {
+        const v = allVars.find(x => x.name === ref);
+        return {
+          name: ref,
+          status: v ? 'exists' : 'missing',
+          type: v?.type || '—',
+          source: v?.source?.substring(0, 60) || '— not defined yet —',
+        };
+      }),
+      totalCount: varRefs.length,
+      objectName: 'Dependencies',
+      fields: ['name', 'status', 'type', 'source'],
+      hasMissing: true,
+      missingVars,
+    };
   }
 
   // For dot-paths like solution.opportunity.account.name
@@ -901,7 +1045,36 @@ function renderInstancePicker(container) {
       const opt = e.target.selectedOptions[0];
       if (!opt || !opt.value) {
         setSelectedInstance(null);
+        _solutionFilter = null;
+      } else if (opt.value.startsWith('sol:')) {
+        // Solution name filter — filter resolved records client-side
+        _solutionFilter = opt.value.slice(4);
+        const resolveEl = qs('#sel-resolve-area');
+        if (resolveEl) renderResolveArea(resolveEl);
+        return;
       } else {
+        // Regular instance selected — for config data, filter client-side by solutionName
+        // (resolveConfigAttrAcrossCPs ignores selectedInstance)
+        const isConfigData = resolveData?.records?.some(r => r.solutionName);
+        if (isConfigData && resolveData) {
+          // Match the solutionName in resolved records.
+          // The option text is "SolName  (uuid)" — extract just the name part.
+          const optName = opt.textContent.replace(/\s+\(.*\)$/, '').trim();
+          // Find a record whose solutionName matches this instance
+          const matchedSol = resolveData.records.find(r =>
+            r.solutionName === optName || r.solutionName === opt.value
+          );
+          _solutionFilter = matchedSol ? matchedSol.solutionName : optName;
+          setSelectedInstance({
+            id: opt.value,
+            displayId: opt.dataset.displayId || opt.value,
+            name: opt.textContent,
+          });
+          const resolveEl = qs('#sel-resolve-area');
+          if (resolveEl) renderResolveArea(resolveEl);
+          return;
+        }
+        _solutionFilter = null;
         setSelectedInstance({
           id: opt.value,
           displayId: opt.dataset.displayId || opt.value,
@@ -924,7 +1097,9 @@ function renderInstancePicker(container) {
     if (!sel) return;
     // Keep the "All" option, add instances
     for (const inst of instances) {
-      const text = inst.displayId && inst.displayId !== inst.name
+      // Hide UUID-style displayIds (32+ hex chars) — they're just noise
+      const isUuid = /^[0-9a-f]{20,}$/i.test(inst.displayId || '');
+      const text = inst.displayId && inst.displayId !== inst.name && !isUuid
         ? `${inst.name}  (${inst.displayId})`
         : inst.name;
       const opt = el('option', {
@@ -956,9 +1131,9 @@ function renderInstancePicker(container) {
 function checkDuplicates(parsed) {
   const allVariables = state.get('variables') || [];
   const catalogues = state.get('catalogues') || [];
-  // Skip cookbook / readonly catalogue entries
-  const readonlyCatIds = new Set(catalogues.filter(c => c.readonly).map(c => c.id));
-  const variables = allVariables.filter(v => !readonlyCatIds.has(v.catalogueId));
+  // Skip cookbook / readonly catalogue entries (String coercion to avoid type mismatch)
+  const readonlyCatIds = new Set(catalogues.filter(c => c.readonly).map(c => String(c.id)));
+  const variables = allVariables.filter(v => !readonlyCatIds.has(String(v.catalogueId)));
   const seen = new Set();
   const matches = [];
 
@@ -1004,10 +1179,11 @@ function renderMultiDefinePanel(defines) {
   clear(panelEl);
 
   // Cross-reference with existing non-cookbook variables
+  // Use String() coercion on IDs to avoid type-mismatch (number vs string)
   const allVariables = state.get('variables') || [];
   const catalogues = state.get('catalogues') || [];
-  const readonlyCatIds = new Set(catalogues.filter(c => c.readonly).map(c => c.id));
-  const userVars = allVariables.filter(v => !readonlyCatIds.has(v.catalogueId));
+  const readonlyCatIds = new Set(catalogues.filter(c => c.readonly).map(c => String(c.id)));
+  const userVars = allVariables.filter(v => !readonlyCatIds.has(String(v.catalogueId)));
   const existingNames = new Set(userVars.map(v => v.name));
 
   const newDefines = defines.filter(d => !existingNames.has(d.name));
@@ -1017,7 +1193,7 @@ function renderMultiDefinePanel(defines) {
   const headerRow = el('div', { class: 'sel-panel-header' }, [
     el('div', { class: 'sel-panel-title-row' }, [
       el('span', { class: 'sel-panel-icon', html: icon('layers', 16) }),
-      el('span', { class: 'sel-panel-title' }, 'Multiple defines detected'),
+      el('span', { class: 'sel-panel-title' }, 'Multiple expressions detected'),
     ]),
     el('button', {
       class: 'sel-panel-close',
@@ -1030,7 +1206,7 @@ function renderMultiDefinePanel(defines) {
   const summary = el('div', { class: 'sel-multi-summary' }, [
     el('div', { class: 'sel-multi-count' }, [
       el('span', { class: 'sel-multi-count-num' }, String(defines.length)),
-      el('span', {}, ` define statement${defines.length !== 1 ? 's' : ''} detected`),
+      el('span', {}, ` expression${defines.length !== 1 ? 's' : ''} detected`),
     ]),
     newDefines.length > 0
       ? el('div', { class: 'sel-multi-new' }, [
@@ -1046,15 +1222,17 @@ function renderMultiDefinePanel(defines) {
       : null,
   ]);
 
-  // List each define with status and inferred type
+  // List each define with status, purpose, and inferred type
   const typeIcons = { single: 'target', object: 'box', bom: 'database', list: 'list', define: 'link', code: 'code' };
   const typeColors = { single: 'var(--success)', object: 'var(--orange)', bom: 'var(--orange)', list: 'var(--tacton-blue)', define: 'var(--purple, #8250DF)', code: 'var(--text-tertiary)' };
+  const purposeLabels = { inline: 'inline', variable: 'variable', block: 'block' };
 
   const list = el('div', { class: 'sel-multi-list' });
   for (const d of defines) {
     const exists = existingNames.has(d.name);
     const suggested = suggestDataSetFields(d);
     const iType = suggested.type || 'single';
+    const iPurpose = suggested.purpose || 'variable';
     list.appendChild(
       el('div', { class: `sel-multi-row ${exists ? 'sel-multi-row-exists' : 'sel-multi-row-new'}` }, [
         el('span', { class: 'sel-multi-row-status', html: icon(exists ? 'check' : 'plus', 11) }),
@@ -1063,7 +1241,10 @@ function renderMultiDefinePanel(defines) {
         el('span', { class: 'sel-multi-row-source' }, d.source.length > 40 ? d.source.slice(0, 37) + '…' : d.source),
         exists
           ? el('span', { class: 'sel-multi-row-badge' }, 'exists')
-          : el('span', { class: `sel-multi-row-badge sel-multi-row-badge-new badge-${iType}` }, iType),
+          : el('span', { class: 'sel-multi-row-badges' }, [
+              el('span', { class: `sel-multi-row-badge sel-multi-row-badge-purpose badge-purpose-${iPurpose === 'variable' ? 'var' : iPurpose}` }, purposeLabels[iPurpose] || iPurpose),
+              el('span', { class: `sel-multi-row-badge sel-multi-row-badge-new badge-${iType}` }, iType),
+            ]),
       ])
     );
   }
@@ -1072,16 +1253,13 @@ function renderMultiDefinePanel(defines) {
   const actions = el('div', { class: 'sel-panel-actions' });
 
   const allExist = newDefines.length === 0;
-  const importTargets = allExist ? defines : newDefines;
-  const importLabel = allExist
-    ? `Import all ${defines.length} anyway`
-    : `Import ${newDefines.length} new`;
+  const hasMix = newDefines.length > 0 && existingDefines.length > 0;
 
   if (allExist) {
     actions.appendChild(
       el('div', { class: 'sel-multi-all-exist' }, [
         el('span', { html: icon('check', 14) }),
-        'All defines already exist in your datasets.',
+        'All expressions already exist in your datasets.',
       ])
     );
   }
@@ -1139,76 +1317,119 @@ function renderMultiDefinePanel(defines) {
 
   const errorEl = el('div', { class: 'sel-create-error', style: { display: 'none' } });
 
-  const btnRow = el('div', { class: 'sel-create-btns' }, [
-    el('button', { class: 'btn btn-outline btn-sm', onclick: () => { state.set('word.selection', null); } }, 'Dismiss'),
-    el('button', {
-      class: `btn btn-sm ${allExist ? 'btn-outline' : 'btn-primary'}`,
-      onclick: async () => {
-        if (!selectedCatId) {
-          errorEl.textContent = 'Select a catalogue';
-          errorEl.style.display = 'block';
-          return;
+  // Shared import function — skipExisting: true = only new, false = all (duplicates get unique names)
+  async function doImport(skipExisting) {
+    if (!selectedCatId) {
+      errorEl.textContent = 'Select a catalogue';
+      errorEl.style.display = 'block';
+      return;
+    }
+    let imported = 0;
+    let skipped = 0;
+
+    const definesByName = {};
+    for (const d of defines) { definesByName[d.name] = d; }
+
+    for (const d of defines) {
+      try {
+        const suggested = suggestDataSetFields(d);
+        const baseName = suggested.name.startsWith('#') ? suggested.name : `#${suggested.name}`;
+        const alreadyExists = existingNames.has(baseName);
+
+        if (alreadyExists && skipExisting) { skipped++; continue; }
+
+        const rp = reverseParseSource(d.source, suggested.type);
+
+        const varData = {
+          name: alreadyExists ? makeUniqueName(baseName) : baseName,
+          purpose: suggested.purpose || 'variable',
+          type: suggested.type,
+          source: suggested.source || d.source,
+          catalogueId: selectedCatId,
+          sectionId: selectedSectionId,
+        };
+
+        // Pass through null-safe / accessor transforms from inline expressions
+        if (suggested.accessor || suggested.nullSafeFallback != null) {
+          const transforms = [];
+          if (suggested.accessor) transforms.push({ type: 'accessor', method: suggested.accessor });
+          if (suggested.nullSafeFallback != null) {
+            const nsTrans = { type: 'nullSafe', fallback: suggested.nullSafeFallback };
+            if (suggested.nullCheckField) nsTrans.nullCheckField = suggested.nullCheckField;
+            transforms.push(nsTrans);
+          }
+          varData.transforms = transforms;
         }
-        let imported = 0;
 
-        // Build a lookup of all defines by name for null-safe pair detection
-        const definesByName = {};
-        for (const d of defines) { definesByName[d.name] = d; }
+        // Smart linking for 'define' type — set up sourceDefine + transforms
+        if (suggested.type === 'define' && rp?.sourceDefine) {
+          varData.sourceDefine = rp.sourceDefine;
+          const refDef = definesByName[rp.sourceDefine];
+          varData.sourceDefineSource = refDef?.source || '';
+          varData.transforms = rp.transforms || [];
+          varData.source = rp.sourceDefine;
+        } else if (suggested.type === 'code' && rp) {
+          varData.transforms = [];
+        }
 
-        for (const d of importTargets) {
-          try {
-            const suggested = suggestDataSetFields(d);
-            const baseName = suggested.name.startsWith('#') ? suggested.name : `#${suggested.name}`;
-            const rp = reverseParseSource(d.source, suggested.type);
+        // Detect placeholder (.{?false}) in source and set flag
+        if (varData.source && varData.source.includes('.{?false}')) {
+          varData.placeholder = true;
+          varData.source = varData.source.replace(/\.\{\?false\}$/, '');
+        }
 
-            const varData = {
-              name: allExist ? makeUniqueName(baseName) : baseName,
-              purpose: 'variable',
-              type: suggested.type,
-              source: d.source,
-              catalogueId: selectedCatId,
-              sectionId: selectedSectionId,
-            };
-
-            // Smart linking for 'define' type — set up sourceDefine + transforms
-            if (suggested.type === 'define' && rp?.sourceDefine) {
-              varData.sourceDefine = rp.sourceDefine;
-              // Look up the source define's original expression
-              const refDef = definesByName[rp.sourceDefine];
-              varData.sourceDefineSource = refDef?.source || '';
-              varData.transforms = rp.transforms || [];
-              varData.source = rp.sourceDefine; // source points to the define name
-            } else if (suggested.type === 'code' && rp) {
-              // Code: store the full expression, transforms empty
-              varData.transforms = [];
-            }
-
-            // Detect placeholder (.{?false}) in source and set flag
-            if (varData.source && varData.source.includes('.{?false}')) {
-              varData.placeholder = true;
-              varData.source = varData.source.replace(/\.\{\?false\}$/, '');
-            }
-
-            // Detect parent-child block relationship (#loopVar.rest)
-            if (varData.source) {
-              const loopVarMatch = varData.source.match(/^(#\w+)\./);
-              if (loopVarMatch) {
-                varData.parentLoopVar = loopVarMatch[1];
-                varData.source = varData.source.slice(loopVarMatch[0].length);
-              }
-            }
-
-            await createVariable(varData);
-            imported++;
-          } catch (err) {
-            console.warn('[DocGen] Bulk import skip:', d.name, err);
+        // Detect parent-child block relationship (#loopVar.rest)
+        if (varData.source) {
+          const loopVarMatch = varData.source.match(/^(#\w+)\./);
+          if (loopVarMatch) {
+            varData.parentLoopVar = loopVarMatch[1];
+            varData.source = varData.source.slice(loopVarMatch[0].length);
           }
         }
-        showCreateToast(`Imported ${imported} of ${importTargets.length} datasets`);
-        state.set('word.selection', null);
-      },
-    }, [el('span', { html: icon('download', 12) }), ` ${importLabel}`]),
-  ]);
+
+        await createVariable(varData);
+        imported++;
+      } catch (err) {
+        console.warn('[DocGen] Bulk import skip:', d.name, err);
+      }
+    }
+    const msg = skipped > 0
+      ? `Imported ${imported}, skipped ${skipped} existing`
+      : `Imported ${imported} dataset${imported !== 1 ? 's' : ''}`;
+    showCreateToast(msg);
+    state.set('word.selection', null);
+  }
+
+  // Button row: Dismiss + Import new (if mix) + Import all
+  const btnChildren = [
+    el('button', { class: 'btn btn-outline btn-sm', onclick: () => { state.set('word.selection', null); } }, 'Dismiss'),
+  ];
+
+  if (hasMix) {
+    // Two import options: new only + all
+    btnChildren.push(
+      el('button', {
+        class: 'btn btn-primary btn-sm',
+        onclick: () => doImport(true),
+      }, [el('span', { html: icon('download', 12) }), ` Import ${newDefines.length} new`])
+    );
+    btnChildren.push(
+      el('button', {
+        class: 'btn btn-outline btn-sm',
+        onclick: () => doImport(false),
+      }, [el('span', { html: icon('download', 12) }), ` Import all ${defines.length}`])
+    );
+  } else {
+    // All new or all exist — single button
+    btnChildren.push(
+      el('button', {
+        class: 'btn btn-sm ' + (allExist ? 'btn-outline' : 'btn-primary'),
+        onclick: () => doImport(allExist ? false : true),
+      }, [el('span', { html: icon('download', 12) }), allExist ? ` Import all ${defines.length} anyway` : ` Import ${newDefines.length} new`])
+    );
+  }
+
+  const btnRow = el('div', { class: 'sel-create-btns' }, btnChildren);
 
   actions.appendChild(
     el('div', { class: 'sel-create-field', style: { marginBottom: '4px' } }, [
@@ -1289,7 +1510,7 @@ function showCreateDataSetForm(parsed, dupeInfo) {
 
   // Purpose + Type badges
   form.appendChild(el('div', { class: 'sel-create-badges' }, [
-    el('span', { class: `badge badge-purpose-${suggested.purpose === 'variable' ? 'var' : 'block'}` }, suggested.purpose.toUpperCase()),
+    el('span', { class: `badge badge-purpose-${suggested.purpose === 'variable' ? 'var' : suggested.purpose === 'inline' ? 'inline' : 'block'}` }, suggested.purpose.toUpperCase()),
     el('span', { class: `badge badge-${suggested.type}` }, suggested.type.toUpperCase()),
   ]));
 
@@ -1405,6 +1626,10 @@ function showCreateDataSetForm(parsed, dupeInfo) {
               transforms.push(nsTrans);
             }
             varData.transforms = transforms;
+          }
+          // Save active solution filter as instanceSolution on the dataset
+          if (_solutionFilter) {
+            varData.instanceSolution = _solutionFilter;
           }
           // Detect placeholder (.{?false}) in source and set flag
           if (varData.source && varData.source.includes('.{?false}')) {

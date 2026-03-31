@@ -97,6 +97,8 @@ export async function createVariable(data) {
     instanceLabel: data.instanceLabel || null,
     instanceSolution: data.instanceSolution || null,
     cpContext: data.cpContext || null,
+    selectedCpId: data.selectedCpId || null,
+    selectedCpDisplayId: data.selectedCpDisplayId || null,
     catchAll: data.catchAll || false,
     excludeVars: data.excludeVars || [],
     sectionId: data.sectionId || null,
@@ -482,6 +484,24 @@ export function generateExpression(variable) {
     } else {
       expr = source || '';
     }
+  } else if (type === 'config') {
+    // Config = getConfigurationAttribute() with optional accessor + null-safe
+    const { transforms } = variable;
+    expr = source || '';
+
+    if (transforms && transforms.length > 0) {
+      const nullSafe = transforms.find(t => t.type === 'nullSafe');
+      const accessor = transforms.find(t => t.type === 'accessor');
+
+      if (nullSafe) {
+        const fallback = nullSafe.fallback || 'N/A';
+        const accessorMethod = accessor?.method || '.value';
+        const baseExpr = source || '';
+        expr = `${baseExpr}!=null?${baseExpr}${accessorMethod}:"${fallback}"`;
+      } else if (accessor && accessor.method) {
+        expr += accessor.method;
+      }
+    }
   } else if (type === 'code') {
     // Raw formula expression — store as-is
     expr = source || '';
@@ -534,6 +554,23 @@ export function generateExpression(variable) {
           case 'sort':         expr += `.sort('${t.field || 'field'}')`; break;
         }
       }
+    }
+  }
+
+  // ── Universal accessor / null-safe fallback ─────────────────────
+  // Types 'single', 'config', and 'define' handle accessor/nullSafe inline above.
+  // For all other types (code, list, object, bom), apply transforms here if present.
+  if (type !== 'single' && type !== 'config' && type !== 'define') {
+    const transforms = variable.transforms || [];
+    const nullSafe = transforms.find(t => t.type === 'nullSafe');
+    const accessor = transforms.find(t => t.type === 'accessor');
+    if (nullSafe && expr) {
+      const fallback = nullSafe.fallback || 'N/A';
+      const accessorMethod = accessor?.method || '';
+      const baseExpr = expr;
+      expr = `${baseExpr}!=null?${baseExpr}${accessorMethod}:"${fallback}"`;
+    } else if (accessor && accessor.method && expr) {
+      expr += accessor.method;
     }
   }
 

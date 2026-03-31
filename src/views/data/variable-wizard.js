@@ -1332,77 +1332,7 @@ function renderDefineSection(container) {
     }
   }
 
-  // Accessor picker
-  const accessors = [
-    { value: '.value', label: '.value — raw value' },
-    { value: '.valueDescription', label: '.valueDescription — display text' },
-    { value: '.price(0)', label: '.price(0) — price' },
-  ];
-
-  const currentAccessor = wizState.transforms.find(t => t.type === 'accessor');
-
-  const accSelect = el('select', {
-    class: 'input',
-    style: { fontSize: '12px', marginTop: '8px' },
-    onchange: (e) => {
-      const val = e.target.value;
-      const others = wizState.transforms.filter(t => t.type !== 'accessor');
-      if (val) {
-        others.push({ type: 'accessor', method: val });
-      }
-      wizState.transforms = others;
-      refreshPipeline();
-    },
-  });
-  accSelect.appendChild(el('option', { value: '' }, '— No accessor —'));
-  accessors.forEach(a => {
-    const opt = el('option', { value: a.value }, a.label);
-    if (currentAccessor?.method === a.value) opt.selected = true;
-    accSelect.appendChild(opt);
-  });
-
-  container.appendChild(el('div', { class: 'form-group', style: { marginTop: '10px' } }, [
-    el('div', { class: 'form-label' }, [el('span', { class: 'icon', html: icon('chevronRight', 12) }), 'Accessor']),
-    accSelect,
-  ]));
-
-  // Null-safe toggle
-  const currentNullSafe = wizState.transforms.find(t => t.type === 'nullSafe');
-
-  const nsCheck = el('input', {
-    type: 'checkbox',
-    checked: !!currentNullSafe,
-    onchange: (e) => {
-      const others = wizState.transforms.filter(t => t.type !== 'nullSafe');
-      if (e.target.checked) {
-        others.push({ type: 'nullSafe', fallback: fallbackInput.value || 'N/A' });
-      }
-      wizState.transforms = others;
-      refreshPipeline();
-    },
-  });
-
-  const fallbackInput = el('input', {
-    class: 'input',
-    style: { fontSize: '11px', width: '80px', marginLeft: '8px' },
-    value: currentNullSafe?.fallback || 'N/A',
-    placeholder: 'N/A',
-    oninput: (e) => {
-      const ns = wizState.transforms.find(t => t.type === 'nullSafe');
-      if (ns) { ns.fallback = e.target.value; refreshPipeline(); }
-    },
-  });
-
-  container.appendChild(el('div', { class: 'form-group', style: { marginTop: '10px' } }, [
-    el('div', { class: 'form-label' }, [el('span', { class: 'icon', html: icon('shield', 12) }), 'Null-safe wrapper']),
-    el('label', { class: 'wiz-define-ns-row' }, [
-      nsCheck,
-      el('span', {}, 'Generate two-define null-safe pattern'),
-      fallbackInput,
-    ]),
-    el('div', { style: { fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '4px' } },
-      'Produces $define{#nameV=source}$ + $define{#name=(check) ? value: "fallback"}$'),
-  ]));
+  // Accessor and null-safe controls are now in the universal Transformation tab.
 }
 
 
@@ -2529,7 +2459,6 @@ function renderDetailsControls() {
     renderListDetailsControls(container);
   } else if (wizState.type === 'bom') {
     // BOM: filters & transforms are configured in Source tab's specialized builder.
-    // Show a summary here.
     const filterCount = wizState.filters?.length || 0;
     const transformCount = wizState.transforms?.length || 0;
     const catchAll = wizState.catchAll;
@@ -2545,6 +2474,95 @@ function renderDetailsControls() {
     ));
   }
 
+  // ── Universal: Accessor + Null-safe wrapper (all types) ──
+  renderAccessorAndNullSafe(container);
+}
+
+/**
+ * Accessor (.value / .valueDescription) + Null-safe wrapper — available on ALL types.
+ * Renders into the Transformation tab.
+ */
+function renderAccessorAndNullSafe(container) {
+  const card = el('div', { class: 'wiz-transform-card', style: { marginTop: '10px' } });
+
+  // ── Accessor picker ──
+  const currentAccessor = wizState.transforms.find(t => t.type === 'accessor');
+  const accessors = [
+    { key: '',                  label: '(none)',            desc: 'No accessor' },
+    { key: '.value',            label: '.value',            desc: 'Raw attribute value' },
+    { key: '.valueDescription', label: '.valueDescription', desc: 'Display label' },
+    { key: '.price(0)',         label: '.price(0)',         desc: 'Price (0 decimals)' },
+    { key: '.price(2)',         label: '.price(2)',         desc: 'Price (2 decimals)' },
+    { key: '.round(2)',         label: '.round(2)',         desc: 'Round to 2 decimals' },
+  ];
+
+  const accSelect = el('select', {
+    class: 'input', style: { fontSize: '12px' },
+    onchange: (e) => {
+      wizState.transforms = wizState.transforms.filter(t => t.type !== 'accessor');
+      if (e.target.value) {
+        wizState.transforms.unshift({ type: 'accessor', method: e.target.value });
+      }
+      renderDetailsControls(); refreshPipeline();
+    },
+  });
+  accessors.forEach(a => {
+    const opt = el('option', { value: a.key }, `${a.label} — ${a.desc}`);
+    if (currentAccessor?.method === a.key) opt.selected = true;
+    accSelect.appendChild(opt);
+  });
+
+  card.appendChild(el('div', { class: 'wiz-transform-card-header' }, [
+    el('span', { class: 'icon', html: icon('type', 12) }),
+    'Accessor',
+  ]));
+  card.appendChild(el('div', { style: { padding: '6px 10px' } }, [accSelect]));
+
+  // ── Null-safe wrapper ──
+  const currentNullSafe = wizState.transforms.find(t => t.type === 'nullSafe');
+
+  const fallbackInput = el('input', {
+    class: 'input',
+    value: currentNullSafe?.fallback || 'N/A',
+    placeholder: 'N/A',
+    style: { fontSize: '12px', width: '80px' },
+    oninput: (e) => {
+      const ns = wizState.transforms.find(t => t.type === 'nullSafe');
+      if (ns) { ns.fallback = e.target.value; refreshPipeline(); }
+    },
+  });
+
+  card.appendChild(el('div', { class: 'wiz-transform-card-header', style: { marginTop: '6px', borderTop: '1px solid var(--border-light)', paddingTop: '8px' } }, [
+    el('span', { class: 'icon', html: icon('shield', 12) }),
+    'Null-safe wrapper',
+  ]));
+
+  card.appendChild(el('label', {
+    class: 'wiz-transform-toggle',
+  }, [
+    el('input', {
+      type: 'checkbox', checked: !!currentNullSafe,
+      onchange: (e) => {
+        const others = wizState.transforms.filter(t => t.type !== 'nullSafe');
+        if (e.target.checked) {
+          others.push({ type: 'nullSafe', fallback: fallbackInput.value || 'N/A' });
+        }
+        wizState.transforms = others;
+        renderDetailsControls(); refreshPipeline();
+      },
+    }),
+    el('span', { style: { fontWeight: '600', flex: '1' } }, 'Enable null-safe wrapper'),
+    el('span', { class: 'wiz-transform-hint' }, '\u2260 null ? expr : "N/A"'),
+  ]));
+
+  if (currentNullSafe) {
+    card.appendChild(el('div', { style: { padding: '4px 10px 8px', display: 'flex', alignItems: 'center', gap: '6px' } }, [
+      el('span', { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, 'Fallback:'),
+      fallbackInput,
+    ]));
+  }
+
+  container.appendChild(card);
 }
 
 // ── Object type: filters + transforms ──
@@ -2774,82 +2792,12 @@ function showObjTransformFieldPicker(menu, parentWrap, def) {
 // ── Single type: accessor method + null-safety ──
 
 function renderSingleDetailsControls(container) {
-  // ── Section 1: Accessor Method ──
-  const accessorCard = el('div', { class: 'wiz-transform-card' });
-  accessorCard.appendChild(el('div', { class: 'wiz-transform-card-header' }, [
-    el('span', { class: 'icon', html: icon('settings', 12) }),
-    'Accessor method',
-  ]));
-
-  // Read current accessor from transforms
-  const currentAccessor = (wizState.transforms.length > 0 && wizState.transforms[0].type === 'accessor')
-    ? wizState.transforms[0].method : '';
-
-  const sel = el('select', {
-    class: 'input', style: { fontSize: '11px' },
-    onchange: (e) => {
-      wizState.transforms = wizState.transforms.filter(t => t.type !== 'accessor');
-      if (e.target.value) {
-        wizState.transforms.unshift({ type: 'accessor', method: e.target.value });
-      }
-      refreshPipeline();
-    },
-  }, SINGLE_ACCESSORS.map(a =>
-    el('option', { value: a.key, selected: a.key === currentAccessor || undefined }, `${a.label} — ${a.desc}`)
-  ));
-  accessorCard.appendChild(sel);
-  container.appendChild(accessorCard);
-
-  // ── Section 2: Null-safe Wrapper ──
-  const nullSafe = wizState.transforms.some(t => t.type === 'nullSafe');
-  const nullCard = el('div', { class: 'wiz-transform-card' });
-  nullCard.appendChild(el('div', { class: 'wiz-transform-card-header' }, [
-    el('span', { class: 'icon', html: icon('shield', 12) }),
-    'Null-safe wrapper',
-  ]));
-
-  // Toggle row
-  nullCard.appendChild(el('label', {
-    class: 'wiz-transform-toggle',
-  }, [
-    el('input', {
-      type: 'checkbox', checked: nullSafe || undefined,
-      onchange: (e) => {
-        wizState.transforms = wizState.transforms.filter(t => t.type !== 'nullSafe');
-        if (e.target.checked) {
-          wizState.transforms.push({ type: 'nullSafe', fallback: 'N/A' });
-        }
-        renderDetailsControls();
-        refreshPipeline();
-      },
-    }),
-    el('span', { style: { fontWeight: '600', flex: '1' } }, 'Enable null-safe wrapper'),
-    el('span', { class: 'wiz-transform-hint' }, '!= null ? expr : "N/A"'),
-  ]));
-
-  // Fallback value (nested inside the card when enabled)
-  if (nullSafe) {
-    const nsTransform = wizState.transforms.find(t => t.type === 'nullSafe');
-    const fallbackRow = el('div', { class: 'wiz-transform-sub' }, [
-      el('div', { class: 'wiz-transform-sub-label' }, 'Fallback value'),
-      el('input', {
-        class: 'input', value: nsTransform?.fallback || 'N/A', placeholder: 'N/A',
-        style: { fontSize: '11px', maxWidth: '160px', fontFamily: 'var(--mono)' },
-        oninput: (e) => { if (nsTransform) { nsTransform.fallback = e.target.value; refreshPipeline(); } },
-      }),
-    ]);
-    nullCard.appendChild(fallbackRow);
-  }
-
-  container.appendChild(nullCard);
-
-  // Collection filter — narrow multi-record results to a single value
-  // Only shown when multiple records exist
+  // Accessor and null-safe controls are now in the universal section (renderAccessorAndNullSafe).
+  // Single type only adds its collection filter builder here.
   const recordCount = wizState.currentObjDesc?.recordCount || wizState.objectRecords?.length || 0;
   if (recordCount > 1 || wizState._singleFilter) {
     container.appendChild(renderSingleFilterBuilder());
   }
-
 }
 
 // ── Single type: guided collection filter ──

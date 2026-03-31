@@ -7,7 +7,7 @@
 import { el } from '../core/dom.js';
 import { icon } from '../components/icon.js';
 import state from '../core/state.js';
-import { parseExpression, parseMultipleDefines } from './expression-parser.js';
+import { parseExpression, parseMultipleDefines, parseMultipleExpressions } from './expression-parser.js';
 
 // ─── Expression builder ─────────────────────────────────────────────
 
@@ -390,8 +390,8 @@ export function startSelectionListener() {
           return;
         }
 
-        // Check for multiple defines first (e.g. two-define null-safe pattern)
-        const multiDefines = parseMultipleDefines(text);
+        // Check for multiple expressions first (defines, inline ${}, $for{})
+        const multiDefines = parseMultipleExpressions(text) || parseMultipleDefines(text);
         if (multiDefines) {
           state.set('word.selection', { text, multiDefines, parsed: null });
           return;
@@ -423,10 +423,10 @@ export function stopSelectionListener() {
  */
 if (!window.Word) {
   window.__devSelectExpression = (text) => {
-    const multiDefines = parseMultipleDefines(text);
+    const multiDefines = parseMultipleExpressions(text) || parseMultipleDefines(text);
     if (multiDefines) {
       state.set('word.selection', { text, multiDefines, parsed: null });
-      console.log('[DocGen dev] Simulated multi-define selection:', multiDefines);
+      console.log('[DocGen dev] Simulated multi-expression selection:', multiDefines);
       return;
     }
     const parsed = parseExpression(text);

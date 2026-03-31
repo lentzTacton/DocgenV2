@@ -69,6 +69,8 @@ export const wizState = {
   _selectedConfigAttr: null,
   _selectedConfigIsCalc: false,
   _configFallback: 'N/A',
+  _selectedCpId: null,           // persisted CP UUID — restored on edit
+  _selectedCpDisplayId: null,    // persisted CP display ID (e.g. "26-00002-001")
 
   // Edit mode flag
   isEditMode: false,
@@ -108,6 +110,8 @@ export function resetWiz(existing) {
     wizState.catalogueId = copy.catalogueId ?? null;
     wizState.sectionId = copy.sectionId ?? null;
     wizState.cpContext = copy.cpContext || null;
+    wizState._selectedCpId = copy.selectedCpId || null;
+    wizState._selectedCpDisplayId = copy.selectedCpDisplayId || null;
     wizState.matchCount = copy.matchCount ?? 0;
     wizState.tags = copy.tags || [];
     wizState.previewColumns = copy.previewColumns || [];
@@ -135,6 +139,34 @@ export function resetWiz(existing) {
     if (wizState.type === 'single' && wizState.source && wizState.source.includes('getConfigurationAttribute(')) {
       wizState.type = 'config';
       wizState._singleSourceMode = 'config';
+
+      // Parse accessor and null-safe transforms from the raw source expression.
+      // Handles patterns like:
+      //   getConfigurationAttribute("path").value
+      //   getConfigurationAttribute("path")!=null?getConfigurationAttribute("path").valueDescription:"N/A"
+      if (wizState.transforms.length === 0 && wizState.source) {
+        const src = wizState.source;
+        // Null-safe ternary: source!=null?source.accessor:"fallback"
+        const nsMatch = src.match(/^getConfigurationAttribute\([^)]+\)\s*!=\s*null\s*\?\s*getConfigurationAttribute\([^)]+\)(\.[\w()]+)\s*:\s*"([^"]*)"\s*$/);
+        if (nsMatch) {
+          const accessorMethod = nsMatch[1];
+          const fallback = nsMatch[2];
+          wizState.transforms = [
+            { type: 'accessor', method: accessorMethod },
+            { type: 'nullSafe', fallback },
+          ];
+          // Strip to just the base getConfigurationAttribute call for the explorer
+          const baseMatch = src.match(/^(getConfigurationAttribute\([^)]+\))/);
+          if (baseMatch) wizState.source = baseMatch[1];
+        } else {
+          // Simple accessor: getConfigurationAttribute("path").value
+          const accMatch = src.match(/^(getConfigurationAttribute\([^)]+\))(\.[\w()]+)$/);
+          if (accMatch) {
+            wizState.transforms = [{ type: 'accessor', method: accMatch[2] }];
+            wizState.source = accMatch[1]; // strip accessor from source
+          }
+        }
+      }
     }
 
     // Auto-detect parent-child block relationship from source
@@ -173,6 +205,8 @@ export function resetWiz(existing) {
     wizState.catalogueId = presetCatalogueId || null;
     wizState.sectionId = presetSectionId || null;
     wizState.cpContext = null;
+    wizState._selectedCpId = null;
+    wizState._selectedCpDisplayId = null;
     wizState.matchCount = 0;
     wizState.tags = [];
     wizState.previewColumns = [];
@@ -367,6 +401,8 @@ export function getWizSnapshot() {
     catalogueId: wizState.catalogueId,
     sectionId: wizState.sectionId,
     cpContext: wizState.cpContext,
+    selectedCpId: wizState._selectedCpId || null,
+    selectedCpDisplayId: wizState._selectedCpDisplayId || null,
     matchCount: wizState.matchCount,
     tags: wizState.tags || [],
     previewColumns: wizState.previewColumns || [],
