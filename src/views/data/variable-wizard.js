@@ -1435,9 +1435,9 @@ function renderCodeSection(container) {
     const refVar = allVars.find(v => v.name === refName);
     if (!refVar) return { status: 'missing', tooltip: `"${refName}" does not exist`, cls: 'wiz-code-chip-missing' };
 
-    // If we have a resolved value, that takes priority over pre-computed validation
+    // If we have a resolved value, that takes priority — use default blue chip style
     if (_resolvedValues[refName] !== undefined) {
-      return { status: 'valid', tooltip: `${refName} = ${_resolvedValues[refName]}`, cls: 'wiz-code-chip-valid' };
+      return { status: 'resolved', tooltip: `${refName} = ${_resolvedValues[refName]}`, cls: '' };
     }
 
     const result = valResults[refVar.id];
