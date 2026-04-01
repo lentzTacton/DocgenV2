@@ -17,12 +17,13 @@ import { icon } from '../../components/icon.js';
 import state from '../../core/state.js';
 import {
   updateVariable, removeVariable, generateExpression,
-  validateName, matchesFilters,
+  validateName, matchesFilters, buildDocSearchExpressions,
 } from '../../services/variables.js';
 import {
   isConnected, getBomFields, getBomFieldValues, getBomSources,
   fetchBomRecords,
 } from '../../services/data-api.js';
+import { runDocUpdateFlow } from './doc-update.js';
 
 const TYPE_CONFIG = {
   bom:    { badge: 'badge-bom', label: 'BOM', icon: 'box', color: 'var(--orange)' },
@@ -32,6 +33,8 @@ const TYPE_CONFIG = {
 
 // Local edit state
 let edit = {};
+let originalExpression = '';  // snapshot of expression when edit starts
+let originalVariable = null;  // snapshot of full variable for doc search patterns
 let bomFields = [];
 let bomSources = [];
 let bomRecords = [];
@@ -50,6 +53,10 @@ export function renderVariableDetail(container) {
   edit = JSON.parse(JSON.stringify(variable));
   if (!edit.filters) edit.filters = [];
   if (!edit.filterLogic) edit.filterLogic = 'or';
+
+  // Snapshot the current expression and variable so we can detect changes on save
+  originalExpression = variable.expression || generateExpression(variable) || '';
+  originalVariable = JSON.parse(JSON.stringify(variable));
 
   const tc = TYPE_CONFIG[edit.type] || TYPE_CONFIG.bom;
 
@@ -396,10 +403,32 @@ async function handleSave() {
     edit.excludeVars = variables.filter(v => v.type === 'bom' && !v.catchAll && v.id !== edit.id).map(v => v.name);
   }
 
+  // Build document-facing search expressions (handles blocks, defines, inlines)
+  const oldSearchExprs = buildDocSearchExpressions(originalVariable || {});
+  const newSearchExprs = buildDocSearchExpressions(edit);
+  const newDocExpr = newSearchExprs[0] || generateExpression(edit);
+
+  // Document write-back flow (shared module)
+  const immediate = await runDocUpdateFlow(
+    oldSearchExprs.length > 0 ? oldSearchExprs : originalExpression,
+    newDocExpr,
+    edit.name,
+    commitSave,
+  );
+  if (!immediate) return; // overlay shown — save deferred to user action
+}
+
+/** Persist changes to DB and navigate back to list. */
+async function commitSave() {
+  const overlay = document.querySelector('#doc-update-overlay');
+  if (overlay) overlay.remove();
+
   await updateVariable(edit.id, edit);
   state.set('activeVariable', null);
   state.set('dataView', 'list');
 }
+
+// showDocUpdateOverlay is now in ./doc-update.js
 
 async function handleDelete() {
   if (!confirm(`Delete dataset "${edit.name}"?`)) return;

@@ -17,7 +17,7 @@ import state from '../../core/state.js';
 import {
   createVariable, updateVariable, removeVariable,
   validateName, generateExpression, matchesFilters,
-  canDeleteVariable,
+  canDeleteVariable, buildDocSearchExpressions,
 } from '../../services/variables.js';
 import {
   isConnected, fetchBomRecords, getBomFields, getBomFieldValues,
@@ -31,6 +31,8 @@ import { loadObjectExplorer, setRefreshPipelineCallback as setObjectRefresh, bui
 import { loadConfigExplorer, setRefreshPipelineCallback as setConfigRefresh, resetConfigExplorer } from './wizard-config-explorer.js';
 import { renderCodeSection, renderCodeRefs, setCodeRefreshPipelineCallback as setCodeRefresh } from './wizard-code.js';
 import { showConfirmDialog, showInfoDialog } from '../../core/dialog.js';
+import { runDocUpdateFlow, showDocUpdateOverlay } from './doc-update.js';
+import { insertTextAtCursor } from '../../services/word-api.js';
 
 // ─── Extracted sub-modules ──────────────────────────────────────────────
 import {
@@ -1494,13 +1496,59 @@ async function handleSave(skipDupeCheck) {
   }
 
   if (wizState.isEditMode) {
-    await updateVariable(wizState.id, wizState);
+    // ── Document write-back flow (shared) ──
+    // Build document-facing search candidates (handles blocks, defines, inlines)
+    const oldSearchExprs = buildDocSearchExpressions(wizState.existingVariable || {});
+    const newSearchExprs = buildDocSearchExpressions(wizState);
+    const newDocExpr = newSearchExprs[0] || generateExpression(wizState);
+    const immediate = await runDocUpdateFlow(
+      oldSearchExprs.length > 0 ? oldSearchExprs : (wizState.existingVariable?.expression || ''),
+      newDocExpr,
+      wizState.name,
+      commitWizardSave,
+    );
+    if (!immediate) return; // overlay shown — save deferred to user action
   } else {
+    // ── Create + insert-at-cursor flow ──
     await createVariable(wizState);
+    const newSearchExprs = buildDocSearchExpressions(wizState);
+    const newDocExpr = newSearchExprs[0] || generateExpression(wizState);
+
+    if (window.Word && newDocExpr) {
+      // Offer to insert the new expression into the document
+      showDocUpdateOverlay({
+        message: 'Dataset created. Insert the expression into the document at the cursor position?',
+        oldExpr: '(new)',
+        newExpr: newDocExpr,
+        onUpdate: async () => {
+          await insertTextAtCursor(newDocExpr, wizState.name);
+          state.set('activeVariable', null);
+          state.set('dataView', 'list');
+        },
+        onSkip: () => {
+          state.set('activeVariable', null);
+          state.set('dataView', 'list');
+        },
+      });
+      return;
+    }
+
+    state.set('activeVariable', null);
+    state.set('dataView', 'list');
   }
+}
+
+/** Persist wizard changes and navigate back. */
+async function commitWizardSave() {
+  const overlay = document.querySelector('#doc-update-overlay');
+  if (overlay) overlay.remove();
+
+  await updateVariable(wizState.id, wizState);
   state.set('activeVariable', null);
   state.set('dataView', 'list');
 }
+
+// showDocUpdateOverlay is now imported from ./doc-update.js
 
 async function handleDelete() {
   const check = canDeleteVariable(wizState.id);

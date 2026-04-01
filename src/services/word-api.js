@@ -321,6 +321,291 @@ async function insertExpressionIntoWord(expression, name, opts = {}) {
   }
 }
 
+// ─── Last-change tracking (for undo/revert) ────────────────────────
+
+let _lastChange = null;
+
+/**
+ * Record the last document change for potential undo.
+ * @param {{ oldText: string, newText: string, variableName: string }} change
+ */
+function recordChange(change) {
+  _lastChange = { ...change, timestamp: Date.now() };
+}
+
+/**
+ * Get the last document change (if any, and if recent — within 5 minutes).
+ * @returns {{ oldText: string, newText: string, variableName: string, timestamp: number }|null}
+ */
+export function getLastDocumentChange() {
+  if (!_lastChange) return null;
+  // Expire after 5 minutes
+  if (Date.now() - _lastChange.timestamp > 5 * 60 * 1000) { _lastChange = null; return null; }
+  return _lastChange;
+}
+
+/**
+ * Revert the last document change — find the new text in the document and replace with old.
+ * @returns {Promise<boolean>}
+ */
+export async function revertLastDocumentChange() {
+  if (!_lastChange || !window.Word) return false;
+  const { oldText, newText } = _lastChange;
+  try {
+    let ok = false;
+    await Word.run(async (context) => {
+      const results = context.document.body.search(newText, { matchCase: true, matchWholeWord: false });
+      results.load('items');
+      await context.sync();
+      if (results.items.length === 1) {
+        results.items[0].insertText(oldText, Word.InsertLocation.replace);
+        results.items[0].select();
+        await context.sync();
+        ok = true;
+      }
+    });
+    if (ok) _lastChange = null;
+    return ok;
+  } catch (err) {
+    console.error('[DocGen] revertLastDocumentChange failed:', err);
+    return false;
+  }
+}
+
+/**
+ * Insert expression at the current cursor position in Word.
+ * For the "insert on create" flow.
+ * @param {string} expression — the expression text to insert
+ * @param {string} name — variable name for feedback
+ * @returns {Promise<boolean>}
+ */
+export async function insertTextAtCursor(expression, name) {
+  if (!window.Word) {
+    showInsertFeedback(`Dev mode — would insert: ${expression}`, 'warning');
+    return false;
+  }
+  try {
+    await Word.run(async (context) => {
+      const sel = context.document.getSelection();
+      sel.insertText(expression, Word.InsertLocation.replace);
+      await context.sync();
+    });
+    showInsertFeedback(`Inserted "${name}" into document`, 'success');
+    return true;
+  } catch (err) {
+    console.error('[DocGen] insertTextAtCursor failed:', err);
+    showInsertFeedback(`Insert failed: ${err.message || err}`, 'error');
+    return false;
+  }
+}
+
+/**
+ * Batch check: scan the document for all given expressions.
+ * Each variable should include a `docExpr` field — the primary document-facing expression
+ * (e.g. `$for{#name in source}$` for blocks, `$define{#name=expr}$` for variables).
+ *
+ * Returns a map of { [variableId]: 'found' | 'not_found' | 'multiple' }.
+ * @param {Array<{ id: string|number, expression: string, docExpr: string }>} variables
+ * @returns {Promise<Object>}
+ */
+export async function batchSyncCheck(variables) {
+  const result = {};
+  if (!window.Word) {
+    variables.forEach(v => { result[v.id] = 'no_word'; });
+    return result;
+  }
+  try {
+    await Word.run(async (context) => {
+      // Prepare searches — use docExpr (document-facing) if available, fallback to expression
+      const searches = variables
+        .filter(v => v.docExpr || v.expression)
+        .map(v => {
+          const searchText = v.docExpr || v.expression;
+          const sr = context.document.body.search(searchText, { matchCase: true, matchWholeWord: false });
+          sr.load('items');
+          return { id: v.id, searchResult: sr };
+        });
+
+      await context.sync();
+
+      for (const s of searches) {
+        const count = s.searchResult.items.length;
+        result[s.id] = count === 0 ? 'not_found' : count === 1 ? 'found' : 'multiple';
+      }
+    });
+
+    // Mark variables without expressions
+    variables.forEach(v => {
+      if (!(v.id in result)) result[v.id] = (v.docExpr || v.expression) ? 'not_found' : 'no_expression';
+    });
+
+    return result;
+  } catch (err) {
+    console.error('[DocGen] batchSyncCheck failed:', err);
+    variables.forEach(v => { result[v.id] = 'error'; });
+    return result;
+  }
+}
+
+// ─── Word document helpers (read / search / replace) ───────────────
+
+/**
+ * Get the currently selected text in Word.
+ * Returns the trimmed text string, or null if nothing selected / dev mode.
+ */
+export async function getSelectedText() {
+  if (!window.Word) return null;
+  try {
+    let text = null;
+    await Word.run(async (context) => {
+      const sel = context.document.getSelection();
+      sel.load('text');
+      await context.sync();
+      text = (sel.text || '').trim();
+    });
+    return text || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Search the entire Word document body for an exact text string.
+ * Returns an array of { index, contextBefore, contextAfter } for each match.
+ * `index` is a 0-based position within results (used to pick one later).
+ */
+export async function searchDocument(searchText) {
+  if (!window.Word) return [];
+  try {
+    const results = [];
+    await Word.run(async (context) => {
+      const body = context.document.body;
+      const ranges = body.search(searchText, { matchCase: true, matchWholeWord: false });
+      ranges.load('text');
+      context.load(ranges, 'items');
+      await context.sync();
+
+      for (let i = 0; i < ranges.items.length; i++) {
+        const r = ranges.items[i];
+        // Try to get surrounding context for display
+        let contextBefore = '', contextAfter = '';
+        try {
+          const para = r.paragraphs.getFirst();
+          para.load('text');
+          await context.sync();
+          const full = para.text || '';
+          const idx = full.indexOf(searchText);
+          if (idx >= 0) {
+            contextBefore = full.substring(Math.max(0, idx - 30), idx);
+            contextAfter = full.substring(idx + searchText.length, idx + searchText.length + 30);
+          }
+        } catch { /* context extraction optional */ }
+        results.push({ index: i, text: r.text, contextBefore, contextAfter });
+      }
+    });
+    return results;
+  } catch (err) {
+    console.error('[DocGen] searchDocument failed:', err);
+    return [];
+  }
+}
+
+/**
+ * Select a specific search result in Word (by searching again and selecting the Nth match).
+ */
+export async function selectSearchResult(searchText, matchIndex) {
+  if (!window.Word) return false;
+  try {
+    await Word.run(async (context) => {
+      const ranges = context.document.body.search(searchText, { matchCase: true });
+      context.load(ranges, 'items');
+      await context.sync();
+      if (matchIndex < ranges.items.length) {
+        ranges.items[matchIndex].select();
+        await context.sync();
+      }
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Replace the currently selected text in Word with new text.
+ * Optionally records the change for undo if oldText and variableName are provided.
+ * @param {string} newText
+ * @param {string} [oldText] — original text (for undo tracking)
+ * @param {string} [variableName] — variable name (for undo tracking)
+ * @returns {Promise<boolean>}
+ */
+export async function replaceSelectedText(newText, oldText, variableName) {
+  if (!window.Word) return false;
+  try {
+    await Word.run(async (context) => {
+      const sel = context.document.getSelection();
+      sel.insertText(newText, Word.InsertLocation.replace);
+      await context.sync();
+    });
+    // Track for undo
+    if (oldText) recordChange({ oldText, newText, variableName: variableName || '' });
+    return true;
+  } catch (err) {
+    console.error('[DocGen] replaceSelectedText failed:', err);
+    return false;
+  }
+}
+
+/**
+ * Full expression update flow:
+ *   1. If the same old expression is still selected → confirm → replace
+ *   2. Otherwise search document for old expression (tries multiple patterns for blocks)
+ *   3. If one match → select it → confirm → replace
+ *   4. If multiple matches → return them for picker UI
+ *   5. If zero matches → return empty (not in document)
+ *
+ * @param {string|string[]} oldExpression — single expression or array of search candidates (most likely first)
+ * @param {string} newExpression — the new expression to replace with
+ * @returns result object with status and optional matches/matchedPattern
+ */
+export async function checkExpressionInDocument(oldExpression, newExpression) {
+  // Normalize to array
+  const oldCandidates = Array.isArray(oldExpression) ? oldExpression : [oldExpression];
+  const primaryOld = oldCandidates[0] || '';
+
+  // No change → nothing to do (compare primary candidate)
+  if (primaryOld === newExpression) return { status: 'unchanged' };
+
+  // Dev mode → skip document interaction
+  if (!window.Word) return { status: 'no_word' };
+
+  // Step 1: Check current selection against all candidates
+  const selected = await getSelectedText();
+  if (selected) {
+    for (const candidate of oldCandidates) {
+      if (selected === candidate) {
+        return { status: 'selected', matchedPattern: candidate };
+      }
+    }
+  }
+
+  // Step 2: Search document — try each candidate until we find matches
+  for (const candidate of oldCandidates) {
+    if (!candidate) continue;
+    const matches = await searchDocument(candidate);
+    if (matches.length === 0) continue;
+
+    // Found matches with this candidate
+    if (matches.length === 1) {
+      await selectSearchResult(candidate, 0);
+      return { status: 'found_one', matches, matchedPattern: candidate };
+    }
+    return { status: 'found_many', matches, matchedPattern: candidate };
+  }
+
+  return { status: 'not_found' };
+}
+
 // ─── Toast feedback ─────────────────────────────────────────────────
 
 function showInsertFeedback(message, type) {

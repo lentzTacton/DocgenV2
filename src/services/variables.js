@@ -612,6 +612,46 @@ export function generateExpression(variable) {
   return `$define{${name}=${expr}}$`;
 }
 
+/**
+ * Build the expression as it appears in the Word document.
+ * For variables (purpose='variable'), this is $define{#name=expr}$.
+ * For inline, this is ${expr}$.
+ * For blocks, this is the $for{#name in source}$ opening tag (the most
+ * common insert pattern). Returns an array of candidate search strings
+ * since blocks could be $for, $rowgroup, $if, or $group.
+ *
+ * @param {Object} variable — full variable object
+ * @returns {string[]} — array of possible document expressions, most likely first
+ */
+export function buildDocSearchExpressions(variable) {
+  if (!variable) return [];
+  const expr = variable.expression || generateExpression(variable);
+  if (!expr) return [];
+
+  const { purpose, name } = variable;
+  const loopVar = name && name.startsWith('#') ? name : `#${name || 'item'}`;
+
+  if (purpose === 'block') {
+    // Block variables can appear in multiple forms in the document
+    return [
+      `$for{${loopVar} in ${expr}}$`,          // $for{#pumps in source}$
+      `$for{${loopVar}: #status in ${expr}}$`,  // $for{#cp: #status in source}$  (Parker pattern)
+      `$rowgroup{${expr}}$`,                     // $rowgroup{source}$  (Sandvik pattern)
+      `$group{${expr}}$`,                        // $group{source}$  (Cytiva pattern)
+      `$if{${expr}}$`,                           // $if{source}$
+      `\${${loopVar}=${expr}}$`,                 // ${#name=source}$  (inline assign)
+      expr,                                       // Fallback: raw source
+    ];
+  }
+
+  if (purpose === 'inline') {
+    return [`\${${expr}}$`];
+  }
+
+  // Default: variable purpose → $define{#name=expr}$
+  return [`$define{${name}=${expr}}$`];
+}
+
 // ─── Coverage Calculation ──────────────────────────────────────────────
 
 export function calculateCoverage(variables, bomItems) {

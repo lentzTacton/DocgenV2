@@ -174,3 +174,30 @@ document.addEventListener('mouseout', (e) => {
 
 state.on('dataView', dismissAllTooltips);
 state.on('activeVariable', dismissAllTooltips);
+
+// ─── Document sync status (per-variable) ───────────────────────────────
+
+/**
+ * Stores the last batch sync result: { [variableId]: 'found'|'not_found'|'multiple'|'no_word'|'error' }
+ */
+export const syncStatus = {};
+
+/**
+ * Set sync status for all variables from a batch check result.
+ * @param {Object} result — from batchSyncCheck()
+ */
+export function setSyncStatus(result) {
+  // Clear old entries
+  Object.keys(syncStatus).forEach(k => delete syncStatus[k]);
+  // Copy new
+  Object.assign(syncStatus, result);
+}
+
+/**
+ * Get the sync status for a single variable.
+ * @param {string|number} variableId
+ * @returns {'found'|'not_found'|'multiple'|'no_word'|'no_expression'|'error'|null}
+ */
+export function getVarSyncStatus(variableId) {
+  return syncStatus[variableId] || null;
+}

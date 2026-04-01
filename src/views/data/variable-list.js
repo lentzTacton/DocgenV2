@@ -19,7 +19,7 @@ import state from '../../core/state.js';
 import {
   createVariable, removeVariable,
   canDeleteVariable, validateDataSet, getDependents,
-  forceRemoveVariable,
+  forceRemoveVariable, buildDocSearchExpressions,
 } from '../../services/variables.js';
 import {
   isConnected, getBomSources, getBomFields, fetchBomRecords,
@@ -30,6 +30,7 @@ import { showDataExportDialog, triggerImport } from './list-export.js';
 import {
   handleInsertIntoDoc, handleInsertSectionIntoDoc,
   buildSectionExpression, buildInsertExpression, buildBlockInsertVariants,
+  batchSyncCheck, getLastDocumentChange, revertLastDocumentChange,
 } from '../../services/word-api.js';
 import { wizState } from './wizard-state.js';
 import { showConfirmDialog } from '../../core/dialog.js';
@@ -45,6 +46,7 @@ import {
   selectedVarIds,
   setRerenderFn,
   isInScope,
+  getVarSyncStatus, setSyncStatus, syncStatus,
 } from './list-state.js';
 import {
   getActiveDocument, getAllDocuments, setActiveDocument,
@@ -647,6 +649,31 @@ function renderSection(section, variables, catalogue) {
 
 // ─── Variable card ──────────────────────────────────────────────────────
 
+/**
+ * Render a small sync-status dot next to the variable name.
+ * Shows after a batch sync check has been run.
+ * Green = found in doc, Orange = multiple, Red = not found, null = no data.
+ */
+function makeSyncDot(variableId) {
+  const status = getVarSyncStatus(variableId);
+  if (!status || status === 'no_word' || status === 'no_expression') return null;
+
+  const cfg = {
+    found:     { color: 'var(--success, #2da44e)', title: 'In document (1 match)' },
+    multiple:  { color: 'var(--orange, #e67700)',  title: 'Multiple matches in document' },
+    not_found: { color: 'var(--danger, #CF222E)',  title: 'Not found in document' },
+    error:     { color: 'var(--text-tertiary)',     title: 'Sync check failed' },
+  };
+  const c = cfg[status];
+  if (!c) return null;
+
+  return el('span', {
+    class: 'sync-dot',
+    title: c.title,
+    style: { background: c.color },
+  });
+}
+
 function makeExprIssueIcon(valResult) {
   const isErr = valResult.status === 'error';
   const tooltipText = valResult.issues.map(i => `${i.level}: ${i.message}`).join('\n');
@@ -804,6 +831,7 @@ function renderVarCard(variable, isReadonly = false, sectionLocked = false) {
       el('div', { class: 'var-info' }, [
         el('div', { class: 'var-name' }, [
           variable.name.replace(/^#/, ''),
+          makeSyncDot(variable.id),
           variable.parentBlock
             ? el('span', {
                 class: 'badge badge-child',
@@ -1002,6 +1030,28 @@ function renderSearchFilter(allTags, listContainer) {
     html: icon('eye', 14),
   });
 
+  const syncBtn = el('button', {
+    class: `toolbar-icon-btn${Object.keys(syncStatus).length > 0 ? ' toolbar-icon-active' : ''}`,
+    title: 'Check document sync',
+    onclick: () => runBatchSyncCheck(),
+    html: icon('refresh', 14),
+  });
+
+  const undoBtn = (() => {
+    const lastChange = getLastDocumentChange();
+    if (!lastChange) return null;
+    return el('button', {
+      class: 'toolbar-icon-btn toolbar-icon-warning',
+      title: `Undo: revert "${lastChange.variableName}" in document`,
+      onclick: async () => {
+        const ok = await revertLastDocumentChange();
+        if (ok) rerender();
+        else alert('Could not revert — the expression may have changed or was not found (exactly 1 match required).');
+      },
+      html: icon('arrowDown', 14),  // using arrowDown rotated as "undo"
+    });
+  })();
+
   const addBtn = el('button', {
     class: 'toolbar-icon-btn toolbar-icon-action',
     title: 'New catalogue',
@@ -1009,7 +1059,7 @@ function renderSearchFilter(allTags, listContainer) {
     html: icon('folderPlus', 14),
   });
 
-  const searchRow = el('div', { class: 'data-search-row' }, [inputWrap, docBtn, viewBtn, addBtn]);
+  const searchRow = el('div', { class: 'data-search-row' }, [inputWrap, docBtn, viewBtn, syncBtn, undoBtn, addBtn].filter(Boolean));
   wrap.appendChild(searchRow);
 
   // ── Collapsible document bar ──
@@ -1252,4 +1302,73 @@ function rerender() {
 }
 
 setRerenderFn(rerender);
+
+// ─── Batch sync check ──────────────────────────────────────────────────
+
+/**
+ * Run a batch sync check: scan the document for all variable expressions
+ * and update the sync-dot indicators. Shows a summary toast after.
+ */
+async function runBatchSyncCheck() {
+  const variables = state.get('variables') || [];
+  if (variables.length === 0) return;
+
+  // Build lightweight list with document-facing expressions
+  const varList = variables.map(v => {
+    const docExprs = buildDocSearchExpressions(v);
+    return {
+      id: v.id,
+      expression: v.expression || '',
+      docExpr: docExprs[0] || v.expression || '',
+    };
+  });
+
+  const result = await batchSyncCheck(varList);
+  setSyncStatus(result);
+
+  // Count results for summary
+  const counts = { found: 0, not_found: 0, multiple: 0, no_expression: 0 };
+  Object.values(result).forEach(s => { if (s in counts) counts[s]++; });
+
+  // Show toast summary
+  const parts = [];
+  if (counts.found > 0) parts.push(`${counts.found} synced`);
+  if (counts.not_found > 0) parts.push(`${counts.not_found} missing`);
+  if (counts.multiple > 0) parts.push(`${counts.multiple} duplicates`);
+  if (counts.no_expression > 0) parts.push(`${counts.no_expression} no expression`);
+
+  const allDev = Object.values(result).every(s => s === 'no_word');
+  const msg = allDev ? 'Dev mode — no document to check' : parts.join(', ');
+
+  showSyncToast(msg, counts.not_found > 0 ? 'warning' : 'success');
+
+  rerender();
+}
+
+function showSyncToast(message, type) {
+  const existing = document.getElementById('sync-toast');
+  if (existing) existing.remove();
+
+  const colors = {
+    success: { bg: '#e8f5e9', border: '#43a047', text: '#2e7d32' },
+    warning: { bg: '#fff8e1', border: '#f9a825', text: '#e67700' },
+  };
+  const c = colors[type] || colors.success;
+
+  const toast = el('div', {
+    id: 'sync-toast',
+    style: {
+      position: 'fixed', bottom: '16px', left: '50%', transform: 'translateX(-50%)',
+      background: c.bg, border: `1px solid ${c.border}`, borderRadius: '8px',
+      padding: '8px 16px', color: c.text, fontSize: '12px', fontWeight: '600',
+      zIndex: '9999', boxShadow: '0 2px 8px rgba(0,0,0,.15)',
+      display: 'flex', alignItems: 'center', gap: '6px',
+    },
+  }, [
+    el('span', { html: icon('refresh', 12) }),
+    message,
+  ]);
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(), 4000);
+}
 

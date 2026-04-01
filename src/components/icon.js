@@ -400,6 +400,10 @@ export const menu = createIcon(`
   <line x1="3" y1="18" x2="21" y2="18"/>
 `);
 
+export const zap = createIcon(`
+  <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+`);
+
 /**
  * Icon lookup helper - retrieves icon by name
  * @param {string} name - Icon name (e.g., 'settings', 'code', 'edit')
@@ -465,6 +469,7 @@ export function icon(name, size = 16) {
     upload,
     download,
     menu,
+    zap,
   };
 
   const iconFn = iconMap[name];
