@@ -703,8 +703,17 @@ export function detectType(expression) {
   if (expression.includes('.groupBy(')) return 'bom';        // groupBy = collection
   if (expression.includes('.flatten(')) return 'bom';        // flatten = collection
 
-  // Filter on a collection — single if [0], otherwise bom
-  if (expression.includes('.{?')) return narrowsToOne ? 'single' : 'bom';
+  // Filter on a collection — but first check if the base path is a related() call
+  if (expression.includes('.{?')) {
+    // Strip all filters to get the base path for type inference
+    const basePath = expression.replace(/\.\{\?[^}]*\}/g, '');
+    // .{?false} is a placeholder (empty collection) — infer from base
+    if (expression.includes('.{?false}') && basePath.match(/\.?related\s*\(/)) return 'object';
+    if (narrowsToOne) return 'single';
+    // If base path is a related() call → object collection, not bom
+    if (basePath.match(/\.?related\s*\(/)) return 'object';
+    return 'bom';
+  }
 
   // .size() / .sum() → these produce a scalar number
   if (expression.includes('.size()') || expression.includes('.sum()')) return 'single';

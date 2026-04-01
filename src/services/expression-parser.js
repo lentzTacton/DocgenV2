@@ -377,8 +377,32 @@ function inferDataType(source) {
 export function parseSourceFilters(source) {
   if (!source) return { cleanSource: source, filters: [], filterLogic: 'and', indexAccess: null };
 
-  const rawSegments = source.replace(/^#(this|cp)\./, '').split('.');
   const prefix = source.startsWith('#this.') ? '#this.' : source.startsWith('#cp.') ? '#cp.' : '';
+  const body = source.replace(/^#(this|cp)\./, '');
+
+  // Tokenise: split on dots but keep .related('X','Y') as a single token
+  const rawSegments = [];
+  let rest = body;
+  while (rest.length > 0) {
+    if (rest.startsWith('.')) rest = rest.slice(1); // consume leading dot
+    if (!rest) break;
+    // Match related('ObjectType','attribute') as a single segment
+    const relMatch = rest.match(/^related\(\s*'[^']*'\s*,\s*'[^']*'\s*\)/);
+    if (relMatch) {
+      rawSegments.push(relMatch[0]);
+      rest = rest.slice(relMatch[0].length);
+      continue;
+    }
+    // Match up to next dot (but not dots inside parens)
+    const nextDot = rest.indexOf('.');
+    if (nextDot === -1) {
+      rawSegments.push(rest);
+      break;
+    }
+    rawSegments.push(rest.slice(0, nextDot));
+    rest = rest.slice(nextDot);
+  }
+
   const cleanSegments = [];
   const filters = [];
   let filterLogic = 'and';

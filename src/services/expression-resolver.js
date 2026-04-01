@@ -37,7 +37,8 @@ export async function resolveExpression(parsed) {
   }
 
   // 2. Code expressions with arithmetic
-  const varRefs = [...new Set(source.match(/#\w+/g) || [])];
+  // #this is a context alias (resolved to starting object), not a variable reference
+  const varRefs = [...new Set(source.match(/#\w+/g) || [])].filter(r => r !== '#this');
   if (varRefs.length > 0 && /[+\-*/]/.test(source)) {
     return resolveArithmetic(source, varRefs);
   }
@@ -237,7 +238,25 @@ async function resolveModelPath(parsed, source) {
 
   // Parse source into clean segments, extracting filters & indices
   const { cleanSource, filters, filterLogic, indexAccess } = parseSourceFilters(resolvedSource);
-  const cleanSegments = cleanSource.replace(/^#(this|cp)\./, '').split('.');
+
+  // Tokenise cleanSource: split on dots but keep related('X','Y') as single tokens
+  const cleanSegments = [];
+  { let rest = cleanSource.replace(/^#(this|cp)\./, '');
+    while (rest.length > 0) {
+      if (rest.startsWith('.')) rest = rest.slice(1);
+      if (!rest) break;
+      const relM = rest.match(/^related\(\s*'([^']*)'\s*,\s*'([^']*)'\s*\)/);
+      if (relM) {
+        cleanSegments.push(relM[0]); // keep full related() call as one token
+        rest = rest.slice(relM[0].length);
+        continue;
+      }
+      const nextDot = rest.indexOf('.');
+      if (nextDot === -1) { cleanSegments.push(rest); break; }
+      cleanSegments.push(rest.slice(0, nextDot));
+      rest = rest.slice(nextDot);
+    }
+  }
   const rootName = cleanSegments[0];
 
   let objMatch = model.find(o => o.name.toLowerCase() === rootName.toLowerCase());
@@ -265,11 +284,24 @@ async function resolveModelPath(parsed, source) {
     }
   }
 
-  // Object-type dot-walks
+  // Object-type dot-walks (supports both forward refs and reverse related() calls)
   if (objMatch && cleanSegments.length > 1) {
     let currentObj = objMatch;
+    let reverseRefUsed = false;  // track if we traversed a related() segment
+
     for (let i = 1; i < cleanSegments.length - 1; i++) {
       const seg = cleanSegments[i];
+
+      // Reverse reference: related('ObjectType','fkField')
+      const relParsed = seg.match(/^related\(\s*'([^']*)'\s*,\s*'([^']*)'\s*\)/);
+      if (relParsed) {
+        const targetObjName = relParsed[1]; // e.g. 'ConfiguredProduct'
+        const nextObj = model.find(o => o.name === targetObjName);
+        if (nextObj) { currentObj = nextObj; reverseRefUsed = true; continue; }
+        break;
+      }
+
+      // Forward reference: attribute with refType
       const attr = currentObj.attributes.find(a => a.name.toLowerCase() === seg.toLowerCase());
       if (attr && attr.refType) {
         const nextObj = model.find(o => o.name === attr.refType);
@@ -278,11 +310,62 @@ async function resolveModelPath(parsed, source) {
       break;
     }
 
+    // Check if the last segment itself is a related() call (path ends with related())
+    const lastSeg = cleanSegments[cleanSegments.length - 1];
+    const lastRelParsed = lastSeg.match(/^related\(\s*'([^']*)'\s*,\s*'([^']*)'\s*\)/);
+    if (lastRelParsed) {
+      const targetObjName = lastRelParsed[1]; // e.g. 'ConfiguredProduct'
+      const fkField = lastRelParsed[2];       // e.g. 'solution'
+      const targetObjDef = model.find(o => o.name === targetObjName);
+      if (targetObjDef) {
+        currentObj = targetObjDef;
+        reverseRefUsed = true;
+      }
+    }
+
     let records = await fetchRecords(currentObj.name);
-    records = scopeToInstance(records, currentObj.name, model, selectedInst, startObj);
+
+    // For reverse references, scope by FK field instead of generic instance scoping
+    if (reverseRefUsed && selectedInst) {
+      // Find the FK field on the target object that points back to the source
+      // Use the fkField from the last related() segment, or fall back to model inspection
+      const lastRelForFK = lastRelParsed || (() => {
+        for (let i = cleanSegments.length - 1; i >= 1; i--) {
+          const m = cleanSegments[i].match(/^related\(\s*'([^']*)'\s*,\s*'([^']*)'\s*\)/);
+          if (m) return m;
+        }
+        return null;
+      })();
+      if (lastRelForFK) {
+        const fkField = lastRelForFK[2];
+        records = records.filter(r => {
+          const fkVal = r[fkField] || '';
+          return fkVal === selectedInst.id || fkVal === selectedInst.displayId;
+        });
+      } else {
+        records = scopeToInstance(records, currentObj.name, model, selectedInst, startObj);
+      }
+    } else {
+      records = scopeToInstance(records, currentObj.name, model, selectedInst, startObj);
+    }
+
     const unfilteredCount = records.length;
     records = applyFiltersAndIndex(records, filters, filterLogic, indexAccess);
-    const lastSeg = cleanSegments[cleanSegments.length - 1];
+
+    // If last segment is a related() call, we already resolved it above — return the collection
+    if (lastRelParsed) {
+      return {
+        records: records.slice(0, 5),
+        totalCount: records.length,
+        unfilteredCount,
+        objectName: currentObj.name,
+        fields: currentObj.attributes.map(a => a.name).filter(n => !n.startsWith('_')).slice(0, 6),
+        filters: filters.length > 0 ? filters : undefined,
+        filterLogic: filters.length > 1 ? filterLogic : undefined,
+        indexAccess,
+        instanceScoped: !!selectedInst,
+      };
+    }
 
     // If last segment is a field, extract values
     const isField = currentObj.attributes.some(a => a.name.toLowerCase() === lastSeg.toLowerCase());

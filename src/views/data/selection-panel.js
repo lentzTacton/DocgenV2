@@ -405,8 +405,9 @@ function buildBreakdownRows(parsed) {
     const configPath = parsed.source.match(/getConfigurationAttribute\s*\(\s*"([^"]+)"\s*\)/);
     const sourceDisplay = configPath ? configPath[1] : cleanSource;
     // Flag red if source starts with #var that doesn't exist
+    // #this is a context alias (resolves to starting object), not a variable
     const sourceRefMatch = cleanSource.match(/^(#\w+)/);
-    const sourceRefMissing = sourceRefMatch && !existingVarNames.has(sourceRefMatch[1]);
+    const sourceRefMissing = sourceRefMatch && sourceRefMatch[1] !== '#this' && !existingVarNames.has(sourceRefMatch[1]);
     if (sourceRefMissing) {
       addRow('Source', el('span', {}, [
         el('span', {}, sourceDisplay),
@@ -438,8 +439,9 @@ function buildBreakdownRows(parsed) {
 
   // Parent context — detect when source starts with #varName. (dot-walk into a parent)
   // Only show if the parent ref differs from the clean source (otherwise it's redundant)
+  // #this is a context alias (resolves to starting object), not a parent variable
   const parentLoopMatch = (parsed.source || '').match(/^(#\w+)\./);
-  if (parentLoopMatch && parentLoopMatch[1] !== cleanSource) {
+  if (parentLoopMatch && parentLoopMatch[1] !== '#this' && parentLoopMatch[1] !== cleanSource) {
     const parentRef = parentLoopMatch[1];
     const parentMissing = !existingVarNames.has(parentRef);
     if (parentMissing) {
@@ -534,9 +536,25 @@ function renderResolveArea(container, dupeInfo) {
       const availableFields = resolveData.fields
         ? resolveData.fields
         : Object.keys(sample[0] || {}).filter(k => !k.startsWith('_') && k !== 'id' && k !== 'href');
-      const fields = (dupeColumns && dupeColumns.length > 0)
-        ? dupeColumns.filter(c => availableFields.includes(c))
-        : availableFields.slice(0, 4);
+      let fields;
+      if (dupeColumns && dupeColumns.length > 0) {
+        fields = dupeColumns.filter(c => availableFields.includes(c));
+      } else {
+        // Default: filter out fields that are empty/null across all sample records
+        const nonEmpty = availableFields.filter(f =>
+          sample.some(r => r[f] != null && r[f] !== '')
+        );
+        if (nonEmpty.length > 0) {
+          fields = nonEmpty.slice(0, 4);
+        } else {
+          // All suggested fields are empty — scan actual record keys for populated fields
+          const allKeys = Object.keys(sample[0] || {}).filter(k => !k.startsWith('_') && k !== 'id' && k !== 'href');
+          const populated = allKeys.filter(f =>
+            sample.some(r => r[f] != null && r[f] !== '')
+          );
+          fields = (populated.length > 0 ? populated : availableFields).slice(0, 4);
+        }
+      }
 
       if (fields.length > 0) {
         const thead = el('div', { class: 'sel-resolve-thead' },
@@ -1311,9 +1329,11 @@ function showCreateDataSetForm(parsed, dupeInfo) {
           const existingNames = new Set(allVars.map(v => v.name));
           const sourceExpr = suggested.source || parsed.source || '';
           // Extract only the leading #varName (the source), ignoring filter contents
+          // #this is a context alias (resolved to starting object), not a variable dep
           const sourceRefMatch = sourceExpr.match(/^(#\w+)/);
           const missingRefs = sourceRefMatch
             && sourceRefMatch[1] !== name
+            && sourceRefMatch[1] !== '#this'
             && !existingNames.has(sourceRefMatch[1])
             ? [sourceRefMatch[1]]
             : [];
