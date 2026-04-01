@@ -23,6 +23,7 @@ import {
 import {
   createVariable,
   detectType,
+  resolveThisAlias,
 } from '../../services/variables.js';
 import {
   isConnected,
@@ -377,6 +378,20 @@ function renderPanel() {
   const actions = el('div', { class: 'sel-panel-actions' });
   if (canCreateDataSet(parsed)) {
     if (dupeMatches.length > 0) {
+      // ── Sync status: literal comparison of document text vs stored expression ──
+      const syncDupe = dupeMatches[0];
+      const docExpr = parsed.raw || '';
+      const storedExpr = syncDupe.expression || '';
+      const isInSync = docExpr === storedExpr;
+
+      // Build sync badge
+      const syncBadge = el('span', {
+        class: `sel-sync-badge ${isInSync ? 'sel-sync-ok' : 'sel-sync-mismatch'}`,
+        title: isInSync
+          ? 'Document expression matches stored dataset'
+          : `Out of sync — document: "${docExpr.slice(0, 60)}…" vs stored: "${storedExpr.slice(0, 60)}…"`,
+      }, isInSync ? 'in sync' : 'out of sync');
+
       // Found banner — header with inline "Create new" button
       const warnText = dupeMatches.length === 1
         ? `Already exists as "${dupeMatches[0].name}"`
@@ -385,6 +400,7 @@ function renderPanel() {
         el('div', { class: 'sel-panel-found-text' }, [
           el('span', { class: 'icon', html: icon('database', 13) }),
           el('span', {}, warnText),
+          syncBadge,
         ]),
         el('button', {
           class: 'btn btn-sm sel-panel-found-create',
@@ -409,6 +425,7 @@ function renderPanel() {
             onclick: () => {
               closePanel();
               state.set('activeVariable', dupe.id);
+              state.set('editOrigin', 'resolver');
               state.set('dataView', 'detail');
             },
           }, [
@@ -425,15 +442,23 @@ function renderPanel() {
 
       actions.appendChild(matchList);
     } else {
-      actions.appendChild(
+      // No matching dataset — show unidentified status + create button
+      const unidentifiedBar = el('div', { class: 'sel-panel-found-bar' }, [
+        el('div', { class: 'sel-panel-found-text' }, [
+          el('span', {
+            class: 'sel-sync-badge sel-sync-unknown',
+            title: 'No matching dataset found for this expression',
+          }, 'unidentified'),
+        ]),
         el('button', {
           class: 'btn btn-primary btn-sm sel-panel-create-btn',
           onclick: () => showCreateDataSetForm(parsed, dupeInfo),
         }, [
           el('span', { html: icon('plus', 14) }),
           'Create dataset',
-        ])
-      );
+        ]),
+      ]);
+      actions.appendChild(unidentifiedBar);
     }
   }
 
@@ -1226,10 +1251,81 @@ function renderMultiDefinePanel(defines) {
       catSelect,
     ])
   );
+
+  // Section picker + quick add (same pattern as single-select form)
+  const secRow = el('div', { class: 'sel-create-sec-row' });
+  secRow.appendChild(secSelect);
+
+  const quickAddBtn = el('button', {
+    class: 'sel-sec-quick-add',
+    title: 'Add new section',
+    html: icon('plus', 12),
+  });
+  const quickAddInput = el('input', {
+    type: 'text',
+    class: 'sel-sec-quick-input',
+    placeholder: 'New section name…',
+  });
+  const quickAddHint = el('div', { class: 'sel-sec-quick-hint' }, [
+    el('kbd', {}, 'Enter'),
+    ' to create · ',
+    el('kbd', {}, 'Esc'),
+    ' to cancel',
+  ]);
+  const quickAddWrap = el('div', { class: 'sel-sec-quick-wrap', style: { display: 'none' } }, [
+    quickAddInput,
+    quickAddHint,
+  ]);
+
+  quickAddBtn.addEventListener('click', () => {
+    const isOpen = quickAddWrap.style.display !== 'none';
+    if (isOpen) {
+      quickAddWrap.style.display = 'none';
+      quickAddBtn.classList.remove('sel-sec-quick-active');
+    } else {
+      quickAddWrap.style.display = 'block';
+      quickAddBtn.classList.add('sel-sec-quick-active');
+      quickAddInput.focus();
+    }
+  });
+
+  quickAddInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const name = quickAddInput.value.trim();
+      if (!name) return;
+      const catId = picker.selectedCatId();
+      if (!catId) return;
+      const sections = state.get('sections') || [];
+      const newId = `sec_${Date.now()}`;
+      sections.push({ id: newId, name, catalogueId: catId, locked: false });
+      state.set('sections', sections);
+      picker.refreshSectionPicker();
+      secSelect.value = newId;
+      secSelect.dispatchEvent(new Event('change'));
+      quickAddInput.value = '';
+      quickAddWrap.style.display = 'none';
+      quickAddBtn.classList.remove('sel-sec-quick-active');
+    } else if (e.key === 'Escape') {
+      quickAddInput.value = '';
+      quickAddWrap.style.display = 'none';
+      quickAddBtn.classList.remove('sel-sec-quick-active');
+    }
+  });
+
+  function updateQuickAddVisibility() {
+    const hasCat = !!picker.selectedCatId();
+    quickAddBtn.style.display = hasCat ? 'flex' : 'none';
+  }
+  updateQuickAddVisibility();
+  catSelect.addEventListener('change', updateQuickAddVisibility);
+
+  secRow.appendChild(quickAddBtn);
+
   actions.appendChild(
     el('div', { class: 'sel-create-field', style: { marginBottom: '4px' } }, [
       el('label', { class: 'sel-create-label' }, 'Section'),
-      secSelect,
+      secRow,
+      quickAddWrap,
     ])
   );
   actions.appendChild(errorEl);

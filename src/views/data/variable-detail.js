@@ -24,6 +24,7 @@ import {
   fetchBomRecords,
 } from '../../services/data-api.js';
 import { runDocUpdateFlow } from './doc-update.js';
+import { resetSelectionCache } from '../../services/word-api.js';
 
 const TYPE_CONFIG = {
   bom:    { badge: 'badge-bom', label: 'BOM', icon: 'box', color: 'var(--orange)' },
@@ -423,9 +424,16 @@ async function commitSave() {
   const overlay = document.querySelector('#doc-update-overlay');
   if (overlay) overlay.remove();
 
+  const fromResolver = state.get('editOrigin') === 'resolver';
+  state.set('editOrigin', null);
+
   await updateVariable(edit.id, edit);
   state.set('activeVariable', null);
   state.set('dataView', 'list');
+
+  if (fromResolver) {
+    resetSelectionCache();
+  }
 }
 
 // showDocUpdateOverlay is now in ./doc-update.js

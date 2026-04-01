@@ -88,7 +88,7 @@ export function resetWiz(existing) {
   const presetSectionId = wizState.sectionId;
 
   wizState.isEditMode = !!existing;
-  wizState.existingVariable = existing;
+  wizState.existingVariable = existing ? JSON.parse(JSON.stringify(existing)) : null;
 
   if (existing) {
     // Deep copy existing variable

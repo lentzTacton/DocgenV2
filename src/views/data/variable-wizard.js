@@ -32,7 +32,7 @@ import { loadConfigExplorer, setRefreshPipelineCallback as setConfigRefresh, res
 import { renderCodeSection, renderCodeRefs, setCodeRefreshPipelineCallback as setCodeRefresh } from './wizard-code.js';
 import { showConfirmDialog, showInfoDialog } from '../../core/dialog.js';
 import { runDocUpdateFlow, showDocUpdateOverlay } from './doc-update.js';
-import { insertTextAtCursor } from '../../services/word-api.js';
+import { insertTextAtCursor, resetSelectionCache } from '../../services/word-api.js';
 
 // ─── Extracted sub-modules ──────────────────────────────────────────────
 import {
@@ -1543,9 +1543,18 @@ async function commitWizardSave() {
   const overlay = document.querySelector('#doc-update-overlay');
   if (overlay) overlay.remove();
 
+  const fromResolver = state.get('editOrigin') === 'resolver';
+  state.set('editOrigin', null);
+
   await updateVariable(wizState.id, wizState);
   state.set('activeVariable', null);
   state.set('dataView', 'list');
+
+  // If we came from the expression resolver, reset the selection cache
+  // so the selection listener re-fires and the resolver panel re-opens
+  if (fromResolver) {
+    resetSelectionCache();
+  }
 }
 
 // showDocUpdateOverlay is now imported from ./doc-update.js

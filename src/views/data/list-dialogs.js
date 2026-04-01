@@ -15,6 +15,7 @@ import {
 import { createTagPicker } from '../../components/tag-picker.js';
 import { showInfoDialog } from '../../core/dialog.js';
 import { SCOPE_CONFIG } from './list-state.js';
+import { buildScopeRefPicker } from './list-menus.js';
 
 // ═════════════════════════════════════════════════════════════════════════
 //  FORCE-DELETE DIALOGS
@@ -408,9 +409,12 @@ export function showNewCatalogueInline(container) {
   const tagPicker = createTagPicker({ placeholder: 'Add tags...' });
 
   let selectedScope = 'ticket';
-  let scopeCollapsed = true;
+  let refPicker = buildScopeRefPicker('ticket', null, { truncate: 40 });
 
   const scopeSel = el('div', { class: 'scope-sel' });
+  const refContainer = el('div', { class: 'scope-ref-container' });
+  if (refPicker) refContainer.appendChild(refPicker.element);
+
   Object.entries(SCOPE_CONFIG).forEach(([key, sc]) => {
     const opt = el('div', {
       class: `scope-opt ${key === selectedScope ? 'scope-opt-sel' : ''}`,
@@ -418,6 +422,10 @@ export function showNewCatalogueInline(container) {
         selectedScope = key;
         scopeSel.querySelectorAll('.scope-opt').forEach(o => o.classList.remove('scope-opt-sel'));
         opt.classList.add('scope-opt-sel');
+        // Rebuild ref picker for new scope
+        refContainer.innerHTML = '';
+        refPicker = buildScopeRefPicker(key, null, { truncate: 40 });
+        if (refPicker) refContainer.appendChild(refPicker.element);
       },
     }, [
       el('span', { class: 'icon', style: { color: sc.color }, html: icon(sc.icon, 14) }),
@@ -426,23 +434,11 @@ export function showNewCatalogueInline(container) {
     scopeSel.appendChild(opt);
   });
 
-  const scopeBody = el('div', { style: { display: 'none' } }, [scopeSel]);
-
-  const scopeChevron = el('span', {
-    class: 'icon',
-    html: icon('chevronRight', 10),
-    style: { transition: 'transform 0.15s', display: 'inline-flex' },
-  });
-
-  const scopeHeader = el('div', {
-    class: 'field-label cat-form-section-toggle',
-    style: { marginTop: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', userSelect: 'none' },
-    onclick: () => {
-      scopeCollapsed = !scopeCollapsed;
-      scopeBody.style.display = scopeCollapsed ? 'none' : '';
-      scopeChevron.innerHTML = icon(scopeCollapsed ? 'chevronRight' : 'chevronDown', 10);
-    },
-  }, [scopeChevron, 'Scope']);
+  const scopeSection = el('div', { style: { marginTop: '4px' } }, [
+    el('div', { class: 'field-label', style: { marginBottom: '4px' } }, 'Scope'),
+    scopeSel,
+    refContainer,
+  ]);
 
   const actions = el('div', { style: { display: 'flex', gap: '6px', justifyContent: 'flex-end' } }, [
     el('button', {
@@ -454,10 +450,11 @@ export function showNewCatalogueInline(container) {
           name,
           description: descInput.value.trim(),
           scope: selectedScope,
+          scopeRef: refPicker ? refPicker.getValue() : null,
           tags: tagPicker.getTags(),
         };
-        // Auto-bind document-scoped catalogues to the active document
-        if (selectedScope === 'document') {
+        // Auto-bind document-scoped catalogues to the active document if none selected
+        if (selectedScope === 'document' && !catData.scopeRef) {
           const activeDocId = state.get('document.id');
           if (activeDocId) catData.scopeRef = activeDocId;
         }
@@ -473,10 +470,9 @@ export function showNewCatalogueInline(container) {
 
   form.appendChild(el('div', { class: 'field-label' }, 'New Data Catalogue'));
   form.appendChild(nameInput);
+  form.appendChild(scopeSection);
   form.appendChild(descInput);
   form.appendChild(tagPicker.element);
-  form.appendChild(scopeHeader);
-  form.appendChild(scopeBody);
   form.appendChild(actions);
 
   const header = container.querySelector('.data-section-head');

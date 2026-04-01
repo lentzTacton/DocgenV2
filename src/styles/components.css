@@ -3604,6 +3604,27 @@ select.input {
   background: var(--tacton-light);
   box-shadow: 0 0 0 1px rgba(10, 109, 194, 0.12);
 }
+.scope-ref-container {
+  margin-top: 4px;
+}
+.scope-ref-select {
+  font-size: 11px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm, 4px);
+  background: #fff;
+  width: 100%;
+}
+
+/* Scope submenu inside context menu */
+.ctx-scope-submenu .scope-sel {
+  gap: 2px;
+}
+.ctx-scope-submenu .scope-opt {
+  padding: 3px 4px;
+  font-size: 10px;
+}
+.ctx-scope-submenu .scope-opt .icon svg { width: 10px; height: 10px; }
 
 /* ─── Context menus ───────────────────────────────────────────────── */
 
@@ -4721,6 +4742,32 @@ select.input {
   gap: 4px;
 }
 
+/* ─── Sync status badge ── */
+.sel-sync-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 8px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.sel-sync-ok {
+  background: #D1FAE5;
+  color: #065F46;
+}
+.sel-sync-mismatch {
+  background: #FEF3C7;
+  color: #92400E;
+}
+.sel-sync-unknown {
+  background: #F3F4F6;
+  color: #6B7280;
+}
+
 /* ─── Shared match list (used in both detection banner and selection panel) ── */
 .sel-match-list {
   border: 1px solid var(--border-light);
@@ -5136,6 +5183,57 @@ select.input {
   outline-offset: -1px;
   background: var(--tacton-light, #e8f4fd) !important;
 }
+
+/* ===== COMPACT MODE ===== */
+
+/* Card: tighter padding, less margin */
+.compact-mode .var-card {
+  margin-bottom: 2px;
+  border-radius: var(--radius-sm, 4px);
+}
+.compact-mode .var-head {
+  padding: 4px 10px;
+  gap: 6px;
+}
+
+/* Type column: smaller, inline */
+.compact-mode .var-type-col {
+  width: 18px;
+}
+.compact-mode .var-type-col .icon svg { width: 13px; height: 13px; }
+.compact-mode .var-purpose-label { display: none; }
+
+/* Name: smaller font */
+.compact-mode .var-name {
+  font-size: 12px;
+}
+
+/* Hide meta (description), stats, drag handle by default */
+.compact-mode .var-meta { display: none; }
+.compact-mode .var-stats { display: none; }
+.compact-mode .var-drag-handle { display: none !important; }
+
+/* Insert button: hidden by default, show on hover */
+.compact-mode .var-insert-btn { display: none; }
+.compact-mode .var-card:hover .var-insert-btn { display: flex; }
+
+/* Action buttons: always hidden until hover (same as normal, but enforce) */
+.compact-mode .var-card-actions .row-action-btn { opacity: 0; pointer-events: none; }
+.compact-mode .var-card:hover .var-card-actions .row-action-btn { opacity: 1; pointer-events: auto; }
+
+/* Expression: show on hover just like normal mode */
+.compact-mode .var-expr {
+  max-height: 0; overflow: hidden; opacity: 0;
+  padding: 0 10px;
+}
+.compact-mode .var-card:hover .var-expr,
+.compact-mode .var-expr-visible {
+  max-height: 32px; padding: 3px 10px; opacity: 1;
+  font-size: 10px;
+}
+
+/* Section header spacing */
+.compact-mode .sec-header { padding: 6px 8px; }
 
 /* ─── Multi-select keyboard hint ──────────────────── */
 
@@ -6333,6 +6431,10 @@ select.input {
 .doc-update-match-btn:hover {
   border-color: var(--tacton-blue); background: var(--tacton-light, #e0f0ff);
 }
+.doc-update-match-selected {
+  border-color: var(--tacton-blue); background: var(--tacton-light, #e0f0ff);
+  box-shadow: inset 3px 0 0 var(--tacton-blue);
+}
 .doc-update-match-num {
   font-weight: 700; font-size: 11px; color: var(--tacton-blue);
   flex-shrink: 0;
@@ -6343,4 +6445,41 @@ select.input {
 }
 .doc-update-actions {
   display: flex; gap: 6px; justify-content: flex-end; margin-top: 4px;
+}
+
+/* ===== SYNC RESULTS DIALOG ===== */
+
+/* Direction toggle buttons */
+.sync-dir-btn {
+  font-size: 11px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.sync-dir-btn:first-child { border-radius: 4px 0 0 4px; }
+.sync-dir-btn:last-child  { border-radius: 0 4px 4px 0; }
+.sync-dir-btn + .sync-dir-btn { margin-left: -1px; }
+.sync-dir-active {
+  background: var(--tacton-blue);
+  color: #fff;
+  border-color: var(--tacton-blue);
+  z-index: 1;
+  position: relative;
+}
+
+/* Per-item action result states */
+.sync-action-done {
+  background: #D1FAE5 !important;
+  color: #065F46 !important;
+  border-color: #A7F3D0 !important;
+  pointer-events: none;
+}
+.sync-action-fail {
+  background: #FEE2E2 !important;
+  color: #991B1B !important;
+  border-color: #FECACA !important;
+  pointer-events: none;
 }

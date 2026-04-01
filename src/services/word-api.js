@@ -8,6 +8,7 @@ import { el } from '../core/dom.js';
 import { icon } from '../components/icon.js';
 import state from '../core/state.js';
 import { parseExpression, parseMultipleDefines, parseMultipleExpressions } from './expression-parser.js';
+import { resolveThisAlias } from './variables.js';
 
 // ─── Expression builder ─────────────────────────────────────────────
 
@@ -408,41 +409,69 @@ export async function insertTextAtCursor(expression, name) {
  * @param {Array<{ id: string|number, expression: string, docExpr: string }>} variables
  * @returns {Promise<Object>}
  */
+/**
+ * Batch sync check — returns rich per-variable info:
+ *   { status: 'found'|'multiple'|'not_found'|'no_expression'|'no_word'|'error',
+ *     matchedPattern: string|null,   — the candidate that matched in the document
+ *     matchCount: number }           — how many times found
+ */
 export async function batchSyncCheck(variables) {
   const result = {};
   if (!window.Word) {
-    variables.forEach(v => { result[v.id] = 'no_word'; });
+    variables.forEach(v => { result[v.id] = { status: 'no_word', matchedPattern: null, matchCount: 0 }; });
     return result;
   }
   try {
     await Word.run(async (context) => {
-      // Prepare searches — use docExpr (document-facing) if available, fallback to expression
-      const searches = variables
-        .filter(v => v.docExpr || v.expression)
-        .map(v => {
-          const searchText = v.docExpr || v.expression;
-          const sr = context.document.body.search(searchText, { matchCase: true, matchWholeWord: false });
+      // Prepare searches — docExprs is an array of candidates (for #this/resolved alias)
+      const searches = [];
+      for (const v of variables) {
+        const candidates = v.docExprs || (v.docExpr ? [v.docExpr] : (v.expression ? [v.expression] : []));
+        if (candidates.length === 0) continue;
+        for (const candidate of candidates) {
+          if (!candidate) continue;
+          const sr = context.document.body.search(candidate, { matchCase: true, matchWholeWord: false });
           sr.load('items');
-          return { id: v.id, searchResult: sr };
-        });
+          searches.push({ id: v.id, candidate, searchResult: sr });
+        }
+      }
 
       await context.sync();
 
+      // Aggregate: a variable is "found" if ANY candidate matched
       for (const s of searches) {
         const count = s.searchResult.items.length;
-        result[s.id] = count === 0 ? 'not_found' : count === 1 ? 'found' : 'multiple';
+        if (count > 0) {
+          const prev = result[s.id];
+          if (!prev || prev.status === 'not_found') {
+            result[s.id] = {
+              status: count === 1 ? 'found' : 'multiple',
+              matchedPattern: s.candidate,
+              matchCount: count,
+            };
+          }
+        } else if (!(s.id in result)) {
+          result[s.id] = { status: 'not_found', matchedPattern: null, matchCount: 0 };
+        }
       }
     });
 
     // Mark variables without expressions
     variables.forEach(v => {
-      if (!(v.id in result)) result[v.id] = (v.docExpr || v.expression) ? 'not_found' : 'no_expression';
+      const candidates = v.docExprs || (v.docExpr ? [v.docExpr] : (v.expression ? [v.expression] : []));
+      if (!(v.id in result)) {
+        result[v.id] = {
+          status: candidates.length > 0 ? 'not_found' : 'no_expression',
+          matchedPattern: null,
+          matchCount: 0,
+        };
+      }
     });
 
     return result;
   } catch (err) {
     console.error('[DocGen] batchSyncCheck failed:', err);
-    variables.forEach(v => { result[v.id] = 'error'; });
+    variables.forEach(v => { result[v.id] = { status: 'error', matchedPattern: null, matchCount: 0 }; });
     return result;
   }
 }
@@ -466,6 +495,55 @@ export async function getSelectedText() {
     return text || null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Find which search result index corresponds to the current selection.
+ * Compares the selection range against each search result range using
+ * Word's compareLocationWith API. Returns 0-based index, or -1 if none match.
+ */
+async function findSelectedMatchIndex(searchText, matchCount) {
+  if (!window.Word || matchCount === 0) return -1;
+  try {
+    let idx = -1;
+    await Word.run(async (context) => {
+      const sel = context.document.getSelection();
+      const ranges = context.document.body.search(searchText, { matchCase: true });
+      ranges.load('items');
+      await context.sync();
+
+      // Strategy 1: try intersectWithOrNullObject (most reliable)
+      for (let i = 0; i < ranges.items.length; i++) {
+        try {
+          const intersection = sel.intersectWithOrNullObject(ranges.items[i]);
+          await context.sync();
+          if (!intersection.isNullObject) {
+            idx = i;
+            break;
+          }
+        } catch {
+          // intersectWithOrNullObject not available, fall through to strategy 2
+          break;
+        }
+      }
+
+      // Strategy 2: fallback to compareLocationWith — reject only clearly disjoint
+      if (idx === -1) {
+        const NO_OVERLAP = ['Before', 'AdjacentBefore', 'After', 'AdjacentAfter'];
+        for (let i = 0; i < ranges.items.length; i++) {
+          const cmp = sel.compareLocationWith(ranges.items[i]);
+          await context.sync();
+          if (!NO_OVERLAP.includes(cmp.value)) {
+            idx = i;
+            break;
+          }
+        }
+      }
+    });
+    return idx;
+  } catch {
+    return -1;
   }
 }
 
@@ -533,7 +611,9 @@ export async function selectSearchResult(searchText, matchIndex) {
 
 /**
  * Replace the currently selected text in Word with new text.
- * Optionally records the change for undo if oldText and variableName are provided.
+ * After replacing, verifies the text was updated correctly and
+ * re-selects the new text so the expression resolver can pick it up.
+ *
  * @param {string} newText
  * @param {string} [oldText] — original text (for undo tracking)
  * @param {string} [variableName] — variable name (for undo tracking)
@@ -542,17 +622,63 @@ export async function selectSearchResult(searchText, matchIndex) {
 export async function replaceSelectedText(newText, oldText, variableName) {
   if (!window.Word) return false;
   try {
+    let verified = false;
     await Word.run(async (context) => {
       const sel = context.document.getSelection();
-      sel.insertText(newText, Word.InsertLocation.replace);
+      // Replace selected text
+      const newRange = sel.insertText(newText, Word.InsertLocation.replace);
+      // Re-select the new text so it stays highlighted for expression resolver
+      newRange.select();
+      newRange.load('text');
       await context.sync();
+
+      // Verify the replacement matches
+      const actualText = (newRange.text || '').trim();
+      verified = actualText === newText.trim();
+      if (!verified) {
+        console.warn('[DocGen] replaceSelectedText: verification mismatch', { expected: newText, actual: actualText });
+      }
     });
     // Track for undo
     if (oldText) recordChange({ oldText, newText, variableName: variableName || '' });
-    return true;
+    return verified;
   } catch (err) {
     console.error('[DocGen] replaceSelectedText failed:', err);
     return false;
+  }
+}
+
+/**
+ * Replace ALL occurrences of searchText with newText in the document.
+ * Returns the number of successful replacements.
+ */
+export async function replaceAllInDocument(searchText, newText, variableName) {
+  if (!window.Word) return 0;
+  try {
+    let count = 0;
+    await Word.run(async (context) => {
+      const ranges = context.document.body.search(searchText, { matchCase: true });
+      ranges.load('items');
+      await context.sync();
+
+      count = ranges.items.length;
+      if (count === 0) return;
+
+      // Replace in reverse order to preserve positions
+      let firstRange = null;
+      for (let i = ranges.items.length - 1; i >= 0; i--) {
+        const newRange = ranges.items[i].insertText(newText, Word.InsertLocation.replace);
+        if (i === 0) firstRange = newRange;
+      }
+      // Select the first replaced occurrence so the expression resolver picks it up
+      if (firstRange) firstRange.select();
+      await context.sync();
+    });
+    if (count > 0) recordChange({ oldText: searchText, newText, variableName: variableName || '' });
+    return count;
+  } catch (err) {
+    console.error('[DocGen] replaceAllInDocument failed:', err);
+    return 0;
   }
 }
 
@@ -573,34 +699,67 @@ export async function checkExpressionInDocument(oldExpression, newExpression) {
   const oldCandidates = Array.isArray(oldExpression) ? oldExpression : [oldExpression];
   const primaryOld = oldCandidates[0] || '';
 
-  // No change → nothing to do (compare primary candidate)
-  if (primaryOld === newExpression) return { status: 'unchanged' };
+  // Detect whether old/new are the same stored form (user didn't change the expression).
+  // Compare after resolving #this aliases so that mixed forms like
+  // "#this.related(...,'solution')" vs "solution.related(...,'solution')"
+  // are recognised as equivalent (the wizard may flip #this ↔ resolved root).
+  const storedUnchanged = resolveThisAlias(primaryOld) === resolveThisAlias(newExpression);
+
+  // True unchanged: nothing changed AND no Word to update → safe to skip
+  if (storedUnchanged && !window.Word) return { status: 'unchanged' };
 
   // Dev mode → skip document interaction
   if (!window.Word) return { status: 'no_word' };
 
   // Step 1: Check current selection against all candidates
+  let selectionMatchedCandidate = null;
   const selected = await getSelectedText();
   if (selected) {
+    const selectedNorm = resolveThisAlias(selected);
     for (const candidate of oldCandidates) {
-      if (selected === candidate) {
-        return { status: 'selected', matchedPattern: candidate };
+      if (selected === candidate || selectedNorm === resolveThisAlias(candidate)) {
+        selectionMatchedCandidate = candidate;
+        break;
       }
     }
   }
 
-  // Step 2: Search document — try each candidate until we find matches
+  // Step 2: Search document for ALL occurrences (don't short-circuit on selection).
+  // We need the total count to distinguish selected-single vs found-many.
   for (const candidate of oldCandidates) {
     if (!candidate) continue;
     const matches = await searchDocument(candidate);
     if (matches.length === 0) continue;
 
-    // Found matches with this candidate
-    if (matches.length === 1) {
-      await selectSearchResult(candidate, 0);
-      return { status: 'found_one', matches, matchedPattern: candidate };
+    // User didn't change the expression — alias mismatches (#this vs solution)
+    // are cosmetic and shouldn't trigger the update dialog.
+    if (storedUnchanged) {
+      return { status: 'unchanged' };
     }
-    return { status: 'found_many', matches, matchedPattern: candidate };
+
+    // Multiple matches → always show picker (even if one is currently selected)
+    if (matches.length > 1) {
+      // Always try to determine which match the cursor/selection sits in
+      const selectedIndex = await findSelectedMatchIndex(candidate, matches.length);
+      return { status: 'found_many', matches, matchedPattern: candidate, selectedIndex };
+    }
+
+    // Single match — was it already selected?
+    if (selectionMatchedCandidate === candidate) {
+      return { status: 'selected', matchedPattern: candidate };
+    }
+
+    // Single match, not selected — select it and return
+    await selectSearchResult(candidate, 0);
+    return { status: 'found_one', matches, matchedPattern: candidate };
+  }
+
+  // Nothing found via search. If selection matched, use that.
+  if (selectionMatchedCandidate) {
+    if (storedUnchanged && selectionMatchedCandidate === newExpression) {
+      return { status: 'unchanged' };
+    }
+    return { status: 'selected', matchedPattern: selectionMatchedCandidate };
   }
 
   return { status: 'not_found' };
@@ -642,6 +801,15 @@ function showInsertFeedback(message, type) {
 
 let selectionInterval = null;
 let lastSelectionText = '';
+
+/**
+ * Reset the selection dedup cache so the next poll cycle re-fires
+ * the `word.selection` event even if the Word selection hasn't changed.
+ * Use after save-from-resolver so the panel re-opens automatically.
+ */
+export function resetSelectionCache() {
+  lastSelectionText = '';
+}
 
 /**
  * Start listening for selection changes in the Word document.

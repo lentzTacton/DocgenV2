@@ -612,13 +612,41 @@ export function generateExpression(variable) {
   return `$define{${name}=${expr}}$`;
 }
 
+// ─── #this Alias Utilities ─────────────────────────────────────────────
+
+/**
+ * Get the resolved root for #this (e.g. 'solution') from current state.
+ * Returns null if no starting object is set.
+ */
+export function getResolvedRoot() {
+  const startingObj = state.get('startingObject.type');
+  return startingObj
+    ? startingObj.charAt(0).toLowerCase() + startingObj.slice(1)
+    : null;
+}
+
+/**
+ * Resolve all #this aliases to the concrete root (e.g. solution).
+ * Used for semantic comparison — two expressions that differ only in
+ * #this vs resolved-root are semantically equivalent.
+ */
+export function resolveThisAlias(expr) {
+  const root = getResolvedRoot();
+  if (!root || !expr) return expr;
+  return expr.replace(/#this\b/g, root);
+}
+
 /**
  * Build the expression as it appears in the Word document.
- * For variables (purpose='variable'), this is $define{#name=expr}$.
- * For inline, this is ${expr}$.
- * For blocks, this is the $for{#name in source}$ opening tag (the most
- * common insert pattern). Returns an array of candidate search strings
- * since blocks could be $for, $rowgroup, $if, or $group.
+ *
+ * IMPORTANT: `variable.expression` (and `generateExpression()`) already
+ * returns the FULL wrapped form:
+ *   - Variables: `$define{#name=source}$`
+ *   - Inline:    `${source}$`
+ *   - Blocks:    raw source path (NO wrapper — the user decides $for/$if/$rowgroup)
+ *
+ * So for variables and inline, the expression IS the document text — return as-is.
+ * For blocks, we need to generate the possible document patterns ($for, $rowgroup, etc.).
  *
  * @param {Object} variable — full variable object
  * @returns {string[]} — array of possible document expressions, most likely first
@@ -629,11 +657,34 @@ export function buildDocSearchExpressions(variable) {
   if (!expr) return [];
 
   const { purpose, name } = variable;
-  const loopVar = name && name.startsWith('#') ? name : `#${name || 'item'}`;
+
+  // ── Resolve #this alias ──────────────────────────────────────────
+  // The wizard stores sources with #this. prefix but the document may
+  // use the resolved form (e.g. solution.flatbom). Generate candidates
+  // for BOTH forms so document search succeeds either way.
+  const resolvedRoot = getResolvedRoot(); // e.g. 'solution'
+
+  /** Return [original, aliasVariant] — both #this and resolved forms. */
+  function withAliasVariants(candidate) {
+    if (!resolvedRoot) return [candidate];
+
+    // Resolve #this → concrete root
+    const resolved = candidate.replace(/#this\b/g, resolvedRoot);
+    // Reverse: concrete root path prefix → #this (only "root." at path positions)
+    const rootDotRe = new RegExp(`(?<!['"#])\\b${resolvedRoot}\\.`, 'g');
+    const withThis = candidate.replace(rootDotRe, '#this.');
+
+    // Collect unique variants
+    const variants = [candidate];
+    if (resolved !== candidate) variants.push(resolved);
+    if (withThis !== candidate && !variants.includes(withThis)) variants.push(withThis);
+    return variants;
+  }
 
   if (purpose === 'block') {
-    // Block variables can appear in multiple forms in the document
-    return [
+    // Block expression is raw source — build the possible document wrappers
+    const loopVar = name && name.startsWith('#') ? name : `#${name || 'item'}`;
+    const candidates = [
       `$for{${loopVar} in ${expr}}$`,          // $for{#pumps in source}$
       `$for{${loopVar}: #status in ${expr}}$`,  // $for{#cp: #status in source}$  (Parker pattern)
       `$rowgroup{${expr}}$`,                     // $rowgroup{source}$  (Sandvik pattern)
@@ -642,14 +693,13 @@ export function buildDocSearchExpressions(variable) {
       `\${${loopVar}=${expr}}$`,                 // ${#name=source}$  (inline assign)
       expr,                                       // Fallback: raw source
     ];
+    // Expand each candidate with its resolved #this variant
+    return candidates.flatMap(withAliasVariants);
   }
 
-  if (purpose === 'inline') {
-    return [`\${${expr}}$`];
-  }
-
-  // Default: variable purpose → $define{#name=expr}$
-  return [`$define{${name}=${expr}}$`];
+  // Variables and inline: expression is already the full document form
+  // ($define{#name=...}$ or ${...}$) — return as-is + resolved variant
+  return withAliasVariants(expr);
 }
 
 // ─── Coverage Calculation ──────────────────────────────────────────────

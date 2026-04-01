@@ -24,7 +24,7 @@ export const TYPE_CONFIG = {
 
 export const SCOPE_CONFIG = {
   shared:   { label: 'Shared',   icon: 'globe',    color: 'var(--tacton-blue)', desc: 'Available in all projects' },
-  document: { label: 'Document', icon: 'file',     color: 'var(--purple)',      desc: 'Tied to the current Word document' },
+  document: { label: 'Doc',      icon: 'file',     color: 'var(--purple)',      desc: 'Tied to the current Word document' },
   ticket:   { label: 'Ticket',   icon: 'ticket',   color: 'var(--orange)',      desc: 'Scoped to the current ticket/branch' },
   instance: { label: 'Instance', icon: 'database', color: 'var(--success)',     desc: 'Tied to a specific configured product instance' },
 };
@@ -107,6 +107,30 @@ export function getShowAllDocs() { return showAllDocs; }
 export function setShowAllDocs(val) {
   showAllDocs = val;
   try { localStorage.setItem(SHOW_ALL_DOCS_KEY, String(val)); } catch { /* noop */ }
+}
+
+// ─── Compact mode toggle ──────────────────────────────────────────────
+
+const COMPACT_KEY = 'docgen_compact_mode';
+let compactMode = (() => { try { return localStorage.getItem(COMPACT_KEY) === 'true'; } catch { return false; } })();
+
+export function getCompactMode() { return compactMode; }
+
+export function setCompactMode(val) {
+  compactMode = val;
+  try { localStorage.setItem(COMPACT_KEY, String(val)); } catch { /* noop */ }
+}
+
+// ─── Show cookbook toggle ──────────────────────────────────────────────
+
+const SHOW_COOKBOOK_KEY = 'docgen_show_cookbook';
+let showCookbook = (() => { try { return localStorage.getItem(SHOW_COOKBOOK_KEY) !== 'false'; } catch { return true; } })();
+
+export function getShowCookbook() { return showCookbook; }
+
+export function setShowCookbook(val) {
+  showCookbook = val;
+  try { localStorage.setItem(SHOW_COOKBOOK_KEY, String(val)); } catch { /* noop */ }
 }
 
 // ─── Search / filter state ──────────────────────────────────────────────
@@ -194,10 +218,21 @@ export function setSyncStatus(result) {
 }
 
 /**
- * Get the sync status for a single variable.
+ * Get the sync status string for a single variable (for sync dots etc.).
  * @param {string|number} variableId
  * @returns {'found'|'not_found'|'multiple'|'no_word'|'no_expression'|'error'|null}
  */
 export function getVarSyncStatus(variableId) {
+  const entry = syncStatus[variableId];
+  if (!entry) return null;
+  // Support both old string format and new object format
+  return typeof entry === 'string' ? entry : entry.status;
+}
+
+/**
+ * Get the full sync info for a variable (status + matched pattern + count).
+ * @param {string|number} variableId
+ */
+export function getVarSyncInfo(variableId) {
   return syncStatus[variableId] || null;
 }

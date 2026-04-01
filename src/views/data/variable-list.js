@@ -17,9 +17,9 @@ import { el, qs, clear } from '../../core/dom.js';
 import { icon } from '../../components/icon.js';
 import state from '../../core/state.js';
 import {
-  createVariable, removeVariable,
+  createVariable, removeVariable, updateVariable,
   canDeleteVariable, validateDataSet, getDependents,
-  forceRemoveVariable, buildDocSearchExpressions,
+  forceRemoveVariable, buildDocSearchExpressions, resolveThisAlias,
 } from '../../services/variables.js';
 import {
   isConnected, getBomSources, getBomFields, fetchBomRecords,
@@ -31,6 +31,7 @@ import {
   handleInsertIntoDoc, handleInsertSectionIntoDoc,
   buildSectionExpression, buildInsertExpression, buildBlockInsertVariants,
   batchSyncCheck, getLastDocumentChange, revertLastDocumentChange,
+  replaceAllInDocument,
 } from '../../services/word-api.js';
 import { wizState } from './wizard-state.js';
 import { showConfirmDialog } from '../../core/dialog.js';
@@ -42,11 +43,13 @@ import {
   isCollapsed, toggleCollapse, setExpandAll, getExpandAll,
   getShowExpr, setShowExpr,
   getShowAllDocs, setShowAllDocs,
+  getCompactMode, setCompactMode,
+  getShowCookbook, setShowCookbook,
   searchQuery, setSearchQuery, activeTagFilters,
   selectedVarIds,
   setRerenderFn,
   isInScope,
-  getVarSyncStatus, setSyncStatus, syncStatus,
+  getVarSyncStatus, getVarSyncInfo, setSyncStatus, syncStatus,
 } from './list-state.js';
 import {
   getActiveDocument, getAllDocuments, setActiveDocument,
@@ -54,7 +57,7 @@ import {
   getScopeMode, setScopeMode,
   generateDocId, writeDocumentTag, createDocumentRecord,
 } from '../../services/document-identity.js';
-import { showCatalogueMenu, showSectionMenu, showMoveMenu } from './list-menus.js';
+import { showCatalogueMenu, showSectionMenu, showMoveMenu, dismissMenus, positionMenu } from './list-menus.js';
 import { showForceDeleteDialog, showNewCatalogueInline, showNewSectionInline } from './list-dialogs.js';
 import {
   handleMultiSelect, handleSelectionKeydown, clearMultiSelect,
@@ -71,11 +74,6 @@ let validationCtx = {
 };
 let validationCtxLoaded = false;
 const validationResults = {};
-
-// ─── View bar state (expand / show-expr toggle bar) ───────────────────
-let _viewBarOpen = false;
-function isViewBarOpen() { return _viewBarOpen; }
-function toggleViewBar() { _viewBarOpen = !_viewBarOpen; }
 
 async function ensureValidationCtx() {
   if (validationCtxLoaded || !isConnected()) return;
@@ -150,6 +148,9 @@ state.on('menu.action', (action) => {
 export function renderVariableList(container) {
   document.removeEventListener('keydown', handleSelectionKeydown);
   document.addEventListener('keydown', handleSelectionKeydown);
+
+  // Apply compact mode class
+  container.classList.toggle('compact-mode', getCompactMode());
 
   container.addEventListener('click', (e) => {
     if (selectedVarIds.size > 0 && !e.target.closest('.var-card')) {
@@ -231,7 +232,9 @@ export function renderVariableList(container) {
 
   const scopeMode = getScopeMode();
   const userCats = catalogues.filter(c => !c.readonly);
-  const readonlyCats = catalogues.filter(c => c.readonly);
+  const readonlyCats = getShowCookbook()
+    ? catalogues.filter(c => c.readonly)
+    : [];
 
   /** Render a single catalogue with scope-awareness. */
   function renderScopedCatalogue(cat, catSections, catVars) {
@@ -1014,20 +1017,12 @@ function renderSearchFilter(allTags, listContainer) {
 
   // ── Icon toggle buttons ──
   const activeDoc = getActiveDocument();
-  const hasViewOptions = getExpandAll() || getShowExpr() || getShowAllDocs();
 
   const docBtn = el('button', {
     class: `toolbar-icon-btn ${activeDoc ? 'toolbar-icon-active' : ''} ${isDocBarOpen() ? 'toolbar-icon-open' : ''}`,
     title: activeDoc ? `Document: ${activeDoc.name} (${activeDoc.id})` : 'Document identity',
     onclick: () => { toggleDocBar(); rerender(); },
     html: icon('file', 14),
-  });
-
-  const viewBtn = el('button', {
-    class: `toolbar-icon-btn ${hasViewOptions ? 'toolbar-icon-active' : ''} ${isViewBarOpen() ? 'toolbar-icon-open' : ''}`,
-    title: 'View options',
-    onclick: () => { toggleViewBar(); rerender(); },
-    html: icon('eye', 14),
   });
 
   const syncBtn = el('button', {
@@ -1052,6 +1047,14 @@ function renderSearchFilter(allTags, listContainer) {
     });
   })();
 
+  const hasViewOptions = getExpandAll() || getShowExpr() || getShowAllDocs() || getCompactMode() || !getShowCookbook();
+  const settingsBtn = el('button', {
+    class: `toolbar-icon-btn${hasViewOptions ? ' toolbar-icon-active' : ''}`,
+    title: 'View & settings',
+    onclick: (e) => { e.stopPropagation(); showSettingsMenu(e.currentTarget); },
+    html: icon('eye', 14),
+  });
+
   const addBtn = el('button', {
     class: 'toolbar-icon-btn toolbar-icon-action',
     title: 'New catalogue',
@@ -1059,19 +1062,13 @@ function renderSearchFilter(allTags, listContainer) {
     html: icon('folderPlus', 14),
   });
 
-  const searchRow = el('div', { class: 'data-search-row' }, [inputWrap, docBtn, viewBtn, syncBtn, undoBtn, addBtn].filter(Boolean));
+  const searchRow = el('div', { class: 'data-search-row' }, [inputWrap, docBtn, syncBtn, undoBtn, settingsBtn, addBtn].filter(Boolean));
   wrap.appendChild(searchRow);
 
   // ── Collapsible document bar ──
   if (isDocBarOpen()) {
     const docBar = renderDocumentBar();
     wrap.appendChild(docBar);
-  }
-
-  // ── Collapsible view options bar ──
-  if (isViewBarOpen()) {
-    const viewBar = renderViewBar();
-    wrap.appendChild(viewBar);
   }
 
   if (allTags.length > 0) {
@@ -1101,40 +1098,65 @@ function renderSearchFilter(allTags, listContainer) {
 
 // ─── Document Bar ──────────────────────────────────────────────────────
 
-// ─── View Options Bar ────────────────────────────────────────────────
+// ─── Settings Menu ──────────────────────────────────────────────────
 
-function renderViewBar() {
-  const bar = el('div', { class: 'view-bar' });
+function showSettingsMenu(anchor) {
+  dismissMenus();
 
-  const expandToggle = el('label', { class: 'view-bar-toggle', title: 'Expand / collapse all catalogues' }, [
-    el('input', {
-      type: 'checkbox',
-      checked: getExpandAll() ? 'checked' : undefined,
-      onchange: (e) => { setExpandAll(e.target.checked); rerender(); },
-    }),
-    el('span', {}, 'Expand all'),
-  ]);
+  const menu = el('div', { id: 'ctx-menu', class: 'ctx-menu' });
 
-  const exprToggle = el('label', { class: 'view-bar-toggle', title: 'Show expressions on all datasets' }, [
-    el('input', {
-      type: 'checkbox',
-      checked: getShowExpr() ? 'checked' : undefined,
-      onchange: (e) => { setShowExpr(e.target.checked); rerender(); },
-    }),
-    el('span', {}, 'Show expressions'),
-  ]);
+  // Toggle item helper — rebuilds menu in-place so checkmarks update
+  function toggleItem(label, getter, setter) {
+    const active = getter();
+    const item = el('div', {
+      class: 'ctx-menu-item',
+      onclick: (e) => {
+        e.stopPropagation();
+        setter(!getter());
+        // Rebuild the menu in-place so checkmarks reflect new state
+        rebuildMenu();
+        rerender();
+      },
+    }, [
+      el('span', { class: 'icon', style: { width: '14px', textAlign: 'center' }, html: active ? icon('check', 12) : '' }),
+      label,
+    ]);
+    return item;
+  }
 
-  const allDocsToggle = el('label', { class: 'view-bar-toggle', title: 'Show catalogues from all documents' }, [
-    el('input', {
-      type: 'checkbox',
-      checked: getShowAllDocs() ? 'checked' : undefined,
-      onchange: (e) => { setShowAllDocs(e.target.checked); rerender(); },
-    }),
-    el('span', {}, 'All documents'),
-  ]);
+  function rebuildMenu() {
+    menu.innerHTML = '';
 
-  bar.append(expandToggle, exprToggle, allDocsToggle);
-  return bar;
+    // View options
+    menu.appendChild(el('div', {
+      style: { padding: '6px 12px 2px', fontSize: '10px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '.04em', color: 'var(--text-tertiary)' },
+    }, 'View'));
+    menu.appendChild(toggleItem('Expand all', getExpandAll, setExpandAll));
+    menu.appendChild(toggleItem('Show expressions', getShowExpr, setShowExpr));
+    menu.appendChild(toggleItem('Compact mode', getCompactMode, setCompactMode));
+    menu.appendChild(toggleItem('All documents', getShowAllDocs, setShowAllDocs));
+
+    // Settings
+    menu.appendChild(el('div', { class: 'ctx-menu-sep' }));
+    menu.appendChild(el('div', {
+      style: { padding: '6px 12px 2px', fontSize: '10px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '.04em', color: 'var(--text-tertiary)' },
+    }, 'Settings'));
+    menu.appendChild(toggleItem('Show cookbook', getShowCookbook, setShowCookbook));
+  }
+
+  rebuildMenu();
+
+  // Dismiss on outside click
+  const dismiss = (e) => {
+    if (!menu.contains(e.target)) {
+      menu.remove();
+      document.removeEventListener('click', dismiss, true);
+    }
+  };
+  setTimeout(() => document.addEventListener('click', dismiss, true), 0);
+
+  positionMenu(menu, anchor);
+  document.body.appendChild(menu);
 }
 
 // ─── Document Bar ────────────────────────────────────────────────────
@@ -1310,38 +1332,34 @@ setRerenderFn(rerender);
  * and update the sync-dot indicators. Shows a summary toast after.
  */
 async function runBatchSyncCheck() {
-  const variables = state.get('variables') || [];
+  const allVariables = state.get('variables') || [];
+  const catalogues = state.get('catalogues') || [];
+  const readonlyCatIds = new Set(catalogues.filter(c => c.readonly).map(c => String(c.id)));
+  const variables = allVariables.filter(v => !readonlyCatIds.has(String(v.catalogueId)));
   if (variables.length === 0) return;
 
-  // Build lightweight list with document-facing expressions
+  // Build lightweight list with ALL document-facing expression candidates
+  // (includes both #this. and resolved forms for alias matching)
   const varList = variables.map(v => {
     const docExprs = buildDocSearchExpressions(v);
     return {
       id: v.id,
       expression: v.expression || '',
-      docExpr: docExprs[0] || v.expression || '',
+      docExprs: docExprs.length > 0 ? docExprs : [v.expression || ''],
     };
   });
 
   const result = await batchSyncCheck(varList);
   setSyncStatus(result);
 
-  // Count results for summary
-  const counts = { found: 0, not_found: 0, multiple: 0, no_expression: 0 };
-  Object.values(result).forEach(s => { if (s in counts) counts[s]++; });
+  const allDev = Object.values(result).every(r => r.status === 'no_word');
+  if (allDev) {
+    showSyncToast('Dev mode — no document to check', 'warning');
+    rerender();
+    return;
+  }
 
-  // Show toast summary
-  const parts = [];
-  if (counts.found > 0) parts.push(`${counts.found} synced`);
-  if (counts.not_found > 0) parts.push(`${counts.not_found} missing`);
-  if (counts.multiple > 0) parts.push(`${counts.multiple} duplicates`);
-  if (counts.no_expression > 0) parts.push(`${counts.no_expression} no expression`);
-
-  const allDev = Object.values(result).every(s => s === 'no_word');
-  const msg = allDev ? 'Dev mode — no document to check' : parts.join(', ');
-
-  showSyncToast(msg, counts.not_found > 0 ? 'warning' : 'success');
-
+  showSyncResultsDialog(variables, result);
   rerender();
 }
 
@@ -1370,5 +1388,241 @@ function showSyncToast(message, type) {
   ]);
   document.body.appendChild(toast);
   setTimeout(() => toast.remove(), 4000);
+}
+
+function showSyncResultsDialog(variables, result) {
+  const prev = document.getElementById('sync-results-overlay');
+  if (prev) prev.remove();
+
+  const catalogues = state.get('catalogues') || [];
+  const sections = state.get('sections') || [];
+
+  const STATUS_ORDER = ['not_found', 'multiple', 'no_expression', 'found'];
+  const STATUS_META = {
+    not_found:     { label: 'Missing',       color: '#DC2626', bg: '#FEF2F2', icon: 'alertTriangle' },
+    multiple:      { label: 'Duplicates',    color: '#D97706', bg: '#FFFBEB', icon: 'copy' },
+    no_expression: { label: 'No expression', color: '#6B7280', bg: '#F3F4F6', icon: 'minus' },
+    found:         { label: 'Synced',        color: '#059669', bg: '#ECFDF5', icon: 'check' },
+  };
+
+  // Enrich variables with sync info
+  const items = variables.map(v => {
+    const info = result[v.id] || { status: 'not_found', matchedPattern: null, matchCount: 0 };
+    const cat = catalogues.find(c => c.id === v.catalogueId);
+    const sec = v.sectionId ? sections.find(s => s.id === v.sectionId) : null;
+    return {
+      id: v.id,
+      name: v.name || v.id,
+      expression: v.expression || '',
+      location: [cat?.name, sec?.name].filter(Boolean).join(' › ') || '—',
+      status: info.status,
+      matchedPattern: info.matchedPattern,
+      matchCount: info.matchCount,
+    };
+  });
+
+  // Group by status
+  const groups = {};
+  for (const item of items) {
+    if (!groups[item.status]) groups[item.status] = [];
+    groups[item.status].push(item);
+  }
+  const counts = {};
+  for (const [s, list] of Object.entries(groups)) counts[s] = list.length;
+
+  // ── Build overlay ──
+  const overlay = el('div', { id: 'sync-results-overlay', class: 'doc-update-overlay' });
+  const card = el('div', { class: 'doc-update-card', style: { maxHeight: '75vh', display: 'flex', flexDirection: 'column' } });
+  overlay.appendChild(card);
+
+  // Header
+  const summaryParts = [];
+  if (counts.found) summaryParts.push(`${counts.found} synced`);
+  if (counts.not_found) summaryParts.push(`${counts.not_found} missing`);
+  if (counts.multiple) summaryParts.push(`${counts.multiple} duplicates`);
+  if (counts.no_expression) summaryParts.push(`${counts.no_expression} no expression`);
+
+  card.appendChild(el('div', { class: 'doc-update-header' }, [
+    el('span', { class: 'icon', style: { color: 'var(--tacton-blue)' }, html: icon('refresh', 16) }),
+    el('span', { style: { fontWeight: '700', fontSize: '13px' } }, 'Document Sync Check'),
+  ]));
+  card.appendChild(el('div', {
+    style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px' },
+  }, `Checked ${items.length} datasets: ${summaryParts.join(', ')}`));
+
+  // ── Direction toggle ──
+  let direction = 'data-to-doc'; // 'data-to-doc' | 'doc-to-data'
+  const dirBar = el('div', { style: {
+    display: 'flex', gap: '4px', marginBottom: '10px',
+    background: 'var(--bg-subtle, #F3F4F6)', borderRadius: '6px', padding: '3px',
+  }});
+  const btnDataToDoc = el('button', {
+    class: 'btn btn-sm sync-dir-btn sync-dir-active',
+    onclick: () => setDirection('data-to-doc'),
+  }, 'Data \u2192 Document');
+  const btnDocToData = el('button', {
+    class: 'btn btn-sm sync-dir-btn',
+    onclick: () => setDirection('doc-to-data'),
+  }, 'Document \u2192 Data');
+  dirBar.append(btnDataToDoc, btnDocToData);
+  card.appendChild(dirBar);
+
+  function setDirection(dir) {
+    direction = dir;
+    btnDataToDoc.className = `btn btn-sm sync-dir-btn${dir === 'data-to-doc' ? ' sync-dir-active' : ''}`;
+    btnDocToData.className = `btn btn-sm sync-dir-btn${dir === 'doc-to-data' ? ' sync-dir-active' : ''}`;
+    renderBody();
+  }
+
+  // ── Scrollable body ──
+  const body = el('div', { style: { overflowY: 'auto', flex: '1', minHeight: '0' } });
+  card.appendChild(body);
+
+  function renderBody() {
+    body.innerHTML = '';
+
+    for (const status of STATUS_ORDER) {
+      const group = groups[status];
+      if (!group || group.length === 0) continue;
+      const meta = STATUS_META[status];
+
+      // Group header
+      body.appendChild(el('div', { style: {
+        display: 'flex', alignItems: 'center', gap: '6px',
+        padding: '6px 0', marginTop: '4px',
+        fontSize: '11px', fontWeight: '700', textTransform: 'uppercase',
+        letterSpacing: '0.04em', color: meta.color,
+      }}, [
+        el('span', { html: icon(meta.icon, 12) }),
+        `${meta.label} (${group.length})`,
+      ]));
+
+      // Items
+      for (const item of group) {
+        const row = el('div', { style: {
+          display: 'flex', alignItems: 'center', gap: '6px',
+          padding: '4px 8px', marginBottom: '2px',
+          background: meta.bg, borderRadius: '4px', fontSize: '11px',
+        }});
+
+        // Name + location
+        row.appendChild(el('span', {
+          style: { fontWeight: '600', fontFamily: 'var(--mono)', flexShrink: '0' },
+        }, item.name));
+        row.appendChild(el('span', {
+          style: { color: 'var(--text-tertiary)', fontSize: '10px', flexShrink: '0' },
+        }, item.location));
+
+        // Expression preview (for non-synced) — fill remaining space
+        if (status !== 'found') {
+          const exprText = item.expression || '—';
+          row.appendChild(el('code', {
+            style: {
+              fontSize: '9px', color: 'var(--text-tertiary)',
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              flex: '1', minWidth: '0',
+            },
+            title: exprText,
+          }, exprText.length > 50 ? exprText.slice(0, 47) + '…' : exprText));
+        } else {
+          row.appendChild(el('span', { style: { flex: '1' } }));
+        }
+
+        // ── Per-item action button ──
+        const actionBtn = buildItemAction(item, status);
+        if (actionBtn) row.appendChild(actionBtn);
+
+        body.appendChild(row);
+      }
+    }
+  }
+
+  function buildItemAction(item, status) {
+    // Data → Document: push stored expression into document
+    if (direction === 'data-to-doc') {
+      if (status === 'found' && item.matchedPattern && item.matchedPattern !== item.expression) {
+        // In doc but different form (alias mismatch) → offer to overwrite
+        return el('button', { class: 'btn btn-outline btn-xs', title: 'Replace document expression with stored form',
+          onclick: async (e) => {
+            const btn = e.currentTarget;
+            btn.disabled = true; btn.textContent = '…';
+            const count = await replaceAllInDocument(item.matchedPattern, item.expression, item.name);
+            btn.textContent = count > 0 ? '\u2713' : '\u2717';
+            btn.className = count > 0 ? 'btn btn-xs sync-action-done' : 'btn btn-xs sync-action-fail';
+          },
+        }, 'Sync doc');
+      }
+      if (status === 'multiple' && item.matchedPattern) {
+        // Multiple matches → offer to replace all
+        return el('button', { class: 'btn btn-outline btn-xs', title: `Replace all ${item.matchCount} occurrences`,
+          onclick: async (e) => {
+            const btn = e.currentTarget;
+            btn.disabled = true; btn.textContent = '…';
+            const count = await replaceAllInDocument(item.matchedPattern, item.expression, item.name);
+            btn.textContent = count > 0 ? `\u2713 ${count}` : '\u2717';
+            btn.className = count > 0 ? 'btn btn-xs sync-action-done' : 'btn btn-xs sync-action-fail';
+          },
+        }, `Sync all (${item.matchCount})`);
+      }
+      return null;
+    }
+
+    // Document → Data: update stored expression to match document
+    if (direction === 'doc-to-data') {
+      if (status === 'found' && item.matchedPattern && item.matchedPattern !== item.expression) {
+        // Doc has different form → update stored to match
+        return el('button', { class: 'btn btn-outline btn-xs', title: 'Update stored expression to match document',
+          onclick: async (e) => {
+            const btn = e.currentTarget;
+            btn.disabled = true; btn.textContent = '…';
+            try {
+              await updateVariable(item.id, { expression: item.matchedPattern });
+              btn.textContent = '\u2713';
+              btn.className = 'btn btn-xs sync-action-done';
+              item.expression = item.matchedPattern; // update local state
+            } catch {
+              btn.textContent = '\u2717';
+              btn.className = 'btn btn-xs sync-action-fail';
+            }
+          },
+        }, 'Sync data');
+      }
+      if (status === 'not_found') {
+        // Not in document → offer to remove from data
+        return el('button', { class: 'btn btn-outline btn-xs', title: 'Remove orphaned dataset',
+          style: { color: '#DC2626' },
+          onclick: async (e) => {
+            if (!confirm(`Remove "${item.name}" from datasets?`)) return;
+            const btn = e.currentTarget;
+            btn.disabled = true; btn.textContent = '…';
+            try {
+              await removeVariable(item.id);
+              btn.closest('div').style.opacity = '0.3';
+              btn.textContent = 'removed';
+              btn.className = 'btn btn-xs sync-action-done';
+            } catch {
+              btn.textContent = '\u2717';
+              btn.className = 'btn btn-xs sync-action-fail';
+            }
+          },
+        }, 'Remove');
+      }
+      return null;
+    }
+    return null;
+  }
+
+  renderBody();
+
+  // ── Footer actions ──
+  const actions = el('div', { class: 'doc-update-actions' });
+  actions.appendChild(el('button', {
+    class: 'btn btn-outline btn-sm',
+    style: { color: 'var(--text-tertiary)' },
+    onclick: () => overlay.remove(),
+  }, 'Close'));
+  card.appendChild(actions);
+
+  document.body.appendChild(overlay);
 }
 
