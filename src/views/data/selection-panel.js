@@ -33,6 +33,98 @@ import {
 } from '../../services/data-api.js';
 import { resolveExpression, applyFiltersAndIndex } from '../../services/expression-resolver.js';
 
+// ─── Expression badge builder ──────────────────────────────────────
+
+/**
+ * Build an array of small badge elements describing the parsed expression.
+ * Used in both the header row and the create-dataset form.
+ */
+function buildExpressionBadges(parsed) {
+  const badges = [];
+  if (!parsed) return badges;
+
+  const b = (cls, label) => el('span', { class: `sel-expr-badge ${cls}` }, label);
+
+  // 1. Purpose badge — variable / block / inline
+  const purpose = parsed.purpose || (parsed.type === 'inline' ? 'inline' : null);
+  if (purpose === 'variable') badges.push(b('sel-badge-purpose-var', 'VARIABLE'));
+  else if (purpose === 'block')  badges.push(b('sel-badge-purpose-block', 'BLOCK'));
+  else if (purpose === 'inline') badges.push(b('sel-badge-purpose-inline', 'INLINE'));
+
+  // 2. Type / data-type badge (SINGLE, BOM, OBJECT, LIST, CODE, DEFINE, FOR…)
+  const effectiveType = parsed.type === 'inline' ? (parsed.dataType || 'single') : parsed.type;
+  const typeLabel = parsed.type === 'inline-assign' ? 'BLOCK-ASSIGN' : effectiveType.toUpperCase();
+  const typeClass = {
+    define: 'sel-badge-define', 'inline-assign': 'sel-badge-block',
+    single: 'sel-badge-single', bom: 'sel-badge-bom', object: 'sel-badge-object',
+    list: 'sel-badge-list', code: 'sel-badge-code',
+    for: 'sel-badge-loop', endfor: 'sel-badge-loop', dotpath: 'sel-badge-dotpath',
+  }[effectiveType] || 'sel-badge-default';
+  badges.push(b(typeClass, typeLabel));
+
+  // 3. #this alias
+  const src = parsed.source || parsed.loopSource || '';
+  if (src.startsWith('#this.') || src.startsWith('#this ') || src === '#this') {
+    badges.push(b('sel-badge-this', '#this'));
+  }
+
+  // 4. related() reverse reference
+  if (/\.?related\s*\(/.test(src)) {
+    badges.push(b('sel-badge-related', 'RELATED()'));
+  }
+
+  // 5. Accessor (e.g. .valueDescription)
+  if (parsed.accessor) {
+    badges.push(b('sel-badge-accessor', parsed.accessor));
+  }
+
+  // 6. Null-safe with fallback
+  if (parsed.nullSafeFallback != null) {
+    badges.push(b('sel-badge-nullsafe', `NULL-SAFE → "${parsed.nullSafeFallback}"`));
+  }
+
+  // 7. Filters
+  const filterInfo = parseSourceFilters(src);
+  if (filterInfo.filters.length > 0) {
+    const isPlaceholder = filterInfo.filters.some(f => f.field === '_literal' && f.value === 'false');
+    if (isPlaceholder) {
+      badges.push(b('sel-badge-placeholder', 'PLACEHOLDER'));
+    } else {
+      const filterLabel = filterInfo.filters.length === 1
+        ? `FILTER: ${filterInfo.filters[0].field}`
+        : `${filterInfo.filters.length} FILTERS`;
+      badges.push(b('sel-badge-filter', filterLabel));
+    }
+  }
+
+  // 8. Index access [n]
+  if (filterInfo.indexAccess != null) {
+    badges.push(b('sel-badge-index', `[${filterInfo.indexAccess}]`));
+  }
+
+  // 9. Sort / transform
+  if (/\.sort\s*\(/.test(src)) badges.push(b('sel-badge-transform', 'SORT'));
+  if (/\.distinct\s*\(/.test(src)) badges.push(b('sel-badge-transform', 'DISTINCT'));
+  if (/\.flatten\s*\(/.test(src)) badges.push(b('sel-badge-transform', 'FLATTEN'));
+
+  // 10. getConfigurationAttribute
+  if (src.includes('getConfigurationAttribute(') || src.includes('getConfigAttr(')) {
+    badges.push(b('sel-badge-configattr', 'CONFIG-ATTR'));
+  }
+
+  // 11. Arithmetic / formula (references multiple defines)
+  if (parsed.dataType === 'code' || (parsed.type === 'define' && /[+\-*/]/.test(src) && /#\w+/.test(src))) {
+    badges.push(b('sel-badge-formula', 'FORMULA'));
+  }
+
+  // 12. Loop variable reference
+  if (parsed.type === 'for') {
+    badges.push(b('sel-badge-loop', `LOOP → ${parsed.loopVar}`));
+  }
+
+  return badges;
+}
+
 // ─── Panel state ────────────────────────────────────────────────────
 
 let panelEl = null;
@@ -222,26 +314,11 @@ function renderPanel() {
     }),
   ]);
 
-  // Expression badge row
-  // For 'inline' type, show the inferred data type (e.g. SINGLE) not "INLINE"
-  const effectiveType = parsed.type === 'inline' ? (parsed.dataType || 'single') : parsed.type;
-  const typeBadgeClass = {
-    define: 'badge-type-define',
-    'inline-assign': 'badge-type-inline',
-    single: 'badge-type-single',
-    bom: 'badge-type-bom',
-    object: 'badge-type-object',
-    list: 'badge-type-list',
-    code: 'badge-type-code',
-    for: 'badge-type-for',
-    endfor: 'badge-type-endfor',
-    dotpath: 'badge-type-dotpath',
-  }[effectiveType] || '';
-
-  const typeBadgeLabel = parsed.type === 'inline-assign' ? 'BLOCK' : effectiveType.toUpperCase();
+  // Expression badge row — detailed badges
+  const exprBadges = buildExpressionBadges(parsed);
 
   const exprRow = el('div', { class: 'sel-panel-expr' }, [
-    el('span', { class: `sel-panel-type-badge ${typeBadgeClass}` }, typeBadgeLabel),
+    el('div', { class: 'sel-panel-badges-row' }, exprBadges),
     el('code', { class: 'sel-panel-code' }, parsed.raw),
   ]);
 
@@ -1191,15 +1268,22 @@ function showCreateDataSetForm(parsed, dupeInfo) {
     );
   }
 
-  // Name field
+  // Name field (locked — derived from expression)
   const nameInput = el('input', {
     type: 'text',
-    class: 'sel-create-input',
+    class: 'sel-create-input sel-create-input-locked',
     value: suggested.name,
-    placeholder: '#variableName',
+    readonly: true,
+    tabIndex: -1,
   });
+  // Build detailed badges for the create form (same as header, but using parsed)
+  const createBadges = buildExpressionBadges(parsed);
+
   form.appendChild(el('div', { class: 'sel-create-field' }, [
-    el('label', { class: 'sel-create-label' }, 'Name'),
+    el('div', { class: 'sel-create-label-row' }, [
+      el('label', { class: 'sel-create-label' }, 'Name'),
+      ...createBadges,
+    ]),
     nameInput,
   ]));
 
@@ -1209,10 +1293,16 @@ function showCreateDataSetForm(parsed, dupeInfo) {
     el('code', { class: 'sel-create-source' }, suggested.source || parsed.raw),
   ]));
 
-  // Purpose + Type badges
-  form.appendChild(el('div', { class: 'sel-create-badges' }, [
-    el('span', { class: `badge badge-purpose-${suggested.purpose === 'variable' ? 'var' : suggested.purpose === 'inline' ? 'inline' : 'block'}` }, suggested.purpose.toUpperCase()),
-    el('span', { class: `badge badge-${suggested.type}` }, suggested.type.toUpperCase()),
+  // Description field
+  const descInput = el('input', {
+    type: 'text',
+    class: 'sel-create-input',
+    value: '',
+    placeholder: 'Optional description…',
+  });
+  form.appendChild(el('div', { class: 'sel-create-field' }, [
+    el('label', { class: 'sel-create-label' }, 'Description'),
+    descInput,
   ]));
 
   // Favourite button
@@ -1237,124 +1327,210 @@ function showCreateDataSetForm(parsed, dupeInfo) {
     el('div', { class: 'sel-create-cat-row' }, [catSelect, favBtn]),
   ]));
 
-  // Section picker
+  // Section picker + quick add
+  const secRow = el('div', { class: 'sel-create-sec-row' });
+  secRow.appendChild(secSelect);
+
+  // "Quick add" section — only visible when a catalogue is selected
+  const quickAddBtn = el('button', {
+    class: 'sel-sec-quick-add',
+    title: 'Add new section',
+    html: icon('plus', 12),
+  });
+
+  const quickAddInput = el('input', {
+    type: 'text',
+    class: 'sel-sec-quick-input',
+    placeholder: 'New section name…',
+  });
+  const quickAddHint = el('div', { class: 'sel-sec-quick-hint' }, [
+    el('kbd', {}, 'Enter'),
+    ' to create · ',
+    el('kbd', {}, 'Esc'),
+    ' to cancel',
+  ]);
+  const quickAddWrap = el('div', { class: 'sel-sec-quick-wrap', style: { display: 'none' } }, [
+    quickAddInput,
+    quickAddHint,
+  ]);
+
+  quickAddBtn.addEventListener('click', () => {
+    const isOpen = quickAddWrap.style.display !== 'none';
+    if (isOpen) {
+      quickAddWrap.style.display = 'none';
+      quickAddBtn.classList.remove('sel-sec-quick-active');
+    } else {
+      quickAddWrap.style.display = 'block';
+      quickAddBtn.classList.add('sel-sec-quick-active');
+      quickAddInput.focus();
+    }
+  });
+
+  quickAddInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const name = quickAddInput.value.trim();
+      if (!name) return;
+      const catId = picker.selectedCatId();
+      if (!catId) return;
+      // Create section in state
+      const sections = state.get('sections') || [];
+      const newId = `sec_${Date.now()}`;
+      sections.push({ id: newId, name, catalogueId: catId, locked: false });
+      state.set('sections', sections);
+      // Refresh dropdown and select the new section
+      picker.refreshSectionPicker();
+      secSelect.value = newId;
+      secSelect.dispatchEvent(new Event('change'));
+      // Collapse quick-add
+      quickAddInput.value = '';
+      quickAddWrap.style.display = 'none';
+      quickAddBtn.classList.remove('sel-sec-quick-active');
+    } else if (e.key === 'Escape') {
+      quickAddInput.value = '';
+      quickAddWrap.style.display = 'none';
+      quickAddBtn.classList.remove('sel-sec-quick-active');
+    }
+  });
+
+  // Show quick add only if catalogue is selected
+  function updateQuickAddVisibility() {
+    const hasCat = !!picker.selectedCatId();
+    quickAddBtn.style.display = hasCat ? 'flex' : 'none';
+  }
+  updateQuickAddVisibility();
+  catSelect.addEventListener('change', updateQuickAddVisibility);
+
+  secRow.appendChild(quickAddBtn);
+
   form.appendChild(el('div', { class: 'sel-create-field' }, [
     el('label', { class: 'sel-create-label' }, 'Section'),
-    secSelect,
+    secRow,
+    quickAddWrap,
   ]));
 
   form.appendChild(errorEl);
+
+  // Shared create logic
+  async function doCreate({ openAfter = false } = {}) {
+    const name = nameInput.value.trim();
+    if (!name) {
+      errorEl.textContent = 'Name is required';
+      errorEl.style.display = 'block';
+      return;
+    }
+    if (!name.startsWith('#')) {
+      errorEl.textContent = 'Name must start with #';
+      errorEl.style.display = 'block';
+      return;
+    }
+    const selectedCatId = picker.selectedCatId();
+    const selectedSectionId = picker.selectedSectionId();
+    if (!selectedCatId) {
+      errorEl.textContent = 'Select a catalogue';
+      errorEl.style.display = 'block';
+      return;
+    }
+
+    try {
+      const varData = {
+        name,
+        purpose: suggested.purpose,
+        type: suggested.type,
+        source: suggested.source || parsed.raw,
+        description: descInput.value.trim(),
+        catalogueId: selectedCatId,
+        sectionId: selectedSectionId,
+      };
+      // Pass through null-safe / accessor transforms from inline expressions
+      if (suggested.accessor || suggested.nullSafeFallback != null) {
+        const transforms = [];
+        if (suggested.accessor) transforms.push({ type: 'accessor', method: suggested.accessor });
+        if (suggested.nullSafeFallback != null) {
+          const nsTrans = { type: 'nullSafe', fallback: suggested.nullSafeFallback };
+          if (suggested.nullCheckField) nsTrans.nullCheckField = suggested.nullCheckField;
+          transforms.push(nsTrans);
+        }
+        varData.transforms = transforms;
+      }
+      // Save active solution filter as instanceSolution on the dataset
+      if (_solutionFilter) {
+        varData.instanceSolution = _solutionFilter;
+      }
+
+      // ── Inline #variable reference → set up sourceDefine relationship ──
+      if (suggested.purpose === 'inline' && varData.source && /^#\w+$/.test(varData.source)) {
+        const allVarsForLink = state.get('variables') || [];
+        const sourceVar = allVarsForLink.find(v => v.name === varData.source);
+        varData.sourceDefine = varData.source;
+        if (sourceVar) {
+          varData.sourceDefineSource = sourceVar.sourceDefine || sourceVar.source || '';
+        }
+      }
+
+      // Detect placeholder (.{?false}) in source and set flag
+      if (varData.source && varData.source.includes('.{?false}')) {
+        varData.placeholder = true;
+        varData.source = varData.source.replace(/\.\{\?false\}$/, '');
+      }
+      // Detect parent-child block relationship (#loopVar.rest)
+      // #this is a context alias (resolves to starting object), not a loop variable
+      if (varData.source) {
+        const loopVarMatch = varData.source.match(/^(#\w+)\./);
+        if (loopVarMatch && loopVarMatch[1] !== '#this') {
+          varData.parentLoopVar = loopVarMatch[1];
+          varData.source = varData.source.slice(loopVarMatch[0].length);
+        }
+      }
+
+      // ── Check for missing source dependency ─────────────────────
+      const allVars = state.get('variables') || [];
+      const existingNames = new Set(allVars.map(v => v.name));
+      const sourceExpr = suggested.source || parsed.source || '';
+      const sourceRefMatch = sourceExpr.match(/^(#\w+)/);
+      const missingRefs = sourceRefMatch
+        && sourceRefMatch[1] !== name
+        && sourceRefMatch[1] !== '#this'
+        && !existingNames.has(sourceRefMatch[1])
+        ? [sourceRefMatch[1]]
+        : [];
+
+      if (missingRefs.length > 0) {
+        const proceed = await showMissingDepsDialog(missingRefs, selectedCatId, selectedSectionId);
+        if (!proceed) return;
+      }
+
+      const saved = await createVariable(varData);
+
+      if (openAfter && saved?.id) {
+        // Navigate to the wizard for the newly created variable
+        showCreateToast(`Created "${name}" — opening editor…`);
+        renderPanel();
+        state.set('activeVariable', saved.id);
+        state.set('dataView', 'detail');
+      } else {
+        showCreateToast(`Created "${name}" in catalogue`);
+        renderPanel();
+      }
+    } catch (err) {
+      errorEl.textContent = err.message || 'Failed to create dataset';
+      errorEl.style.display = 'block';
+    }
+  }
 
   // Buttons
   form.appendChild(el('div', { class: 'sel-create-btns' }, [
     el('button', { class: 'btn btn-outline btn-sm', onclick: () => renderPanel() }, 'Cancel'),
     el('button', {
       class: 'btn btn-primary btn-sm',
-      onclick: async () => {
-        const name = nameInput.value.trim();
-        if (!name) {
-          errorEl.textContent = 'Name is required';
-          errorEl.style.display = 'block';
-          return;
-        }
-        if (!name.startsWith('#')) {
-          errorEl.textContent = 'Name must start with #';
-          errorEl.style.display = 'block';
-          return;
-        }
-        const selectedCatId = picker.selectedCatId();
-        const selectedSectionId = picker.selectedSectionId();
-        if (!selectedCatId) {
-          errorEl.textContent = 'Select a catalogue';
-          errorEl.style.display = 'block';
-          return;
-        }
-
-        try {
-          const varData = {
-            name,
-            purpose: suggested.purpose,
-            type: suggested.type,
-            source: suggested.source || parsed.raw,
-            catalogueId: selectedCatId,
-            sectionId: selectedSectionId,
-          };
-          // Pass through null-safe / accessor transforms from inline expressions
-          if (suggested.accessor || suggested.nullSafeFallback != null) {
-            const transforms = [];
-            if (suggested.accessor) transforms.push({ type: 'accessor', method: suggested.accessor });
-            if (suggested.nullSafeFallback != null) {
-              const nsTrans = { type: 'nullSafe', fallback: suggested.nullSafeFallback };
-              if (suggested.nullCheckField) nsTrans.nullCheckField = suggested.nullCheckField;
-              transforms.push(nsTrans);
-            }
-            varData.transforms = transforms;
-          }
-          // Save active solution filter as instanceSolution on the dataset
-          if (_solutionFilter) {
-            varData.instanceSolution = _solutionFilter;
-          }
-
-          // ── Inline #variable reference → set up sourceDefine relationship ──
-          // When ${#lengthUom}$ is created, the source is '#lengthUom' which
-          // refers to a $define{#lengthUom=...}$ variable. Link them via sourceDefine
-          // so the system knows this inline output draws from the define chain.
-          if (suggested.purpose === 'inline' && varData.source && /^#\w+$/.test(varData.source)) {
-            const allVarsForLink = state.get('variables') || [];
-            const sourceVar = allVarsForLink.find(v => v.name === varData.source);
-            varData.sourceDefine = varData.source;
-            if (sourceVar) {
-              varData.sourceDefineSource = sourceVar.sourceDefine || sourceVar.source || '';
-            }
-          }
-
-          // Detect placeholder (.{?false}) in source and set flag
-          if (varData.source && varData.source.includes('.{?false}')) {
-            varData.placeholder = true;
-            varData.source = varData.source.replace(/\.\{\?false\}$/, '');
-          }
-          // Detect parent-child block relationship (#loopVar.rest)
-          // #this is a context alias (resolves to starting object), not a loop variable
-          if (varData.source) {
-            const loopVarMatch = varData.source.match(/^(#\w+)\./);
-            if (loopVarMatch && loopVarMatch[1] !== '#this') {
-              varData.parentLoopVar = loopVarMatch[1];
-              varData.source = varData.source.slice(loopVarMatch[0].length);
-            }
-          }
-
-          // ── Check for missing source dependency ─────────────────────
-          // Only check the primary source reference (the #varName the data
-          // comes FROM), not #variables inside filters which are runtime
-          // loop context variables (e.g. #currentCp in a $for loop).
-          const allVars = state.get('variables') || [];
-          const existingNames = new Set(allVars.map(v => v.name));
-          const sourceExpr = suggested.source || parsed.source || '';
-          // Extract only the leading #varName (the source), ignoring filter contents
-          // #this is a context alias (resolved to starting object), not a variable dep
-          const sourceRefMatch = sourceExpr.match(/^(#\w+)/);
-          const missingRefs = sourceRefMatch
-            && sourceRefMatch[1] !== name
-            && sourceRefMatch[1] !== '#this'
-            && !existingNames.has(sourceRefMatch[1])
-            ? [sourceRefMatch[1]]
-            : [];
-
-          if (missingRefs.length > 0) {
-            const proceed = await showMissingDepsDialog(missingRefs, selectedCatId, selectedSectionId);
-            if (!proceed) return; // user cancelled
-          }
-
-          await createVariable(varData);
-          // Success → show toast and close
-          showCreateToast(`Created "${name}" in catalogue`);
-          renderPanel(); // back to expression view
-        } catch (err) {
-          errorEl.textContent = err.message || 'Failed to create dataset';
-          errorEl.style.display = 'block';
-        }
-      },
+      onclick: () => doCreate(),
     }, 'Create'),
+    el('button', {
+      class: 'btn btn-primary btn-sm sel-create-open-btn',
+      onclick: () => doCreate({ openAfter: true }),
+    }, [
+      'Create & Open',
+      el('span', { class: 'icon', html: icon('chevronRight', 10), style: { marginLeft: '2px' } }),
+    ]),
   ]));
 
   // Replace panel content with form
