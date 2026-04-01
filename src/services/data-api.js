@@ -16,6 +16,7 @@ let cachedRecords = {};       // objectName → records[]
 let cachedBomFields = null;   // string[]  (field names from flatbom)
 let cachedBomRecords = null;  // record[]
 let cachedConfigProducts = {}; // cpId → { model, bom } parsed XML tree
+let cachedDescriptions = {};  // objectName → { forwardRefs, reverseRefs, attributes }
 
 // ─── Connection helpers ─────────────────────────────────────────────
 
@@ -422,6 +423,9 @@ export function getStartingObject() {
  * }>}
  */
 export async function describeObject(objectName) {
+  // Cache hit — skip recomputation
+  if (cachedDescriptions[objectName]) return cachedDescriptions[objectName];
+
   const objects = await fetchModel();
   if (!objects) return { name: objectName, forwardRefs: [], reverseRefs: [], attributes: [] };
 
@@ -455,7 +459,17 @@ export async function describeObject(objectName) {
       return a.name.localeCompare(b.name);
     });
 
-  return { name: objectName, forwardRefs, reverseRefs, attributes };
+  const result = { name: objectName, forwardRefs, reverseRefs, attributes };
+  cachedDescriptions[objectName] = result;
+  return result;
+}
+
+/**
+ * Clear the model and description caches, forcing a fresh fetch on next use.
+ */
+export function clearModelCache() {
+  cachedModel = null;
+  cachedDescriptions = {};
 }
 
 /**

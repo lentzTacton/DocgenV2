@@ -50,6 +50,7 @@ export const wizState = {
   explorerSearch: '',   // search/filter text for object explorer
   explorerFavs: new Set(),
   currentObjDesc: null, // result of describeObject()
+  useThisAlias: false,  // when true, expression root uses #this. instead of startingObject.
 
   // Data state
   bomRecords: [],
@@ -97,6 +98,8 @@ export function resetWiz(existing) {
     wizState.name = copy.name || '';
     wizState.description = copy.description || '';
     wizState.source = copy.source || '#this.flatbom';
+    // Detect #this. alias usage so the explorer uses #this prefix in expressions
+    wizState.useThisAlias = wizState.source.startsWith('#this.');
     wizState.filters = copy.filters || [];
     wizState.filterLogic = copy.filterLogic || 'or';
     wizState.transforms = copy.transforms || [];
@@ -171,9 +174,10 @@ export function resetWiz(existing) {
 
     // Auto-detect parent-child block relationship from source
     // If source starts with #loopVar. (e.g. #currentAlternative.flatbom), link to parent
+    // #this is a context alias (resolves to starting object), not a loop variable
     if (!wizState.parentLoopVar && wizState.source) {
       const loopVarMatch = wizState.source.match(/^(#\w+)\./);
-      if (loopVarMatch) {
+      if (loopVarMatch && loopVarMatch[1] !== '#this') {
         const loopVarName = loopVarMatch[1];
         // Find the for-loop that uses this variable — look for a block whose source
         // is iterated by a $for{loopVarName in parentBlock}$ construct.
@@ -192,6 +196,7 @@ export function resetWiz(existing) {
     wizState.name = '';
     wizState.description = '';
     wizState.source = '';
+    wizState.useThisAlias = false;
     wizState.filters = [];
     wizState.filterLogic = 'or';
     wizState.transforms = [];
@@ -309,7 +314,21 @@ export function rebuildObjectPath(modelObjects) {
   // Use parent object type as root when in child block context
   const startObj = wizState.parentObjectType || state.get('startingObject.type') || 'Solution';
   const root = startObj.charAt(0).toLowerCase() + startObj.slice(1);
-  const source = wizState.source;
+  // Resolve #this. alias to the starting object before tokenising
+  let source = wizState.source.replace(/^#this\./, `${root}.`);
+
+  // Handle bare related() calls (legacy: #this. prefix was stripped during creation)
+  // Prepend the root so the tokenizer can process it normally
+  if (source.startsWith('related(')) {
+    source = `${root}.${source}`;
+    // Fix the stored source to include #this. for future consistency
+    wizState.source = `#this.${wizState.source}`;
+    wizState.useThisAlias = true;
+  }
+
+  // Strip trailing filters like .{?false} or .{?alternativeTo==null} before tokenising —
+  // filters don't affect the navigation path, and would otherwise be parsed as forward segments
+  source = source.replace(/\.\{\?[^}]*\}$/, '');
 
   // For child blocks, source is relative to parent type (e.g. 'flatbom' not 'configuredProduct.flatbom')
   // Skip the root prefix check if in parent context — source starts directly with attributes
@@ -345,13 +364,17 @@ export function rebuildObjectPath(modelObjects) {
   if (tokens.length === 0) return;
 
   // Walk the model to determine which forward tokens are refs vs the leaf field.
-  // Reverse tokens are always path segments (never the leaf).
+  // A terminal reverse token (related() at the end) is the selected SOURCE, not a
+  // navigation segment — don't push it onto objectPath so the explorer stays at
+  // the parent level with the reverse ref row highlighted.
   const path = [];
   let currentObj = startObj;
 
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i];
     if (tok.type === 'reverse') {
+      const isLast = i === tokens.length - 1;
+      if (isLast) break; // terminal related() = source selection, not navigation
       path.push({ name: tok.name, reverse: true, fromObject: tok.fromObject });
       currentObj = tok.fromObject;
       continue;
@@ -373,6 +396,12 @@ export function rebuildObjectPath(modelObjects) {
 
   if (path.length > 0) {
     wizState.objectPath = path;
+  }
+
+  // Auto-switch to Refs tab when source is a related() call so the selected
+  // reverse ref row is immediately visible (instead of buried in the All tab)
+  if (wizState.source && wizState.source.includes('.related(')) {
+    wizState.explorerTab = 'ref';
   }
 }
 

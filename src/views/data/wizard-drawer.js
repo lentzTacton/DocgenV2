@@ -25,6 +25,9 @@ let _drawerTab = 'data';
 let _drawerLoading = false;
 let _drawerLoadAttempted = false;
 let _drawerShowAll = false;
+let _drawerHideEmpty = true; // checked by default — filter out empty columns
+let _drawerColSearch = '';   // search filter for column chips
+let _drawerDragCol = null;   // column being dragged
 
 export function resetDrawerLoadAttempt() {
   _drawerLoadAttempted = false;
@@ -127,11 +130,35 @@ export function getDrawerData({ showAll } = {}) {
     }
   }
 
-  const visibleCols = wizState.previewColumns.length > 0
-    ? wizState.previewColumns.filter(c => allFields.includes(c))
-    : allFields.slice(0, 6);
+  let visibleCols;
+  if (wizState.previewColumns.length > 0) {
+    visibleCols = wizState.previewColumns.filter(c => allFields.includes(c));
+  } else {
+    // Auto-select: prioritise 'name' column, then non-empty fields
+    const priorityCols = ['name', 'displayId', 'id'];
+    const priority = priorityCols.filter(c => allFields.includes(c));
+    const rest = allFields.filter(c => !priorityCols.includes(c));
+    if (records.length > 0) {
+      const nonEmpty = rest.filter(f =>
+        records.some(r => r[f] != null && String(r[f]).trim() !== '' && r[f] !== 'null')
+      );
+      visibleCols = [...priority, ...nonEmpty].slice(0, 6);
+    } else {
+      visibleCols = [...priority, ...rest].slice(0, 6);
+    }
+  }
 
-  return { records, allFields, visibleCols };
+  // Compute which fields have data (used for column color-coding)
+  const fieldsWithData = new Set();
+  if (records.length > 0) {
+    allFields.forEach(f => {
+      if (records.some(r => r[f] != null && String(r[f]).trim() !== '' && r[f] !== 'null')) {
+        fieldsWithData.add(f);
+      }
+    });
+  }
+
+  return { records, allFields, visibleCols, fieldsWithData };
 }
 
 // ─── Shared data table renderer ─────────────────────────────────────────
@@ -156,16 +183,31 @@ export function renderSharedDataTable(container, records, visibleCols, opts = {}
 
   const table = el('table', { class: 'data-drawer-table' });
   const thead = el('tr');
-  visibleCols.forEach(c => thead.appendChild(el('th', {}, c)));
+  visibleCols.forEach((c, ci) => {
+    const th = el('th', { class: ci === 0 ? 'data-drawer-sticky-col' : '' }, c);
+    thead.appendChild(th);
+  });
   table.appendChild(thead);
 
   pageRecords.forEach(rec => {
     const tr = el('tr');
-    visibleCols.forEach(c => {
+    visibleCols.forEach((c, ci) => {
       const val = rec[c];
       const display = val == null ? '' : String(val);
-      tr.appendChild(el('td', { title: display },
-        display.length > maxCellLen ? display.substring(0, maxCellLen) + '…' : display));
+      const truncated = display.length > maxCellLen ? display.substring(0, maxCellLen) + '…' : display;
+      const td = el('td', {
+        class: `data-drawer-cell-copy${ci === 0 ? ' data-drawer-sticky-col' : ''}`,
+        title: display.length > maxCellLen ? display : '',
+      }, truncated);
+      td.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (!display) return;
+        navigator.clipboard.writeText(display).then(() => {
+          td.classList.add('data-drawer-cell-copied');
+          setTimeout(() => td.classList.remove('data-drawer-cell-copied'), 800);
+        }).catch(() => {});
+      });
+      tr.appendChild(td);
     });
     table.appendChild(tr);
   });
@@ -380,9 +422,46 @@ function renderDrawerDataTab(body, actions) {
 
 function renderDrawerColumnsTab(body, actions) {
   clear(body);
-  if (actions) { clear(actions); actions.appendChild(el('span', { class: 'data-drawer-page-info' }, 'Select columns for data preview')); }
 
-  const { allFields, visibleCols } = getDrawerData();
+  const { allFields, visibleCols, records, fieldsWithData } = getDrawerData();
+
+  // Count records with data per field
+  const fieldCounts = {};
+  if (records.length > 0) {
+    allFields.forEach(f => {
+      fieldCounts[f] = records.filter(r => r[f] != null && String(r[f]).trim() !== '' && r[f] !== 'null').length;
+    });
+  }
+
+  // ── Header actions: Hide empty checkbox + Reset button ──
+  if (actions) {
+    clear(actions);
+    // Hide empty checkbox
+    const hideEmptyCb = el('input', {
+      type: 'checkbox',
+      checked: _drawerHideEmpty,
+      style: { margin: '0' },
+      onchange: (e) => {
+        _drawerHideEmpty = e.target.checked;
+        refreshDrawerContent();
+      },
+    });
+    actions.appendChild(el('label', {
+      style: { display: 'flex', alignItems: 'center', gap: '4px', fontSize: '10px', cursor: 'pointer', color: 'var(--text-secondary)' },
+    }, [hideEmptyCb, 'Hide empty']));
+
+    // Reset button
+    actions.appendChild(el('button', {
+      class: 'btn btn-outline btn-sm',
+      style: { padding: '1px 6px', fontSize: '10px' },
+      onclick: () => {
+        wizState.previewColumns = [];
+        _drawerHideEmpty = true;
+        _drawerColSearch = '';
+        refreshDrawerContent();
+      },
+    }, 'Reset'));
+  }
 
   if (allFields.length === 0) {
     body.appendChild(el('div', { class: 'data-drawer-empty' }, [
@@ -392,20 +471,81 @@ function renderDrawerColumnsTab(body, actions) {
     return;
   }
 
-  const colGrid = el('div', { class: 'data-drawer-col-grid' });
-  const { records: sampleRecords } = getDrawerData();
-  const firstRow = sampleRecords.length > 0 ? sampleRecords[0] : null;
+  // ── Search input ──
+  const searchWrap = el('div', { class: 'data-drawer-col-search-wrap' });
+  const searchIcon = el('span', { class: 'data-drawer-col-search-icon', html: icon('search', 12) });
+  const searchInput = el('input', {
+    type: 'text',
+    class: 'data-drawer-col-search',
+    placeholder: 'Filter columns…',
+    value: _drawerColSearch,
+  });
+  searchInput.addEventListener('input', (e) => {
+    _drawerColSearch = e.target.value;
+    renderColumnsChipGrid(colGrid, allFields, visibleCols, records, fieldsWithData, fieldCounts);
+  });
+  searchWrap.appendChild(searchIcon);
+  searchWrap.appendChild(searchInput);
+  if (_drawerColSearch) {
+    const clearBtn = el('button', {
+      class: 'data-drawer-col-search-clear',
+      html: icon('x', 10),
+      onclick: () => { _drawerColSearch = ''; searchInput.value = ''; renderColumnsChipGrid(colGrid, allFields, visibleCols, records, fieldsWithData, fieldCounts); },
+    });
+    searchWrap.appendChild(clearBtn);
+  }
+  body.appendChild(searchWrap);
 
-  allFields.forEach(f => {
+  // ── Column chip grid ──
+  const colGrid = el('div', { class: 'data-drawer-col-grid' });
+  body.appendChild(colGrid);
+  renderColumnsChipGrid(colGrid, allFields, visibleCols, records, fieldsWithData, fieldCounts);
+}
+
+function renderColumnsChipGrid(colGrid, allFields, visibleCols, records, fieldsWithData, fieldCounts) {
+  clear(colGrid);
+
+  // Filter fields: hide-empty + search
+  let displayFields = _drawerHideEmpty
+    ? allFields.filter(f => fieldsWithData.has(f))
+    : allFields;
+  if (_drawerColSearch) {
+    const q = _drawerColSearch.toLowerCase();
+    displayFields = displayFields.filter(f => f.toLowerCase().includes(q));
+  }
+
+  const firstRow = records.length > 0 ? records[0] : null;
+  const total = records.length;
+
+  displayFields.forEach(f => {
     const isActive = visibleCols.includes(f);
+    const hasData = fieldsWithData.has(f);
     const sampleVal = firstRow ? firstRow[f] : null;
     const tipText = sampleVal != null && String(sampleVal).trim() !== ''
       ? String(sampleVal).length > 80 ? String(sampleVal).substring(0, 80) + '…' : String(sampleVal)
       : '(empty)';
+    const count = fieldCounts[f] || 0;
+
+    // Color: blue=selected, green=has data (not selected), gray=empty
+    let chipColor = '';
+    if (isActive) {
+      chipColor = 'background: var(--accent, #2563eb); color: #fff; border-color: var(--accent, #2563eb);';
+    } else if (hasData) {
+      chipColor = 'background: #f0fdf4; color: #166534; border-color: #bbf7d0;';
+    } else {
+      chipColor = 'background: #f9fafb; color: #9ca3af; border-color: #e5e7eb;';
+    }
+
+    // Record count badge
+    const countBadge = total > 0
+      ? el('span', { class: `data-drawer-col-count${isActive ? ' data-drawer-col-count-active' : ''}` }, `${count}/${total}`)
+      : null;
 
     const chip = el('button', {
-      class: `data-drawer-col-chip ${isActive ? 'data-drawer-col-active' : ''} col-chip-tip`,
-      'data-tip': tipText,
+      class: 'data-drawer-col-chip',
+      style: chipColor,
+      draggable: isActive ? 'true' : undefined,
+      'data-field': f,
       onclick: () => {
         if (isActive) {
           if (wizState.previewColumns.length === 0) {
@@ -424,49 +564,84 @@ function renderDrawerColumnsTab(body, actions) {
     }, [
       el('span', { class: 'icon', html: icon(isActive ? 'check' : 'plus', 10) }),
       f,
+      ...(countBadge ? [countBadge] : []),
     ]);
-    colGrid.appendChild(chip);
-  });
 
-  const btnRow = el('div', { style: { display: 'flex', gap: '6px', marginTop: '8px', flexWrap: 'wrap' } });
-  const { records } = getDrawerData();
-  if (records.length > 0) {
-    btnRow.appendChild(el('button', {
-      class: 'btn btn-outline btn-sm',
-      onclick: () => {
-        const emptyCols = allFields.filter(f =>
-          records.every(r => r[f] == null || String(r[f]).trim() === '' || r[f] === 'null')
-        );
-        if (emptyCols.length === 0) return;
+    // Floating tooltip (appended to body to escape overflow clipping)
+    chip.addEventListener('mouseenter', () => {
+      let tip = document.getElementById('col-chip-floating-tip');
+      if (!tip) {
+        tip = document.createElement('div');
+        tip.id = 'col-chip-floating-tip';
+        tip.className = 'col-chip-floating-tip';
+        document.body.appendChild(tip);
+      }
+      tip.textContent = tipText;
+      tip.style.display = 'block';
+      tip.style.opacity = '0';
+      const rect = chip.getBoundingClientRect();
+      const tipRect = tip.getBoundingClientRect();
+      const x = rect.left + rect.width / 2 - tipRect.width / 2;
+      const above = rect.top - tipRect.height - 6;
+      const y = above < 4 ? rect.bottom + 6 : above;
+      tip.style.left = `${Math.max(4, x)}px`;
+      tip.style.top = `${y}px`;
+      tip.style.opacity = '1';
+    });
+    chip.addEventListener('mouseleave', () => {
+      const tip = document.getElementById('col-chip-floating-tip');
+      if (tip) tip.style.opacity = '0';
+    });
+
+    // Drag-to-reorder for selected columns
+    if (isActive) {
+      chip.addEventListener('dragstart', (e) => {
+        _drawerDragCol = f;
+        chip.classList.add('data-drawer-col-dragging');
+        e.dataTransfer.effectAllowed = 'move';
+      });
+      chip.addEventListener('dragend', () => {
+        _drawerDragCol = null;
+        chip.classList.remove('data-drawer-col-dragging');
+        colGrid.querySelectorAll('.data-drawer-col-dragover').forEach(c => c.classList.remove('data-drawer-col-dragover'));
+      });
+      chip.addEventListener('dragover', (e) => {
+        if (!_drawerDragCol || _drawerDragCol === f) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        chip.classList.add('data-drawer-col-dragover');
+      });
+      chip.addEventListener('dragleave', () => {
+        chip.classList.remove('data-drawer-col-dragover');
+      });
+      chip.addEventListener('drop', (e) => {
+        e.preventDefault();
+        chip.classList.remove('data-drawer-col-dragover');
+        if (!_drawerDragCol || _drawerDragCol === f) return;
+        // Reorder previewColumns
         if (wizState.previewColumns.length === 0) {
           wizState.previewColumns = [...visibleCols];
         }
-        wizState.previewColumns = wizState.previewColumns.filter(c => !emptyCols.includes(c));
+        const cols = [...wizState.previewColumns];
+        const fromIdx = cols.indexOf(_drawerDragCol);
+        const toIdx = cols.indexOf(f);
+        if (fromIdx === -1 || toIdx === -1) return;
+        cols.splice(fromIdx, 1);
+        cols.splice(toIdx, 0, _drawerDragCol);
+        wizState.previewColumns = cols;
+        _drawerDragCol = null;
         refreshDrawerContent();
-        updateDrawerBar();
-      },
-    }, [el('span', { class: 'icon', html: icon('x', 10) }), 'Hide empty']));
+      });
+    }
+
+    colGrid.appendChild(chip);
+  });
+
+  if (displayFields.length === 0) {
+    colGrid.appendChild(el('div', { style: 'padding: 8px 4px; font-size: 11px; color: var(--text-tertiary);' },
+      _drawerColSearch ? `No columns matching "${_drawerColSearch}"` : 'No columns with data'));
   }
 
-  btnRow.appendChild(el('button', {
-    class: 'btn btn-outline btn-sm',
-    onclick: () => {
-      wizState.previewColumns = [];
-      refreshDrawerContent();
-    },
-  }, 'Reset to auto-select'));
-
-  body.appendChild(colGrid);
-  body.appendChild(btnRow);
-
-  requestAnimationFrame(() => {
-    const chips = colGrid.querySelectorAll('.col-chip-tip');
-    if (chips.length === 0) return;
-    const firstTop = chips[0].offsetTop;
-    chips.forEach(c => {
-      if (c.offsetTop === firstTop) c.classList.add('col-chip-tip-down');
-    });
-  });
 }
 
 // ─── Record loading ─────────────────────────────────────────────────────

@@ -3953,12 +3953,102 @@ select.input {
   background: #f6f8fa;
 }
 
+/* Sticky first column */
+.data-drawer-table th.data-drawer-sticky-col,
+.data-drawer-table td.data-drawer-sticky-col {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: #fff;
+  box-shadow: 2px 0 4px rgba(0,0,0,0.04);
+}
+.data-drawer-table th.data-drawer-sticky-col {
+  z-index: 3;
+}
+
+/* Click-to-copy cell */
+.data-drawer-cell-copy {
+  cursor: pointer;
+  position: relative;
+}
+.data-drawer-cell-copy:hover {
+  background: #eef2ff !important;
+}
+.data-drawer-cell-copied {
+  background: #f0fdf4 !important;
+}
+.data-drawer-cell-copied::after {
+  content: 'Copied!';
+  position: absolute;
+  top: -4px;
+  right: 4px;
+  font-size: 8px;
+  font-weight: 600;
+  color: #16a34a;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 3px;
+  padding: 1px 4px;
+  pointer-events: none;
+  animation: copyFade 0.8s ease-out forwards;
+}
+@keyframes copyFade {
+  0% { opacity: 1; transform: translateY(0); }
+  70% { opacity: 1; transform: translateY(-4px); }
+  100% { opacity: 0; transform: translateY(-8px); }
+}
+
+/* Column search */
+.data-drawer-col-search-wrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 12px 2px;
+  position: relative;
+}
+.data-drawer-col-search-icon {
+  display: flex;
+  align-items: center;
+  color: var(--text-tertiary);
+  position: absolute;
+  left: 20px;
+}
+.data-drawer-col-search {
+  flex: 1;
+  padding: 4px 8px 4px 24px;
+  font-size: 11px;
+  font-family: var(--mono);
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  background: #fafbfc;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.data-drawer-col-search:focus {
+  border-color: var(--tacton-blue);
+  background: #fff;
+}
+.data-drawer-col-search-clear {
+  position: absolute;
+  right: 16px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  padding: 2px;
+  display: flex;
+  align-items: center;
+}
+.data-drawer-col-search-clear:hover {
+  color: var(--text-primary);
+}
+
 /* Column picker */
 .data-drawer-col-grid {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  padding: 10px 12px;
+  padding: 6px 12px 10px;
 }
 .data-drawer-col-chip {
   display: flex;
@@ -3989,16 +4079,34 @@ select.input {
   color: #fff;
 }
 
-/* Column chip tooltip (CSS-only, shows first-row value) */
-.col-chip-tip {
-  position: relative;
+/* Record count badge on column chips */
+.data-drawer-col-count {
+  font-size: 8px;
+  font-weight: 600;
+  background: rgba(0,0,0,0.06);
+  padding: 1px 4px;
+  border-radius: 6px;
+  margin-left: 2px;
+  letter-spacing: 0.02em;
 }
-.col-chip-tip::after {
-  content: attr(data-tip);
-  position: absolute;
-  bottom: calc(100% + 6px);
-  left: 50%;
-  transform: translateX(-50%);
+.data-drawer-col-count-active {
+  background: rgba(255,255,255,0.25);
+  color: #fff;
+}
+
+/* Drag-to-reorder */
+.data-drawer-col-dragging {
+  opacity: 0.5;
+  transform: scale(0.95);
+}
+.data-drawer-col-dragover {
+  box-shadow: 0 0 0 2px var(--tacton-blue, #2563eb);
+  transform: scale(1.02);
+}
+
+/* Floating column chip tooltip (appended to body to escape overflow clipping) */
+.col-chip-floating-tip {
+  position: fixed;
   padding: 4px 8px;
   font-size: 10px;
   font-family: var(--mono);
@@ -4013,15 +4121,7 @@ select.input {
   pointer-events: none;
   opacity: 0;
   transition: opacity 0.15s;
-  z-index: 200;
-}
-.col-chip-tip:hover::after {
-  opacity: 1;
-}
-/* First-row chips: tooltip below instead of above */
-.col-chip-tip-down::after {
-  bottom: auto;
-  top: calc(100% + 6px);
+  z-index: 10000;
 }
 
 /* Empty state */
@@ -4677,6 +4777,99 @@ select.input {
 }
 
 /* Empty state */
+/* Loading spinner for object explorer */
+.obj-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 32px 16px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+.obj-loading-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--border-light, #e5e7eb);
+  border-top-color: var(--tacton-blue, #1e6fd0);
+  border-radius: 50%;
+  animation: objSpin 0.7s linear infinite;
+}
+@keyframes objSpin {
+  to { transform: rotate(360deg); }
+}
+
+/* Search row with inline refresh */
+.obj-search-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 0;
+  position: relative;
+}
+.obj-search-input {
+  flex: 1;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 5px 24px 5px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
+  outline: none;
+  background: var(--bg-input, #fff);
+}
+.obj-search-input:focus {
+  border-color: var(--tacton-blue);
+}
+.obj-search-clear {
+  position: absolute;
+  right: 28px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  font-size: 13px;
+  padding: 0 4px;
+  line-height: 1;
+}
+.obj-search-clear:hover {
+  color: var(--text-primary);
+}
+
+/* Refresh model button */
+.obj-refresh-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border-light);
+  background: var(--bg-input, #fff);
+  color: var(--text-tertiary);
+  cursor: pointer;
+  border-radius: var(--radius);
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+.obj-refresh-btn:hover {
+  color: var(--tacton-blue);
+  border-color: var(--tacton-blue);
+  background: rgba(30, 111, 208, 0.06);
+}
+.obj-refresh-spinning {
+  pointer-events: none;
+}
+.obj-refresh-spinning svg {
+  animation: objSpin 0.6s linear infinite;
+  color: var(--tacton-blue);
+}
+.obj-refresh-done {
+  border-color: var(--success, #16a34a) !important;
+  color: var(--success, #16a34a) !important;
+  background: rgba(22, 163, 74, 0.08) !important;
+}
+
 .obj-empty {
   text-align: center;
   padding: 20px 16px;

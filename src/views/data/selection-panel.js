@@ -1090,9 +1090,10 @@ function renderMultiDefinePanel(defines) {
         }
 
         // Detect parent-child block relationship (#loopVar.rest)
+        // #this is a context alias (resolves to starting object), not a loop variable
         if (varData.source) {
           const loopVarMatch = varData.source.match(/^(#\w+)\./);
-          if (loopVarMatch) {
+          if (loopVarMatch && loopVarMatch[1] !== '#this') {
             varData.parentLoopVar = loopVarMatch[1];
             varData.source = varData.source.slice(loopVarMatch[0].length);
           }
@@ -1313,9 +1314,10 @@ function showCreateDataSetForm(parsed, dupeInfo) {
             varData.source = varData.source.replace(/\.\{\?false\}$/, '');
           }
           // Detect parent-child block relationship (#loopVar.rest)
+          // #this is a context alias (resolves to starting object), not a loop variable
           if (varData.source) {
             const loopVarMatch = varData.source.match(/^(#\w+)\./);
-            if (loopVarMatch) {
+            if (loopVarMatch && loopVarMatch[1] !== '#this') {
               varData.parentLoopVar = loopVarMatch[1];
               varData.source = varData.source.slice(loopVarMatch[0].length);
             }

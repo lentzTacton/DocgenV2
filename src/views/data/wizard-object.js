@@ -12,10 +12,11 @@ import { el, qs, clear } from '../../core/dom.js';
 import { icon } from '../../components/icon.js';
 import { wizState } from './wizard-state.js';
 import {
-  describeObject, resolveCurrentObject, toggleExplorerFavorite, getStartingObject,
+  describeObject, resolveCurrentObject, toggleExplorerFavorite, getStartingObject, clearModelCache,
 } from '../../services/data-api.js';
 
 let refreshPipelineCallback = null;
+let _searchDebounce = null;
 
 /**
  * If transformations (single filter) are set, show a confirmation dialog before
@@ -93,8 +94,11 @@ export async function loadObjectExplorer() {
     return;
   }
 
-  // Show loading
-  container.appendChild(el('div', { class: 'obj-empty', style: { color: 'var(--text-tertiary)' } }, 'Loading...'));
+  // Show loading spinner
+  container.appendChild(el('div', { class: 'obj-loading' }, [
+    el('div', { class: 'obj-loading-spinner' }),
+    el('span', {}, 'Loading model…'),
+  ]));
 
   try {
     // Resolve current object from path (scoped to parent object type if child block)
@@ -134,7 +138,8 @@ function renderObjectExplorer(container, currentObjName) {
   const startObj = wizState.parentObjectType || getStartingObject();
   const rootLabel = wizState.parentLoopVar
     ? `${wizState.parentLoopVar} (${startObj})`
-    : startObj;
+    : wizState.useThisAlias ? `#this (${startObj})` : startObj;
+
   if (wizState.objectPath.length > 0) {
     const bc = el('div', { class: 'obj-path-bar' });
     bc.appendChild(el('span', {
@@ -160,6 +165,40 @@ function renderObjectExplorer(container, currentObjName) {
     ]));
   }
 
+  // ── #this alias toggle — only at root level (no parent block context) ──
+  if (!wizState.parentLoopVar && !wizState.parentObjectType) {
+    const thisToggle = el('label', {
+      class: 'obj-this-toggle',
+      style: {
+        display: 'flex', alignItems: 'center', gap: '5px', padding: '4px 8px',
+        fontSize: '11px', color: 'var(--text-secondary)', cursor: 'pointer',
+        borderBottom: '1px solid var(--border-light, #eee)',
+      },
+    }, [
+      el('input', {
+        type: 'checkbox',
+        checked: wizState.useThisAlias,
+        onchange: (e) => {
+          wizState.useThisAlias = e.target.checked;
+          // Rewrite the current source to swap prefix
+          if (wizState.source) {
+            const lowRoot = startObj.charAt(0).toLowerCase() + startObj.slice(1);
+            if (e.target.checked) {
+              wizState.source = wizState.source.replace(new RegExp(`^${lowRoot}\\.`), '#this.');
+            } else {
+              wizState.source = wizState.source.replace(/^#this\./, `${lowRoot}.`);
+            }
+          }
+          refreshPipeline();
+          loadObjectExplorer();
+        },
+      }),
+      el('code', { style: { fontFamily: 'var(--mono)', fontSize: '11px' } }, '#this'),
+      el('span', {}, `Use context alias for ${startObj}`),
+    ]);
+    container.appendChild(thisToggle);
+  }
+
   // ── Tab bar ──
   const allCount = wizState.currentObjDesc.attributes.length + wizState.currentObjDesc.forwardRefs.length + wizState.currentObjDesc.reverseRefs.length;
   const tabs = [
@@ -171,7 +210,7 @@ function renderObjectExplorer(container, currentObjName) {
   tabs.forEach(t => {
     tabBar.appendChild(el('button', {
       class: `obj-tab ${wizState.explorerTab === t.id ? 'obj-tab-active' : ''}`,
-      onclick: () => { wizState.explorerTab = t.id; renderObjectExplorer(container, currentObjName); },
+      onclick: () => { wizState.explorerTab = t.id; refreshExplorerContent(container, currentObjName); },
     }, [
       t.label,
       el('span', { class: 'obj-tab-count' }, String(t.count)),
@@ -179,47 +218,111 @@ function renderObjectExplorer(container, currentObjName) {
   });
   container.appendChild(tabBar);
 
-  // ── Search input ──
-  const searchWrap = el('div', { style: { padding: '4px 0', position: 'relative' } });
+  // ── Search input + refresh button ──
+  const searchWrap = el('div', { class: 'obj-search-row' });
   const searchInput = el('input', {
     id: 'obj-search',
     type: 'text',
     value: wizState.explorerSearch || '',
     placeholder: 'Filter attributes & refs…',
-    style: {
-      width: '100%', boxSizing: 'border-box', padding: '5px 24px 5px 8px',
-      fontSize: '12px', border: '1px solid var(--border-light)',
-      borderRadius: 'var(--radius)', outline: 'none',
-      background: 'var(--bg-input, #fff)',
-    },
+    class: 'obj-search-input',
     oninput: (e) => {
-      wizState.explorerSearch = e.target.value;
-      renderObjectExplorer(container, currentObjName);
-      // Re-focus search input after re-render and restore cursor
-      const inp = container.querySelector('#obj-search');
-      if (inp) { inp.focus(); inp.selectionStart = inp.selectionEnd = e.target.selectionStart; }
+      const val = e.target.value;
+      const cursorPos = e.target.selectionStart;
+      clearTimeout(_searchDebounce);
+      _searchDebounce = setTimeout(() => {
+        wizState.explorerSearch = val;
+        refreshExplorerContent(container, currentObjName);
+        // Re-focus search input after re-render and restore cursor
+        const inp = container.querySelector('#obj-search');
+        if (inp) { inp.focus(); inp.selectionStart = inp.selectionEnd = cursorPos; }
+      }, 250);
     },
   });
   searchWrap.appendChild(searchInput);
   if (wizState.explorerSearch) {
     searchWrap.appendChild(el('button', {
       type: 'button',
-      style: {
-        position: 'absolute', right: '4px', top: '50%', transform: 'translateY(-50%)',
-        background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)',
-        fontSize: '13px', padding: '0 4px', lineHeight: '1',
-      },
-      onclick: () => { wizState.explorerSearch = ''; renderObjectExplorer(container, currentObjName); },
+      class: 'obj-search-clear',
+      onclick: () => { wizState.explorerSearch = ''; refreshExplorerContent(container, currentObjName); },
     }, '✕'));
   }
+  // Refresh button inside search row
+  const refreshBtn = el('button', {
+    class: 'obj-refresh-btn',
+    title: 'Refresh model from API',
+    html: icon('refresh', 12),
+  });
+  refreshBtn.addEventListener('click', async () => {
+    if (refreshBtn.classList.contains('obj-refresh-spinning')) return; // prevent double-click
+    refreshBtn.classList.add('obj-refresh-spinning');
+    try {
+      clearModelCache();
+      const rootOverride = wizState.parentObjectType || null;
+      const objName = await resolveCurrentObject(wizState.objectPath, rootOverride);
+      wizState.currentObjDesc = await describeObject(objName);
+      refreshExplorerContent(container, objName);
+      // Brief green flash to confirm success
+      refreshBtn.classList.remove('obj-refresh-spinning');
+      refreshBtn.classList.add('obj-refresh-done');
+      setTimeout(() => refreshBtn.classList.remove('obj-refresh-done'), 800);
+    } catch (e) {
+      console.warn('[explorer] Refresh failed:', e);
+      refreshBtn.classList.remove('obj-refresh-spinning');
+    }
+  });
+  searchWrap.appendChild(refreshBtn);
   container.appendChild(searchWrap);
 
-  // ── Tab content ──
-  const content = el('div', { class: 'obj-content' });
+  // ── Tab content (rendered separately so refresh doesn't flicker the whole explorer) ──
+  const content = el('div', { class: 'obj-content', id: 'obj-explorer-content' });
   if (wizState.explorerTab === 'fav') renderFavTab(content, currentObjName);
   else if (wizState.explorerTab === 'ref') renderRefTab(content, currentObjName);
   else renderAllTab(content, currentObjName);
   container.appendChild(content);
+}
+
+/**
+ * Refresh only the tab bar + content area without re-rendering breadcrumb/search.
+ * Avoids the full flicker of loadObjectExplorer → renderObjectExplorer.
+ */
+function refreshExplorerContent(explorerContainer, currentObjName) {
+  // Re-render tab bar
+  const oldTabBar = explorerContainer.querySelector('.obj-tab-bar');
+  if (oldTabBar) {
+    const allCount = wizState.currentObjDesc.attributes.length + wizState.currentObjDesc.forwardRefs.length + wizState.currentObjDesc.reverseRefs.length;
+    const tabs = [
+      { id: 'all',  label: 'All',        count: allCount },
+      { id: 'ref',  label: 'Refs',       count: wizState.currentObjDesc.forwardRefs.length + wizState.currentObjDesc.reverseRefs.length },
+      { id: 'fav',  label: 'Favorites',  count: countFavs(currentObjName) },
+    ];
+    const newTabBar = el('div', { class: 'obj-tab-bar' });
+    tabs.forEach(t => {
+      newTabBar.appendChild(el('button', {
+        class: `obj-tab ${wizState.explorerTab === t.id ? 'obj-tab-active' : ''}`,
+        onclick: () => { wizState.explorerTab = t.id; refreshExplorerContent(explorerContainer, currentObjName); },
+      }, [
+        t.label,
+        el('span', { class: 'obj-tab-count' }, String(t.count)),
+      ]));
+    });
+    oldTabBar.replaceWith(newTabBar);
+  }
+
+  // Re-render content
+  const content = explorerContainer.querySelector('#obj-explorer-content');
+  if (content) {
+    clear(content);
+    if (wizState.explorerTab === 'fav') renderFavTab(content, currentObjName);
+    else if (wizState.explorerTab === 'ref') renderRefTab(content, currentObjName);
+    else renderAllTab(content, currentObjName);
+  }
+
+  // Auto-scroll to selected row
+  requestAnimationFrame(() => {
+    const sel = explorerContainer.querySelector('.obj-row-sel');
+    if (sel) sel.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  });
 }
 
 // ── Favorites tab ──
@@ -407,7 +510,7 @@ function renderRefRow(container, objName, rev, showStar = false) {
   const revSeg = { name: rev.attribute, reverse: true, fromObject: rev.fromObject };
   const tempPath = [...wizState.objectPath, revSeg];
   const startObj = getStartingObject();
-  const root = startObj.charAt(0).toLowerCase() + startObj.slice(1);
+  const root = wizState.useThisAlias ? '#this' : startObj.charAt(0).toLowerCase() + startObj.slice(1);
   let revExpr = root;
   for (const seg of tempPath) {
     if (seg.reverse) {
@@ -416,7 +519,9 @@ function renderRefRow(container, objName, rev, showStar = false) {
       revExpr = `${revExpr}.${seg.name}`;
     }
   }
-  const isSelected = wizState.source === revExpr;
+  // Strip trailing filters like .{?false} or .{?alternativeTo==null} for matching
+  const sourceBase = (wizState.source || '').replace(/\.\{\?[^}]*\}$/, '');
+  const isSelected = sourceBase === revExpr;
 
   // Click row: set as source (collection). Click arrow: navigate into source object.
   const selectAsSource = () => confirmPathChangeIfNeeded(() => { wizState.source = revExpr; wizState._singleFilter = null; wizState._singleLeafField = null; refreshPipeline(); loadObjectExplorer(); });
@@ -477,9 +582,8 @@ function groupHeader(text) {
  */
 export function buildPath(leafField) {
   const startObj = getStartingObject();
-  // Root expression segment: lowercased starting object name
-  // e.g. 'Solution' → 'solution'
-  const root = startObj.charAt(0).toLowerCase() + startObj.slice(1);
+  // Root expression segment: #this when alias is active, otherwise lowercased starting object
+  const root = wizState.useThisAlias ? '#this' : startObj.charAt(0).toLowerCase() + startObj.slice(1);
   let expr = root;
 
   for (const seg of wizState.objectPath) {
