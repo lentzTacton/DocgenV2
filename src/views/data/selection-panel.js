@@ -26,15 +26,12 @@ import {
 } from '../../services/variables.js';
 import {
   isConnected,
-  fetchRecords,
-  fetchModel,
-  getObjectAttributes,
   fetchStartingObjectInstances,
   getSelectedInstance,
   setSelectedInstance,
   getStartingObject,
 } from '../../services/data-api.js';
-import { resolveConfigAttrAcrossCPs } from './wizard-config-explorer.js';
+import { resolveExpression, applyFiltersAndIndex } from '../../services/expression-resolver.js';
 
 // ─── Panel state ────────────────────────────────────────────────────
 
@@ -58,6 +55,81 @@ function setFavouriteCatalogue(id) {
     if (id) localStorage.setItem(FAV_KEY, String(id));
     else localStorage.removeItem(FAV_KEY);
   } catch { /* noop */ }
+}
+
+// ─── Shared catalogue / section picker builder ─────────────────────
+
+/**
+ * Build catalogue + section picker elements with wired-up event handling.
+ * Returns { catSelect, secSelect, errorEl, getSelected, refreshSectionPicker }.
+ *   getSelected() → { catalogueId, sectionId }
+ */
+function buildCatalogueSectionPicker() {
+  const catalogues = (state.get('catalogues') || []).filter(c => !c.readonly);
+  const favId = getFavouriteCatalogue();
+
+  const sortedCats = [...catalogues].sort((a, b) => {
+    if (String(a.id) === favId) return -1;
+    if (String(b.id) === favId) return 1;
+    return (a.order || 0) - (b.order || 0);
+  });
+
+  let selectedCatId = favId && catalogues.find(c => String(c.id) === favId)
+    ? favId
+    : (catalogues[0] ? catalogues[0].id : null);
+  let selectedSectionId = null;
+
+  const allSections = state.get('sections') || [];
+
+  // Catalogue select
+  const catSelect = el('select', { class: 'sel-create-select' });
+  if (sortedCats.length === 0) {
+    catSelect.appendChild(el('option', { value: '' }, 'No catalogues — create one first'));
+    catSelect.disabled = true;
+  } else {
+    for (const cat of sortedCats) {
+      const isFav = String(cat.id) === favId;
+      const opt = el('option', { value: cat.id }, `${isFav ? '★ ' : ''}${cat.name} (${cat.scope})`);
+      if (String(cat.id) === String(selectedCatId)) opt.selected = true;
+      catSelect.appendChild(opt);
+    }
+  }
+
+  // Section select
+  const secSelect = el('select', { class: 'sel-create-select' });
+
+  function refreshSectionPicker() {
+    while (secSelect.firstChild) secSelect.removeChild(secSelect.firstChild);
+    const catSections = allSections.filter(s => String(s.catalogueId) === String(selectedCatId) && !s.locked);
+    secSelect.appendChild(el('option', { value: '' }, '— No section —'));
+    for (const sec of catSections) {
+      secSelect.appendChild(el('option', { value: sec.id }, sec.name));
+    }
+    selectedSectionId = null;
+  }
+  refreshSectionPicker();
+
+  catSelect.addEventListener('change', () => {
+    selectedCatId = catSelect.value || null;
+    refreshSectionPicker();
+  });
+  secSelect.addEventListener('change', () => {
+    const val = secSelect.value;
+    selectedSectionId = val ? (isNaN(Number(val)) ? val : Number(val)) : null;
+  });
+
+  const errorEl = el('div', { class: 'sel-create-error', style: { display: 'none' } });
+
+  return {
+    catSelect,
+    secSelect,
+    errorEl,
+    favId,
+    selectedCatId: () => selectedCatId,
+    selectedSectionId: () => selectedSectionId,
+    getSelected: () => ({ catalogueId: selectedCatId, sectionId: selectedSectionId }),
+    refreshSectionPicker,
+  };
 }
 
 // ─── Unique name generation ─────────────────────────────────────────
@@ -635,393 +707,6 @@ async function autoResolve(parsed) {
   }
 }
 
-/**
- * Try to resolve the parsed expression against the Tacton API.
- * Returns { records, fields, totalCount, objectName } or { value } or { error }.
- */
-async function resolveExpression(parsed) {
-  const source = parsed.source || parsed.loopSource || '';
-
-  // ── Selected instance context (simulation) ──
-  const selectedInst = getSelectedInstance();
-  const startObj = state.get('startingObject.type') || 'Solution';
-
-  // ── Config attributes: resolve via Solution API, not object model ──
-  if (source.includes('getConfigurationAttribute(')) {
-    const pathMatch = source.match(/getConfigurationAttribute\s*\(\s*"([^"]+)"\s*\)/);
-    if (pathMatch) {
-      const attrPath = pathMatch[1];
-      try {
-        const results = await resolveConfigAttrAcrossCPs(attrPath);
-        if (results.length > 0) {
-          const hasValue = results.some(r => r.value && r.value !== '(error)');
-          if (hasValue) {
-            return {
-              records: results,
-              totalCount: results.length,
-              objectName: 'ConfiguredProduct',
-              fields: ['cpDisplayId', 'solutionName', 'value'],
-            };
-          }
-          return { error: `Attribute "${attrPath}" not found in any configured product` };
-        }
-        return { error: 'No configured products found on this ticket' };
-      } catch (e) {
-        return { error: `Config resolve failed: ${e.message}` };
-      }
-    }
-  }
-
-  // ── Code expressions: arithmetic with #var references ──
-  // e.g. (#totalWeight-0)-((#pumpWeight-0)+(#baseTypeWeight-0)+(#couplingWeight-0))
-  const varRefs = [...new Set(source.match(/#\w+/g) || [])];
-  if (varRefs.length > 0 && /[+\-*/]/.test(source)) {
-    const allVars = state.get('variables') || [];
-    const depResults = [];
-    let allResolved = true;
-    for (const ref of varRefs) {
-      const refVar = allVars.find(v => v.name === ref);
-      if (!refVar) {
-        depResults.push({ name: ref, status: 'missing', value: '—' });
-        allResolved = false;
-      } else {
-        // Try to resolve each dependency
-        const refSource = refVar.source || '';
-        if (refSource.includes('getConfigurationAttribute(')) {
-          const pm = refSource.match(/getConfigurationAttribute\s*\(\s*"([^"]+)"\s*\)/);
-          if (pm) {
-            try {
-              const r = await resolveConfigAttrAcrossCPs(pm[1]);
-              const val = r.find(x => x.value && x.value !== '(error)');
-              depResults.push({ name: ref, status: val ? 'resolved' : 'no value', value: val?.value || '—' });
-              if (!val) allResolved = false;
-            } catch {
-              depResults.push({ name: ref, status: 'error', value: '—' });
-              allResolved = false;
-            }
-          } else {
-            depResults.push({ name: ref, status: 'unknown', value: '—' });
-            allResolved = false;
-          }
-        } else {
-          // Non-config dependency — just show it exists
-          depResults.push({ name: ref, status: 'exists', value: refVar.expression || refSource || '—' });
-        }
-      }
-    }
-    // Try to compute the final value if all dependencies are resolved
-    let computedValue = null;
-    if (allResolved) {
-      try {
-        let expr = source;
-        for (const dep of depResults) {
-          const numVal = parseFloat(dep.value);
-          if (!isNaN(numVal)) {
-            // Replace all occurrences of #varName with the numeric value
-            expr = expr.split(dep.name).join(String(numVal));
-          }
-        }
-        // Safety: only evaluate if the expression contains only numbers, operators, parens, spaces
-        if (/^[\d.+\-*/() \t]+$/.test(expr)) {
-          computedValue = Function('"use strict"; return (' + expr + ')')();
-          if (typeof computedValue === 'number') {
-            computedValue = Math.round(computedValue * 100) / 100; // round to 2 decimals
-          }
-        }
-      } catch (e) {
-        console.warn('[resolveExpression] Arithmetic eval failed:', e.message);
-      }
-    }
-
-    return {
-      records: depResults,
-      totalCount: depResults.length,
-      objectName: 'Dependencies',
-      fields: ['name', 'status', 'value'],
-      computedValue: computedValue != null ? String(computedValue) : null,
-    };
-  }
-
-  // ── Linked defines / inline #variable references ──
-  // e.g. (#headUomV!=null && #headUomV.value!=null) ? #headUomV.valueDescription : "N/A"
-  // e.g. #headUomV.value, #headUomV.valueDescription
-  // e.g. ${#lengthUom}$ → #lengthUom → #lengthUomV → getConfigurationAttribute(...)
-  if (varRefs.length > 0 && varRefs.length <= 2) {
-    const allVars = state.get('variables') || [];
-
-    // Check which #vars exist and which are missing
-    const foundVars = varRefs.filter(ref => allVars.some(v => v.name === ref));
-    const missingVars = varRefs.filter(ref => !allVars.some(v => v.name === ref));
-
-    // If ALL referenced #vars exist — follow the define chain to resolve
-    if (missingVars.length === 0) {
-      // Follow the define chain to find the underlying config attribute source.
-      // Walk: #lengthUom → source #lengthUomV → source getConfigurationAttribute(...)
-      const chain = [];
-      let current = allVars.find(v => v.name === varRefs[0]);
-      const visited = new Set();
-      while (current && chain.length < 5) {
-        chain.push(current.name);
-        visited.add(current.name);
-        const curSource = current.sourceDefine || current.source || '';
-
-        // Found a config attribute — resolve it
-        if (curSource.includes('getConfigurationAttribute(')) {
-          const result = await resolveExpression({ ...parsed, source: curSource });
-          if (result && !result.error) {
-            result.objectName = `${chain.join(' → ')} → ConfiguredProduct`;
-          }
-          return result;
-        }
-
-        // Source is another #variable — follow the chain
-        const nextRef = curSource.match(/^#(\w+)$/)?.[0]
-          || (curSource.match(/#(\w+)/g) || []).find(r => !visited.has(r));
-        if (nextRef && !visited.has(nextRef)) {
-          current = allVars.find(v => v.name === nextRef);
-        } else {
-          break;
-        }
-      }
-
-      // Non-config source — show dependency info
-      return {
-        records: varRefs.map(ref => {
-          const v = allVars.find(x => x.name === ref);
-          return { name: ref, type: v?.type || '—', source: v?.source?.substring(0, 60) || '—' };
-        }),
-        totalCount: varRefs.length,
-        objectName: 'Dependencies',
-        fields: ['name', 'type', 'source'],
-      };
-    }
-
-    // Some or all #vars are missing — report which exist and which are missing
-    return {
-      records: varRefs.map(ref => {
-        const v = allVars.find(x => x.name === ref);
-        return {
-          name: ref,
-          status: v ? 'exists' : 'missing',
-          type: v?.type || '—',
-          source: v?.source?.substring(0, 60) || '— not defined yet —',
-        };
-      }),
-      totalCount: varRefs.length,
-      objectName: 'Dependencies',
-      fields: ['name', 'status', 'type', 'source'],
-      hasMissing: true,
-      missingVars,
-    };
-  }
-
-  // For dot-paths like solution.opportunity.account.name
-  // try to walk the model and fetch the relevant object.
-  // Also handles filter syntax: .{?field=="value"}, [n]
-  const model = await fetchModel();
-  if (!model) return { error: 'Model not loaded' };
-
-  // ── Resolve #this. alias to the starting object type ──
-  const resolvedSource = source.replace(/^#this\./, `${startObj.toLowerCase()}.`);
-
-  // ── Parse source into clean segments, extracting filters & indices ──
-  const { cleanSource, filters, filterLogic, indexAccess } = parseSourceFilters(resolvedSource);
-  const cleanSegments = cleanSource.replace(/^#(this|cp)\./, '').split('.');
-  const rootName = cleanSegments[0];
-
-  // Try to find the object in the model
-  let objMatch = model.find(o => o.name.toLowerCase() === rootName.toLowerCase());
-
-  // If the first segment is the starting object (e.g. 'solution'), walk from there
-  if (!objMatch && rootName.toLowerCase() === startObj.toLowerCase()) {
-    objMatch = model.find(o => o.name.toLowerCase() === startObj.toLowerCase());
-  }
-
-  /**
-   * Instance-scoped filtering helper.
-   * When a specific starting-object instance is selected (e.g. a specific Solution),
-   * filter child records to only those referencing that instance via a foreign key.
-   * This mirrors how DocGen works in production: you generate from a *specific* instance.
-   */
-  function scopeToInstance(records, objectName) {
-    if (!selectedInst || !records.length) return records;
-    // If we're looking at the starting object itself, filter to the selected instance
-    if (objectName.toLowerCase() === startObj.toLowerCase()) {
-      return records.filter(r => {
-        const rid = r._uuid || r._resourceId || r.id || r.Id || r.ID;
-        return rid === selectedInst.id;
-      });
-    }
-    // For child objects, find a foreign-key attribute that references the starting object
-    const objDef = model.find(o => o.name === objectName);
-    if (objDef) {
-      const refAttr = objDef.attributes.find(a => a.refType === startObj);
-      if (refAttr) {
-        return records.filter(r => {
-          const fk = r[refAttr.name] || '';
-          return fk === selectedInst.id || fk === selectedInst.displayId;
-        });
-      }
-    }
-    return records;
-  }
-
-  // For BOM sources, try to fetch flatbom records
-  if (source.includes('flatbom') || source.includes('.bom') || parsed.dataType === 'bom') {
-    const bomObj = model.find(o => o.name.toLowerCase().includes('bom') || o.name.toLowerCase().includes('flatbom'));
-    if (bomObj) {
-      let records = await fetchRecords(bomObj.name);
-      records = scopeToInstance(records, bomObj.name);
-      records = _applyFiltersAndIndex(records, filters, filterLogic, indexAccess);
-      return {
-        records,
-        totalCount: records.length,
-        objectName: bomObj.name,
-        fields: bomObj.attributes
-          .map(a => a.name)
-          .filter(n => !n.startsWith('_'))
-          .slice(0, 6),
-        filters: filters.length > 0 ? filters : undefined,
-        filterLogic: filters.length > 1 ? filterLogic : undefined,
-        indexAccess,
-        instanceScoped: !!selectedInst,
-      };
-    }
-  }
-
-  // For object-type dot-walks, try to resolve along the path
-  if (objMatch && cleanSegments.length > 1) {
-    // Walk references using clean (filter-free) segments
-    let currentObj = objMatch;
-    for (let i = 1; i < cleanSegments.length - 1; i++) {
-      const seg = cleanSegments[i];
-      const attr = currentObj.attributes.find(a => a.name.toLowerCase() === seg.toLowerCase());
-      if (attr && attr.refType) {
-        const nextObj = model.find(o => o.name === attr.refType);
-        if (nextObj) { currentObj = nextObj; continue; }
-      }
-      break;
-    }
-
-    // Fetch records of the resolved object, scoped to instance
-    let records = await fetchRecords(currentObj.name);
-    records = scopeToInstance(records, currentObj.name);
-    const unfilteredCount = records.length;
-    records = _applyFiltersAndIndex(records, filters, filterLogic, indexAccess);
-    const lastSeg = cleanSegments[cleanSegments.length - 1];
-
-    // If last segment is a field, extract values
-    const isField = currentObj.attributes.some(a => a.name.toLowerCase() === lastSeg.toLowerCase());
-    if (isField && records.length > 0) {
-      const fieldKey = Object.keys(records[0]).find(k => k.toLowerCase() === lastSeg.toLowerCase());
-      if (fieldKey) {
-        const values = records.map(r => r[fieldKey]).filter(v => v != null);
-        if (values.length === 1) {
-          return {
-            value: values[0],
-            totalCount: unfilteredCount,
-            objectName: currentObj.name,
-            filters: filters.length > 0 ? filters : undefined,
-            filterLogic: filters.length > 1 ? filterLogic : undefined,
-            indexAccess,
-            instanceScoped: !!selectedInst,
-          };
-        }
-        // Multiple → show as a list
-        return {
-          records: records.slice(0, 5),
-          totalCount: records.length,
-          unfilteredCount,
-          objectName: currentObj.name,
-          fields: [fieldKey],
-          filters: filters.length > 0 ? filters : undefined,
-          filterLogic: filters.length > 1 ? filterLogic : undefined,
-          indexAccess,
-          instanceScoped: !!selectedInst,
-        };
-      }
-    }
-
-    return {
-      records: records.slice(0, 5),
-      totalCount: records.length,
-      unfilteredCount,
-      objectName: currentObj.name,
-      fields: currentObj.attributes.map(a => a.name).filter(n => !n.startsWith('_')).slice(0, 6),
-      filters: filters.length > 0 ? filters : undefined,
-      filterLogic: filters.length > 1 ? filterLogic : undefined,
-      indexAccess,
-      instanceScoped: !!selectedInst,
-    };
-  }
-
-  // Fallback: try to fetch the root object directly
-  if (objMatch) {
-    let records = await fetchRecords(objMatch.name);
-    records = scopeToInstance(records, objMatch.name);
-    return {
-      records: records.slice(0, 5),
-      totalCount: records.length,
-      objectName: objMatch.name,
-      fields: objMatch.attributes.map(a => a.name).filter(n => !n.startsWith('_')).slice(0, 6),
-      instanceScoped: !!selectedInst,
-    };
-  }
-
-  return { error: `Could not resolve "${source}" in the model` };
-}
-
-// ─── Filter / index helpers for expression resolution ───────────────
-
-/**
- * Apply parsed filter conditions and index access to a records array.
- * Mirrors the Spring EL semantics: .{?cond} filters, [n] picks by index.
- */
-function _applyFiltersAndIndex(records, filters, filterLogic, indexAccess) {
-  if (!records || records.length === 0) return records;
-
-  // Apply field filters (.{?field=="value"})
-  if (filters.length > 0) {
-    // Handle literal boolean filters: {?false} → empty, {?true} → keep all
-    const literalFilter = filters.find(f => f.field === '_literal');
-    if (literalFilter) {
-      if (literalFilter.value === 'false') return [];
-      // {?true} — keep all, skip to index access
-    } else {
-      records = records.filter(r => {
-        const results = filters.map(f => {
-          // Null checks: field is null / field is not null
-          if (f.op === 'is null') return r[f.field] == null || r[f.field] === '';
-          if (f.op === 'not null') return r[f.field] != null && r[f.field] !== '';
-          // Variable references: can't resolve at preview time, treat as pass-through
-          if (f.isVariableRef) return true;
-          const val = String(r[f.field] ?? '');
-          const target = f.value;
-          switch (f.op) {
-            case '==': return val === target;
-            case '!=': return val !== target;
-            case '>':  return parseFloat(val) > parseFloat(target);
-            case '<':  return parseFloat(val) < parseFloat(target);
-            case '>=': return parseFloat(val) >= parseFloat(target);
-            case '<=': return parseFloat(val) <= parseFloat(target);
-            case 'contains': return val.toLowerCase().includes(target.toLowerCase());
-            case 'matches':  try { return new RegExp(target).test(val); } catch { return false; }
-            default: return val === target;
-          }
-        });
-        return filterLogic === 'or' ? results.some(Boolean) : results.every(Boolean);
-      });
-    }
-  }
-
-  // Apply index access ([n])
-  if (indexAccess != null && indexAccess >= 0 && records.length > indexAccess) {
-    records = [records[indexAccess]];
-  }
-
-  return records;
-}
-
 // ─── Instance picker (simulation context) ──────────────────────────
 
 /** Cached instance list to avoid re-fetching on every panel render */
@@ -1296,61 +981,14 @@ function renderMultiDefinePanel(defines) {
     );
   }
 
-  // Catalogue picker
-  const userCats = catalogues.filter(c => !c.readonly);
-  const favId = getFavouriteCatalogue();
-  const sortedCats = [...userCats].sort((a, b) => {
-    if (String(a.id) === favId) return -1;
-    if (String(b.id) === favId) return 1;
-    return (a.order || 0) - (b.order || 0);
-  });
-  let selectedCatId = favId && userCats.find(c => String(c.id) === favId)
-    ? favId
-    : (userCats[0] ? userCats[0].id : null);
-
-  const allSections = state.get('sections') || [];
-
-  const catSelect = el('select', { class: 'sel-create-select' });
-  if (sortedCats.length === 0) {
-    catSelect.appendChild(el('option', { value: '' }, 'No catalogues — create one first'));
-    catSelect.disabled = true;
-  } else {
-    for (const cat of sortedCats) {
-      const isFav = String(cat.id) === favId;
-      const opt = el('option', { value: cat.id }, `${isFav ? '★ ' : ''}${cat.name} (${cat.scope})`);
-      if (String(cat.id) === String(selectedCatId)) opt.selected = true;
-      catSelect.appendChild(opt);
-    }
-  }
-
-  // Section picker — filtered by selected catalogue
-  let selectedSectionId = null;
-  const secSelect = el('select', { class: 'sel-create-select' });
-
-  function refreshSectionPicker() {
-    while (secSelect.firstChild) secSelect.removeChild(secSelect.firstChild);
-    const catSections = allSections.filter(s => String(s.catalogueId) === String(selectedCatId) && !s.locked);
-    secSelect.appendChild(el('option', { value: '' }, '— No section —'));
-    for (const sec of catSections) {
-      secSelect.appendChild(el('option', { value: sec.id }, sec.name));
-    }
-    selectedSectionId = null;
-  }
-  refreshSectionPicker();
-
-  catSelect.addEventListener('change', () => {
-    selectedCatId = catSelect.value || null;
-    refreshSectionPicker();
-  });
-  secSelect.addEventListener('change', () => {
-    const val = secSelect.value;
-    selectedSectionId = val ? (isNaN(Number(val)) ? val : Number(val)) : null;
-  });
-
-  const errorEl = el('div', { class: 'sel-create-error', style: { display: 'none' } });
+  // Catalogue + section picker (shared builder)
+  const picker = buildCatalogueSectionPicker();
+  const { catSelect, secSelect, errorEl } = picker;
 
   // Shared import function — skipExisting: true = only new, false = all (duplicates get unique names)
   async function doImport(skipExisting) {
+    const selectedCatId = picker.selectedCatId();
+    const selectedSectionId = picker.selectedSectionId();
     if (!selectedCatId) {
       errorEl.textContent = 'Select a catalogue';
       errorEl.style.display = 'block';
@@ -1512,20 +1150,9 @@ function showCreateDataSetForm(parsed, dupeInfo) {
   const suggested = suggestDataSetFields(parsed);
   // Generate a unique name so imports never collide with existing datasets
   suggested.name = makeUniqueName(suggested.name);
-  const catalogues = (state.get('catalogues') || []).filter(c => !c.readonly);
-  const favId = getFavouriteCatalogue();
-
-  // Sort: favourite first, then by order
-  const sortedCats = [...catalogues].sort((a, b) => {
-    if (String(a.id) === favId) return -1;
-    if (String(b.id) === favId) return 1;
-    return (a.order || 0) - (b.order || 0);
-  });
-
-  // Default selected catalogue: favourite if available, else first
-  let selectedCatId = favId && catalogues.find(c => String(c.id) === favId)
-    ? favId
-    : (catalogues[0] ? catalogues[0].id : null);
+  // Catalogue + section picker (shared builder)
+  const picker = buildCatalogueSectionPicker();
+  const { catSelect, secSelect, errorEl, favId } = picker;
 
   // Form container
   const form = el('div', { class: 'sel-create-form' });
@@ -1569,59 +1196,21 @@ function showCreateDataSetForm(parsed, dupeInfo) {
     el('span', { class: `badge badge-${suggested.type}` }, suggested.type.toUpperCase()),
   ]));
 
-  // Catalogue picker
-  const catSelect = el('select', { class: 'sel-create-select' });
-  if (sortedCats.length === 0) {
-    catSelect.appendChild(el('option', { value: '' }, 'No catalogues — create one first'));
-    catSelect.disabled = true;
-  } else {
-    for (const cat of sortedCats) {
-      const isFav = String(cat.id) === favId;
-      const opt = el('option', { value: cat.id }, `${isFav ? '★ ' : ''}${cat.name} (${cat.scope})`);
-      if (cat.id === selectedCatId) opt.selected = true;
-      catSelect.appendChild(opt);
-    }
-  }
-  // Section picker — filtered by selected catalogue
-  const allSections = state.get('sections') || [];
-  let selectedSectionId = null;
-  const secSelect = el('select', { class: 'sel-create-select' });
-
-  function refreshSectionPicker() {
-    while (secSelect.firstChild) secSelect.removeChild(secSelect.firstChild);
-    const catSections = allSections.filter(s => String(s.catalogueId) === String(selectedCatId) && !s.locked);
-    secSelect.appendChild(el('option', { value: '' }, '— No section —'));
-    for (const sec of catSections) {
-      secSelect.appendChild(el('option', { value: sec.id }, sec.name));
-    }
-    selectedSectionId = null;
-  }
-  refreshSectionPicker();
-
-  catSelect.addEventListener('change', () => {
-    selectedCatId = catSelect.value || null;
-    refreshSectionPicker();
-  });
-  secSelect.addEventListener('change', () => {
-    const val = secSelect.value;
-    selectedSectionId = val ? (isNaN(Number(val)) ? val : Number(val)) : null;
-  });
-
   // Favourite button
   const favBtn = el('button', {
-    class: `sel-fav-btn ${String(selectedCatId) === favId ? 'sel-fav-active' : ''}`,
+    class: `sel-fav-btn ${String(picker.selectedCatId()) === favId ? 'sel-fav-active' : ''}`,
     title: 'Set as favourite catalogue',
     onclick: () => {
       const current = getFavouriteCatalogue();
-      if (String(selectedCatId) === current) {
+      if (String(picker.selectedCatId()) === current) {
         setFavouriteCatalogue(null);
         favBtn.classList.remove('sel-fav-active');
       } else {
-        setFavouriteCatalogue(selectedCatId);
+        setFavouriteCatalogue(picker.selectedCatId());
         favBtn.classList.add('sel-fav-active');
       }
     },
-    html: icon(String(selectedCatId) === favId ? 'starFilled' : 'star', 14),
+    html: icon(String(picker.selectedCatId()) === favId ? 'starFilled' : 'star', 14),
   });
 
   form.appendChild(el('div', { class: 'sel-create-field' }, [
@@ -1635,8 +1224,6 @@ function showCreateDataSetForm(parsed, dupeInfo) {
     secSelect,
   ]));
 
-  // Error display
-  const errorEl = el('div', { class: 'sel-create-error', style: { display: 'none' } });
   form.appendChild(errorEl);
 
   // Buttons
@@ -1656,6 +1243,8 @@ function showCreateDataSetForm(parsed, dupeInfo) {
           errorEl.style.display = 'block';
           return;
         }
+        const selectedCatId = picker.selectedCatId();
+        const selectedSectionId = picker.selectedSectionId();
         if (!selectedCatId) {
           errorEl.textContent = 'Select a catalogue';
           errorEl.style.display = 'block';

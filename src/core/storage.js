@@ -4,15 +4,22 @@
  * All persistent data goes through here. Structured, survives cache clearing,
  * handles megabytes. Keyed by project where appropriate.
  *
+ * Sensitive fields (OAuth tokens, client secrets, AI API keys) are encrypted
+ * at rest using AES-GCM via the Web Crypto API (see core/crypto.js).
+ * Encrypted values carry an "enc:" prefix; legacy plaintext is decrypted
+ * transparently and will be re-encrypted on next write.
+ *
  * Tables:
- *   instances  — Named Tacton connections (URL, creds)
- *   tokens     — OAuth token cache (access, refresh, per ticket)
+ *   instances  — Named Tacton connections (URL, creds — secrets encrypted)
+ *   tokens     — OAuth token cache (values encrypted)
  *   projects   — Document projects (ties a Word doc to a saved state)
  *   tickets    — Included tickets per project
  *   variables  — Define variables per project (Phase 3)
+ *   settings   — Key-value pairs (AI apiKey encrypted)
  */
 
 import Dexie from 'dexie';
+import { encrypt, decrypt, isEncrypted } from './crypto.js';
 
 const db = new Dexie('TactonDocGen');
 
@@ -59,28 +66,30 @@ export function generateId() {
 // ─── Instance CRUD ───────────────────────────────────────────────────────
 
 export async function getInstances() {
-  return db.instances.toArray();
+  const rows = await db.instances.toArray();
+  return Promise.all(rows.map(_decryptInstanceSecrets));
 }
 
 export async function getInstance(id) {
-  return db.instances.get(id);
+  const row = await db.instances.get(id);
+  return row ? _decryptInstanceSecrets(row) : undefined;
 }
 
 export async function saveInstance(instance) {
-  if (instance.id) {
-    // Deep-merge: preserve existing fields not in update
-    const existing = await db.instances.get(instance.id);
+  const secured = await _encryptInstanceSecrets(instance);
+  if (secured.id) {
+    const existing = await db.instances.get(secured.id);
     if (existing) {
-      const merged = _deepMerge(existing, instance);
+      const merged = _deepMerge(existing, secured);
       merged.updatedAt = Date.now();
       await db.instances.put(merged);
-      return merged;
+      return _decryptInstanceSecrets(merged);
     }
   }
-  instance.createdAt = Date.now();
-  instance.updatedAt = Date.now();
-  const id = await db.instances.add(instance);
-  return { ...instance, id };
+  secured.createdAt = Date.now();
+  secured.updatedAt = Date.now();
+  const id = await db.instances.add(secured);
+  return _decryptInstanceSecrets({ ...secured, id });
 }
 
 export async function deleteInstance(id) {
@@ -91,11 +100,13 @@ export async function deleteInstance(id) {
 
 export async function getToken(key) {
   const row = await db.tokens.get(key);
-  return row?.value ?? null;
+  if (!row?.value) return null;
+  return decrypt(row.value);
 }
 
 export async function setToken(key, value) {
-  return db.tokens.put({ key, value, updatedAt: Date.now() });
+  const secured = await encrypt(value);
+  return db.tokens.put({ key, value: secured, updatedAt: Date.now() });
 }
 
 export async function deleteToken(key) {
@@ -283,14 +294,21 @@ export async function clearAllDataRecords() {
  */
 export async function loadAiSettings() {
   const stored = await getSetting('ai-settings');
-  return stored || { apiKey: '', model: 'claude-sonnet-4-5-20250514', maxTokens: 2048 };
+  if (!stored) return { apiKey: '', model: 'claude-sonnet-4-5-20250514', maxTokens: 2048 };
+  if (stored.apiKey) stored.apiKey = await decrypt(stored.apiKey);
+  return stored;
 }
 
 /**
  * Save Claude AI settings to persistent storage.
+ * The API key is encrypted before writing.
  */
 export async function saveAiSettings(settings) {
-  return setSetting('ai-settings', settings);
+  const copy = { ...settings };
+  if (copy.apiKey && !isEncrypted(copy.apiKey)) {
+    copy.apiKey = await encrypt(copy.apiKey);
+  }
+  return setSetting('ai-settings', copy);
 }
 
 // ─── Favorites ───────────────────────────────────────────────────────
@@ -310,6 +328,30 @@ export async function loadFavorites(category) {
  */
 export async function saveFavorites(category, favSet) {
   return setSetting(`favorites-${category}`, [...favSet]);
+}
+
+// ─── Instance secret encryption helpers ─────────────────────────────────
+
+async function _encryptInstanceSecrets(instance) {
+  const copy = { ...instance };
+  if (copy.admin?.clientSecret && !isEncrypted(copy.admin.clientSecret)) {
+    copy.admin = { ...copy.admin, clientSecret: await encrypt(copy.admin.clientSecret) };
+  }
+  if (copy.frontend?.clientSecret && !isEncrypted(copy.frontend.clientSecret)) {
+    copy.frontend = { ...copy.frontend, clientSecret: await encrypt(copy.frontend.clientSecret) };
+  }
+  return copy;
+}
+
+async function _decryptInstanceSecrets(instance) {
+  const copy = { ...instance };
+  if (copy.admin?.clientSecret) {
+    copy.admin = { ...copy.admin, clientSecret: await decrypt(copy.admin.clientSecret) };
+  }
+  if (copy.frontend?.clientSecret) {
+    copy.frontend = { ...copy.frontend, clientSecret: await decrypt(copy.frontend.clientSecret) };
+  }
+  return copy;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────

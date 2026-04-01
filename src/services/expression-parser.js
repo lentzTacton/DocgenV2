@@ -13,6 +13,29 @@
  *   { type, raw, name?, source?, varName?, loopVar?, path? }
  */
 
+// ─── Shared regex patterns ──────────────────────────────────────────
+// These appear in both parseExpression and reverseParseSource.
+
+/** Variant A: getConfigAttr("...")!=null ? getConfigAttr("...").accessor : "fallback" */
+const RE_NULLSAFE_A =
+  /^(getConfigurationAttribute\s*\([^)]+\))\s*!=\s*null\s*\?\s*getConfigurationAttribute\s*\([^)]+\)\.(\w+)\s*:\s*"([^"]*)"\s*$/;
+
+/** Variant B: getConfigAttr("...").field!=null ? getConfigAttr("...").accessor : "fallback" */
+const RE_NULLSAFE_B =
+  /^(getConfigurationAttribute\s*\([^)]+\))\.(\w+)\s*!=\s*null\s*\?\s*getConfigurationAttribute\s*\([^)]+\)\.(\w+)\s*:\s*"([^"]*)"\s*$/;
+
+/** Variant C: #variable.field!=null ? #variable.accessor : "fallback" */
+const RE_NULLSAFE_C =
+  /^(#\w+)\.(\w+)\s*!=\s*null\s*\?\s*#\w+\.(\w+)\s*:\s*"([^"]*)"\s*$/;
+
+/** Direct accessor: getConfigAttr("...").field */
+const RE_DIRECT_ACCESSOR =
+  /^(getConfigurationAttribute\s*\([^)]+\))\.(\w+)$/;
+
+/** Two-define ternary: (#nameV!=null && #nameV.field!=null) ? #nameV.accessor : "fallback" */
+const RE_DEFINE_TERNARY =
+  /^\(?([#]\w+)!=null\s*&&\s*\1\.(\w+)!=null\)?\s*\?\s*\1\.(\w+)\s*:\s*"([^"]*)"\s*$/;
+
 // ─── Main parser ────────────────────────────────────────────────────
 
 /**
@@ -118,15 +141,11 @@ export function parseExpression(text) {
       let nullCheckField = null;  // e.g. '.value' for Variant B
 
       // Variant A: getConfigAttr("...")!=null ? getConfigAttr("...").accessor : "fallback"
-      inlineNullSafe = inner.match(
-        /^(getConfigurationAttribute\s*\([^)]+\))\s*!=\s*null\s*\?\s*getConfigurationAttribute\s*\([^)]+\)\.(\w+)\s*:\s*"([^"]*)"\s*$/
-      );
+      inlineNullSafe = inner.match(RE_NULLSAFE_A);
 
       // Variant B: getConfigAttr("...").field!=null ? getConfigAttr("...").accessor : "fallback"
       if (!inlineNullSafe) {
-        const variantB = inner.match(
-          /^(getConfigurationAttribute\s*\([^)]+\))\.(\w+)\s*!=\s*null\s*\?\s*getConfigurationAttribute\s*\([^)]+\)\.(\w+)\s*:\s*"([^"]*)"\s*$/
-        );
+        const variantB = inner.match(RE_NULLSAFE_B);
         if (variantB) {
           nullCheckField = `.${variantB[2]}`; // e.g. '.value'
           inlineNullSafe = [null, variantB[1], variantB[3], variantB[4]];
@@ -135,9 +154,7 @@ export function parseExpression(text) {
 
       // Variant C: #variable.field!=null ? #variable.accessor : "fallback"
       if (!inlineNullSafe) {
-        const variantC = inner.match(
-          /^(#\w+)\.(\w+)\s*!=\s*null\s*\?\s*#\w+\.(\w+)\s*:\s*"([^"]*)"\s*$/
-        );
+        const variantC = inner.match(RE_NULLSAFE_C);
         if (variantC) {
           nullCheckField = `.${variantC[2]}`;
           inlineNullSafe = [null, variantC[1], variantC[3], variantC[4]];
@@ -481,9 +498,7 @@ export function reverseParseSource(source, dataType) {
   if (dataType === 'define') {
     // ── Null-safe ternary pattern ──────────────────────────────────
     // (#nameV!=null && #nameV.value!=null) ? #nameV.value: "fallback"
-    const ternaryMatch = source.match(
-      /^\(?([#]\w+)!=null\s*&&\s*\1\.(\w+)!=null\)?\s*\?\s*\1\.(\w+)\s*:\s*"([^"]*)"\s*$/
-    );
+    const ternaryMatch = source.match(RE_DEFINE_TERNARY);
     if (ternaryMatch) {
       const [, refName, checkField, accessorField, fallback] = ternaryMatch;
       return {
@@ -524,9 +539,7 @@ export function reverseParseSource(source, dataType) {
     // ── Inline null-safe patterns ─────────────────────────────────
 
     // Variant A: source!=null ? source.accessor : "fallback"
-    let inlineNS = source.match(
-      /^(getConfigurationAttribute\s*\([^)]+\))\s*!=\s*null\s*\?\s*getConfigurationAttribute\s*\([^)]+\)\.(\w+)\s*:\s*"([^"]*)"\s*$/
-    );
+    let inlineNS = source.match(RE_NULLSAFE_A);
     if (inlineNS) {
       return {
         source: inlineNS[1],
@@ -538,9 +551,7 @@ export function reverseParseSource(source, dataType) {
     }
 
     // Variant B: source.field!=null ? source.accessor : "fallback"
-    const variantB = source.match(
-      /^(getConfigurationAttribute\s*\([^)]+\))\.(\w+)\s*!=\s*null\s*\?\s*getConfigurationAttribute\s*\([^)]+\)\.(\w+)\s*:\s*"([^"]*)"\s*$/
-    );
+    const variantB = source.match(RE_NULLSAFE_B);
     if (variantB) {
       return {
         source: variantB[1],
@@ -553,9 +564,7 @@ export function reverseParseSource(source, dataType) {
 
     // Direct .value or .valueDescription accessor (no null-safe)
     // e.g. getConfigurationAttribute("...").value
-    const directAccessor = source.match(
-      /^(getConfigurationAttribute\s*\([^)]+\))\.(\w+)$/
-    );
+    const directAccessor = source.match(RE_DIRECT_ACCESSOR);
     if (directAccessor) {
       return {
         source: directAccessor[1],

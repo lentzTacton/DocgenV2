@@ -6,99 +6,65 @@
  *     └─ Sections (collapsible, named, with description + tags)
  *         └─ Datasets (cards)
  *
- * Coverage bar at bottom shows BOM item distribution.
+ * Sub-modules (extracted for maintainability):
+ *   list-state.js    — shared constants, mutable UI state, tooltip delegate
+ *   list-menus.js    — catalogue / section / move-to context menus
+ *   list-dialogs.js  — force-delete dialogs, inline editing overlays
+ *   list-dragdrop.js — variable & section drag-drop, multi-select, copy helpers
  */
 
 import { el, qs, clear } from '../../core/dom.js';
-import { icon, iconEl } from '../../components/icon.js';
+import { icon } from '../../components/icon.js';
 import state from '../../core/state.js';
 import {
-  calculateCoverage,
-  createVariable, updateVariable, removeVariable,
-  createCatalogue, updateCatalogue, removeCatalogue,
-  createSection, updateSection, removeSection,
-  assignVariableToSection,
-  canDeleteCatalogue, canDeleteSection, canDeleteVariable,
-  validateDataSet, getDependents,
-  forceRemoveCatalogue, forceRemoveSection, forceRemoveVariable,
-  countCascadeItems,
+  createVariable, removeVariable,
+  canDeleteVariable, validateDataSet, getDependents,
+  forceRemoveVariable,
 } from '../../services/variables.js';
-// PDF preview moved to Preview tab — import kept for potential future use
-// import { generateCataloguePdf } from './pdf-preview-beta.js';
-import { isConnected, getBomSources, getBomFields, fetchBomRecords, fetchModel, getConfiguredProductList, fetchConfiguredProductData, indexConfigAttributes } from '../../services/data-api.js';
 import {
-  exportCatalogue, downloadJson, importCatalogue, readJsonFile,
-} from '../../services/catalogue-io.js';
-import { handleInsertIntoDoc, handleInsertSectionIntoDoc, buildSectionExpression, buildInsertExpression, buildBlockInsertVariants } from '../../services/word-api.js';
+  isConnected, getBomSources, getBomFields, fetchBomRecords,
+  fetchModel, getConfiguredProductList, fetchConfiguredProductData,
+  indexConfigAttributes,
+} from '../../services/data-api.js';
+import { showDataExportDialog, triggerImport } from './list-export.js';
+import {
+  handleInsertIntoDoc, handleInsertSectionIntoDoc,
+  buildSectionExpression, buildInsertExpression, buildBlockInsertVariants,
+} from '../../services/word-api.js';
 import { wizState } from './wizard-state.js';
-import { createTagPicker } from '../../components/tag-picker.js';
+import { showConfirmDialog } from '../../core/dialog.js';
 
-// ─── Constants ──────────────────────────────────────────────────────────
+// ─── Extracted sub-modules ──────────────────────────────────────────────
 
-const TYPE_CONFIG = {
-  bom:    { badge: 'badge-bom',    label: 'BOM',    icon: 'box',    color: 'var(--orange)' },
-  object: { badge: 'badge-obj',    label: 'OBJ',    icon: 'cube',   color: 'var(--purple)' },
-  single: { badge: 'badge-single', label: 'SINGLE', icon: 'target', color: 'var(--success)' },
-  define: { badge: 'badge-define', label: 'DEF',    icon: 'link',   color: 'var(--purple, #8250DF)' },
-  list:   { badge: 'badge-list',   label: 'LIST',   icon: 'list',   color: 'var(--tacton-blue)' },
-  code:   { badge: 'badge-code',   label: 'CODE',   icon: 'code',   color: 'var(--text-tertiary)' },
+import {
+  TYPE_CONFIG, SCOPE_CONFIG,
+  isCollapsed, toggleCollapse, setExpandAll, getExpandAll,
+  getShowExpr, setShowExpr,
+  searchQuery, setSearchQuery, activeTagFilters,
+  selectedVarIds,
+  setRerenderFn,
+} from './list-state.js';
+import { showCatalogueMenu, showSectionMenu, showMoveMenu } from './list-menus.js';
+import { showForceDeleteDialog, showNewCatalogueInline, showNewSectionInline } from './list-dialogs.js';
+import {
+  handleMultiSelect, handleSelectionKeydown, clearMultiSelect,
+  makeDropZone, extractDraggedIds, performMultiDrop,
+  makeSectionDropZone,
+  copyToOwn, copyToCatalogue,
+} from './list-dragdrop.js';
+
+// ─── Local validation state (not needed by sub-modules) ─────────────────
+
+let validationCtx = {
+  bomSources: [], bomFields: [], bomRecords: [],
+  modelObjects: [], configAttrPaths: new Set(),
 };
-
-const SCOPE_CONFIG = {
-  instance: { label: 'Instance', icon: 'database', color: 'var(--purple)', desc: 'Shared across all tickets on this instance' },
-  ticket:   { label: 'Ticket',   icon: 'ticket',   color: 'var(--orange)', desc: 'Scoped to the current ticket/branch' },
-  shared:   { label: 'Shared',   icon: 'globe',    color: 'var(--tacton-blue)', desc: 'Available in all projects' },
-};
-
-// Collapse state (in-memory, persists during session)
-const collapseState = {};  // key: 'cat-{id}' or 'sec-{id}' → boolean
-
-// "Expand all" — persisted via localStorage; when unchecked everything is collapsed (default)
-const EXPAND_ALL_KEY = 'docgen_expand_all';
-let expandAll = (() => { try { return localStorage.getItem(EXPAND_ALL_KEY) === 'true'; } catch { return false; } })();
-
-function isCollapsed(key) {
-  // If a specific key has been toggled, use that; otherwise follow expandAll
-  if (key in collapseState) return collapseState[key];
-  return !expandAll; // collapsed by default unless "expand all" is on
-}
-function toggleCollapse(key) { collapseState[key] = !isCollapsed(key); }
-
-function setExpandAll(val) {
-  expandAll = val;
-  // Clear per-item overrides so the global takes effect
-  Object.keys(collapseState).forEach(k => delete collapseState[k]);
-  try { localStorage.setItem(EXPAND_ALL_KEY, String(val)); } catch { /* noop */ }
-}
-
-// "Show expression" — persisted via localStorage
-const SHOW_EXPR_KEY = 'docgen_show_expr';
-let showExpr = (() => { try { return localStorage.getItem(SHOW_EXPR_KEY) === 'true'; } catch { return false; } })();
-
-function setShowExpr(val) {
-  showExpr = val;
-  try { localStorage.setItem(SHOW_EXPR_KEY, String(val)); } catch { /* noop */ }
-}
-
-// Search / filter state
-let searchQuery = '';
-let activeTagFilters = new Set();  // set of tag strings
-
-// ── Multi-select state ──
-const selectedVarIds = new Set();  // IDs of currently selected variables
-let lastClickedVarId = null;       // for shift-click range selection
-
-// Validation context cache (populated once per render when connected)
-let validationCtx = { bomSources: [], bomFields: [], bomRecords: [], modelObjects: [], configAttrPaths: new Set() };
 let validationCtxLoaded = false;
+const validationResults = {};
 
 async function ensureValidationCtx() {
   if (validationCtxLoaded || !isConnected()) return;
   try {
-    // Only fetch the model — one API call, fast.
-    // BOM sources/fields/records are expensive (many listRecords calls)
-    // and only needed when validating BOM-type variables.
-    // Config attr paths load on-demand in the wizard config explorer.
     const model = await fetchModel();
     validationCtx = {
       bomSources: [],
@@ -110,19 +76,16 @@ async function ensureValidationCtx() {
 
     validationCtxLoaded = true;
 
-    // Load BOM data in background only if there are BOM variables
     const variables = state.get('variables') || [];
     if (variables.some(v => v.type === 'bom')) {
       loadBomValidationInBackground();
     }
-    // Load config attribute paths if there are single/define variables using getConfigurationAttribute
     if (variables.some(v => v.source && v.source.includes('getConfigurationAttribute('))) {
       loadConfigAttrPathsInBackground();
     }
   } catch (e) { console.warn('[validation] Failed to load context:', e); }
 }
 
-/** Load BOM validation data in background — only when BOM variables exist */
 async function loadBomValidationInBackground() {
   try {
     const [sources, fields, records] = await Promise.all([
@@ -135,7 +98,6 @@ async function loadBomValidationInBackground() {
   } catch (e) { console.warn('[validation] BOM data load failed:', e); }
 }
 
-/** Load config attribute paths in background — validates getConfigurationAttribute() expressions */
 async function loadConfigAttrPathsInBackground() {
   try {
     const cpList = await getConfiguredProductList();
@@ -155,49 +117,13 @@ async function loadConfigAttrPathsInBackground() {
   } catch (e) { console.warn('[validation] Config attr path load failed:', e); }
 }
 
-// Map of variable id → { status, issues }
-const validationResults = {};
-
-// ─── Floating tooltip (delegates on [data-val-tip]) ──────────────────────
-let _valTip = null;
-function dismissAllTooltips() {
-  if (_valTip) { _valTip.remove(); _valTip = null; }
-  // Also clean up any chip tooltips from the code editor
-  document.querySelectorAll('.wiz-chip-tooltip').forEach(t => t.remove());
-}
-document.addEventListener('mouseover', (e) => {
-  const target = e.target.closest('[data-val-tip]');
-  if (!target) return;
-  if (_valTip) _valTip.remove();
-  const text = target.dataset.valTip;
-  if (!text) return;
-  _valTip = el('div', { class: 'wiz-chip-tooltip' }, text);
-  document.body.appendChild(_valTip);
-  const rect = target.getBoundingClientRect();
-  _valTip.style.left = `${rect.right + 8}px`;
-  _valTip.style.top = `${rect.top + (rect.height / 2) - (_valTip.offsetHeight / 2)}px`;
-  if (rect.right + 8 + _valTip.offsetWidth > window.innerWidth - 8) {
-    _valTip.style.left = `${rect.left - _valTip.offsetWidth - 8}px`;
-  }
-  if (parseFloat(_valTip.style.top) + _valTip.offsetHeight > window.innerHeight - 8) {
-    _valTip.style.top = `${window.innerHeight - _valTip.offsetHeight - 8}px`;
-  }
-});
-document.addEventListener('mouseout', (e) => {
-  const target = e.target.closest('[data-val-tip]');
-  if (target && _valTip) { _valTip.remove(); _valTip = null; }
-});
-// Dismiss all tooltips on any state navigation (click into dataset, back, etc.)
-state.on('dataView', dismissAllTooltips);
-state.on('activeVariable', dismissAllTooltips);
-
 // ── Hamburger menu actions (data import/export) ──
 state.on('menu.action', (action) => {
   if (action === 'data-export') {
     const catalogues = state.get('catalogues') || [];
     const variables = state.get('variables') || [];
     const sections = state.get('sections') || [];
-    showDataExportDialog(catalogues, variables, sections);
+    showDataExportDialog(catalogues, variables, sections, selectedVarIds);
   }
   if (action === 'data-import') {
     triggerImport();
@@ -207,11 +133,9 @@ state.on('menu.action', (action) => {
 // ─── Main render ────────────────────────────────────────────────────────
 
 export function renderVariableList(container) {
-  // ── Multi-select handlers ──
-  document.removeEventListener('keydown', _handleSelectionKeydown);
-  document.addEventListener('keydown', _handleSelectionKeydown);
+  document.removeEventListener('keydown', handleSelectionKeydown);
+  document.addEventListener('keydown', handleSelectionKeydown);
 
-  // Click on empty space clears selection
   container.addEventListener('click', (e) => {
     if (selectedVarIds.size > 0 && !e.target.closest('.var-card')) {
       clearMultiSelect();
@@ -223,16 +147,13 @@ export function renderVariableList(container) {
   const sections = state.get('sections') || [];
   const locked = state.get('config.locked');
 
-  // Kick off async validation data loading (will re-render when ready)
   if (!validationCtxLoaded) ensureValidationCtx();
 
-  // Compute validation for all variables and publish to state for cross-module access
   for (const v of variables) {
     validationResults[v.id] = validateDataSet(v, validationCtx);
   }
   state.set('validationResults', { ...validationResults });
 
-  // Setup-not-complete callout
   if (!locked) {
     container.appendChild(
       el('div', { class: 'callout callout-info' }, [
@@ -244,7 +165,6 @@ export function renderVariableList(container) {
     );
   }
 
-  // ── Page header ──
   container.appendChild(
     el('div', { class: 'data-section-head' }, [
       el('div', { class: 'data-section-left' }, [
@@ -260,11 +180,9 @@ export function renderVariableList(container) {
     ])
   );
 
-  // ── Search & tag filter ──
   const allTags = collectAllTags(catalogues, sections);
   container.appendChild(renderSearchFilter(allTags));
 
-  // ── Catalogues ──
   const ownedCats = catalogues.filter(c => !c.readonly);
   const ownedVars = variables.filter(v => !v.readonly);
   if (ownedCats.length === 0 && ownedVars.length === 0) {
@@ -279,7 +197,6 @@ export function renderVariableList(container) {
     );
   }
 
-  // Apply search/tag filters
   const q = searchQuery.toLowerCase().trim();
   const hasFilter = q || activeTagFilters.size > 0;
 
@@ -303,12 +220,10 @@ export function renderVariableList(container) {
       || (v.source || '').toLowerCase().includes(q);
   }
 
-  // Render user catalogues first, then read-only ones
   const userCats = catalogues.filter(c => !c.readonly);
   const readonlyCats = catalogues.filter(c => c.readonly);
 
   for (const cat of userCats) {
-    // Tag filter on catalogue level — skip entirely if tags don't match
     if (activeTagFilters.size > 0 && !matchesCatalogueTags(cat)) continue;
     const catSections = sections.filter(s => s.catalogueId === cat.id);
     let catVars = variables.filter(v => v.catalogueId === cat.id);
@@ -317,16 +232,13 @@ export function renderVariableList(container) {
     container.appendChild(renderCatalogue(cat, catSections, catVars));
   }
 
-  // Unassigned variables (not in any catalogue)
   let unassigned = variables.filter(v => !v.catalogueId);
   if (hasFilter) unassigned = unassigned.filter(matchesVariable);
   if (unassigned.length > 0) {
     container.appendChild(renderUnassigned(unassigned));
   }
 
-  // Read-only catalogues (e.g. Cookbook Samples)
   for (const cat of readonlyCats) {
-    // Tag filter on catalogue level — skip entirely if tags don't match
     if (activeTagFilters.size > 0 && !matchesCatalogueTags(cat)) continue;
     const catSections = sections.filter(s => s.catalogueId === cat.id);
     let catVars = variables.filter(v => v.catalogueId === cat.id);
@@ -335,9 +247,6 @@ export function renderVariableList(container) {
     container.appendChild(renderCatalogue(cat, catSections, catVars));
   }
 
-  // Coverage bar removed — BOM type not in use
-
-  // ── Multi-select hint (bottom-right) ──
   container.appendChild(
     el('div', { class: 'multiselect-hint' }, [
       el('span', {}, 'Shift'),
@@ -369,7 +278,7 @@ function renderUnassigned(variables) {
   if (!collapsed) {
     const cardList = el('div', { class: 'var-card-list', style: { marginLeft: '16px' } });
     variables.forEach(v => cardList.appendChild(renderVarCard(v)));
-    makeDropZone(cardList, null, null); // drop here = unassign
+    makeDropZone(cardList, null, null);
     frag.appendChild(cardList);
   }
 
@@ -386,7 +295,6 @@ function renderCatalogue(catalogue, sections, variables) {
 
   const frag = el('div', { class: 'cat-group' });
 
-  // ── Catalogue header ──
   const scopeLabel = isReadonly ? 'LOCKED' : sc.label.toUpperCase();
   const scopeColor = isReadonly ? '#ABB4BD' : sc.color;
 
@@ -396,7 +304,6 @@ function renderCatalogue(catalogue, sections, variables) {
       onclick: (e) => { e.stopPropagation(); toggleCollapse(catKey); rerender(); },
       html: icon(collapsed ? 'chevronRight' : 'chevronDown', 12),
     }),
-    // Folder icon + scope badge stacked vertically (mirrors var-type-col)
     el('div', { class: 'cat-type-col' }, [
       el('span', { class: 'icon', style: { color: scopeColor }, html: icon(collapsed ? 'folder' : 'folderOpen', 16) }),
       el('span', { class: 'cat-scope-label', style: { color: scopeColor } }, scopeLabel),
@@ -412,14 +319,10 @@ function renderCatalogue(catalogue, sections, variables) {
     ].filter(Boolean)),
   ];
 
-  // Right-aligned group: count → actions
   const rightGroup = el('div', { class: 'cat-header-right' });
-
   rightGroup.appendChild(
     el('span', { class: 'badge badge-muted cat-count-badge' }, `${variables.length}`)
   );
-
-  // Actions button (always visible — readonly gets limited menu)
   rightGroup.appendChild(
     el('button', {
       class: 'cat-action-btn',
@@ -427,7 +330,6 @@ function renderCatalogue(catalogue, sections, variables) {
       html: icon('moreHorizontal', 14),
     })
   );
-
   headerChildren.push(rightGroup);
 
   const catHeader = el('div', {
@@ -436,7 +338,6 @@ function renderCatalogue(catalogue, sections, variables) {
     style: { cursor: 'pointer' },
   }, headerChildren);
 
-  // Allow dropping datasets onto catalogue header → move as loose variable
   if (!isReadonly) {
     catHeader.addEventListener('dragover', (e) => {
       if (e.dataTransfer.types.includes('application/x-docgen-sec-id')) return;
@@ -454,7 +355,6 @@ function renderCatalogue(catalogue, sections, variables) {
       e.stopPropagation();
       catHeader.classList.remove('sec-header-drop-target');
 
-      // Handle cookbook drags
       const cookbookId = e.dataTransfer.getData('application/x-docgen-cookbook-id');
       if (cookbookId) {
         const allVars = state.get('variables') || [];
@@ -463,8 +363,7 @@ function renderCatalogue(catalogue, sections, variables) {
         return;
       }
 
-      // Handle variable drags — move into catalogue as loose (no section)
-      const varIds = _extractDraggedIds(e);
+      const varIds = extractDraggedIds(e);
       if (varIds.length === 0) return;
       await performMultiDrop(varIds, catalogue.id, null, null);
     });
@@ -474,7 +373,6 @@ function renderCatalogue(catalogue, sections, variables) {
 
   if (collapsed) return frag;
 
-  // ── Sections within this catalogue ──
   const body = el('div', { class: 'cat-body' });
 
   for (const section of sections) {
@@ -482,12 +380,10 @@ function renderCatalogue(catalogue, sections, variables) {
     body.appendChild(renderSection(section, secVars, catalogue));
   }
 
-  // Section reorder drop handling
   if (!isReadonly) {
     makeSectionDropZone(body, catalogue.id);
   }
 
-  // Variables not in any section (directly in catalogue)
   const looseCatVars = variables.filter(v => !v.sectionId);
   if (looseCatVars.length > 0 || !isReadonly) {
     const cardList = el('div', { class: 'var-card-list cat-loose-vars' });
@@ -496,7 +392,6 @@ function renderCatalogue(catalogue, sections, variables) {
     body.appendChild(cardList);
   }
 
-  // Empty-state actions — show when catalogue has no loose vars and no sections
   const looseCatCount = variables.filter(v => !v.sectionId).length;
   const isEmpty = sections.length === 0 && looseCatCount === 0;
   if (!isReadonly && isEmpty) {
@@ -517,7 +412,6 @@ function renderCatalogue(catalogue, sections, variables) {
       ])
     );
   }
-  // Always show "Add section" when catalogue has content but user might want more sections
   if (!isReadonly && !isEmpty) {
     body.appendChild(
       el('div', { class: 'cat-footer-actions' }, [
@@ -548,18 +442,15 @@ function renderSection(section, variables, catalogue) {
     draggable: isCatReadonly ? undefined : 'true',
   });
 
-  // ── Section drag & drop (reorder within catalogue) ──
   if (!isCatReadonly) {
     let _dragFromHandle = false;
     frag.addEventListener('mousedown', (e) => {
       _dragFromHandle = !!e.target.closest('.sec-drag-handle');
     });
     frag.addEventListener('dragstart', (e) => {
-      // If drag started from a child var-card, let it handle its own drag
       if (e.target.closest('.var-card')) return;
       if (!_dragFromHandle) { e.preventDefault(); return; }
       e.dataTransfer.setData('application/x-docgen-sec-id', String(section.id));
-      // Also set plain text so dropping onto Word inserts all section expressions
       e.dataTransfer.setData('text/plain', buildSectionExpression(variables));
       e.dataTransfer.effectAllowed = 'copyMove';
       frag.classList.add('sec-group-dragging');
@@ -571,10 +462,8 @@ function renderSection(section, variables, catalogue) {
     });
   }
 
-  // ── Section header ──
   const headerChildren = [];
 
-  // Drag handle (before collapse icon, only for non-catalogue-readonly)
   if (!isCatReadonly) {
     headerChildren.push(el('span', {
       class: 'sec-drag-handle',
@@ -589,7 +478,6 @@ function renderSection(section, variables, catalogue) {
       class: 'sec-collapse-icon',
       html: icon(collapsed ? 'chevronRight' : 'chevronDown', 10),
     }),
-    // Lock icon for locked sections
     isLocked ? el('span', {
       class: 'sec-lock-icon',
       title: 'Section is locked — datasets cannot be edited',
@@ -607,7 +495,6 @@ function renderSection(section, variables, catalogue) {
     el('span', { class: 'badge badge-muted', style: { fontSize: '9px' } }, `${variables.length}`),
   );
 
-  // Insert section into Word button
   headerChildren.push(
     el('button', {
       class: 'sec-insert-btn',
@@ -617,7 +504,6 @@ function renderSection(section, variables, catalogue) {
     })
   );
 
-  // Context menu — show for non-catalogue-readonly (locked sections still get menu for unlock)
   if (!isCatReadonly) {
     headerChildren.push(
       el('button', {
@@ -633,10 +519,8 @@ function renderSection(section, variables, catalogue) {
     onclick: () => { toggleCollapse(secKey); rerender(); },
   }, headerChildren);
 
-  // Allow dropping variables onto section header to move them into this section
   if (!isCatReadonly && !isLocked) {
     secHeader.addEventListener('dragover', (e) => {
-      // Accept variable drags (not section drags)
       if (e.dataTransfer.types.includes('application/x-docgen-sec-id')) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = 'move';
@@ -652,7 +536,6 @@ function renderSection(section, variables, catalogue) {
       e.stopPropagation();
       secHeader.classList.remove('sec-header-drop-target');
 
-      // Handle cookbook drags
       const cookbookId = e.dataTransfer.getData('application/x-docgen-cookbook-id');
       if (cookbookId) {
         const allVars = state.get('variables') || [];
@@ -661,11 +544,9 @@ function renderSection(section, variables, catalogue) {
         return;
       }
 
-      // Handle variable drags (supports multi-select)
-      const varIds = _extractDraggedIds(e);
+      const varIds = extractDraggedIds(e);
       if (varIds.length === 0) return;
 
-      // Check if any are from locked sections
       const allVars = state.get('variables') || [];
       const allSections = state.get('sections') || [];
       const lockedVars = varIds.filter(vid => {
@@ -680,7 +561,7 @@ function renderSection(section, variables, catalogue) {
           `Move out of locked section?`,
           `${names.length} dataset${names.length > 1 ? 's are' : ' is'} in a locked section. Moving will remove protection.`,
           async () => { await performMultiDrop(varIds, section.catalogueId, section.id, null); },
-          'Move'
+          { confirmLabel: 'Move' }
         );
         return;
       }
@@ -693,10 +574,10 @@ function renderSection(section, variables, catalogue) {
 
   if (collapsed) return frag;
 
-  // ── Variable cards ──
   const cardList = el('div', { class: 'var-card-list sec-card-list' });
   variables.forEach(v => cardList.appendChild(renderVarCard(v, isCatReadonly, isLocked)));
   if (!isCatReadonly) makeDropZone(cardList, section.catalogueId, section.id);
+
   if (variables.length === 0 && !isCatReadonly && !isLocked) {
     cardList.appendChild(el('button', { class: 'sec-add-btn', onclick: () => {
       wizState.catalogueId = section.catalogueId;
@@ -713,10 +594,6 @@ function renderSection(section, variables, catalogue) {
 
 // ─── Variable card ──────────────────────────────────────────────────────
 
-/**
- * Build the validation issue icon with a JS-positioned tooltip
- * that escapes parent overflow clipping.
- */
 function makeExprIssueIcon(valResult) {
   const isErr = valResult.status === 'error';
   const tooltipText = valResult.issues.map(i => `${i.level}: ${i.message}`).join('\n');
@@ -732,12 +609,9 @@ function makeExprIssueIcon(valResult) {
   wrapper.addEventListener('mouseenter', () => {
     const rect = wrapper.getBoundingClientRect();
     tooltip.style.display = 'block';
-    // Position above the icon, right-aligned
     tooltip.style.left = 'auto';
     tooltip.style.right = `${document.documentElement.clientWidth - rect.right}px`;
     tooltip.style.top = `${rect.top - tooltip.offsetHeight - 8}px`;
-
-    // If tooltip goes off-screen top, flip below
     if (rect.top - tooltip.offsetHeight - 8 < 4) {
       tooltip.style.top = `${rect.bottom + 8}px`;
     }
@@ -750,82 +624,17 @@ function makeExprIssueIcon(valResult) {
   return wrapper;
 }
 
-// ─── Multi-select helpers ──────────────────────────────────────────────
-
-/**
- * Handle shift+click (range) or ctrl/cmd+click (toggle) multi-selection.
- * After updating selectedVarIds, re-renders to update visual state.
- */
-function handleMultiSelect(variable, e) {
-  const id = String(variable.id);
-
-  if (e.ctrlKey || e.metaKey) {
-    // Ctrl/Cmd+click: range select from last clicked to this
-    if (lastClickedVarId) {
-      const allCards = [...document.querySelectorAll('.var-card[data-var-id]')];
-      const ids = allCards.map(c => c.getAttribute('data-var-id'));
-      const startIdx = ids.indexOf(lastClickedVarId);
-      const endIdx = ids.indexOf(id);
-      if (startIdx >= 0 && endIdx >= 0) {
-        const lo = Math.min(startIdx, endIdx);
-        const hi = Math.max(startIdx, endIdx);
-        if (!e.shiftKey) selectedVarIds.clear();
-        for (let i = lo; i <= hi; i++) {
-          const card = allCards[i];
-          if (!card.closest('[data-readonly]')) selectedVarIds.add(ids[i]);
-        }
-      }
-    } else {
-      selectedVarIds.add(id);
-    }
-  } else {
-    // Shift+click: toggle individual
-    if (selectedVarIds.has(id)) {
-      selectedVarIds.delete(id);
-    } else {
-      selectedVarIds.add(id);
-    }
-  }
-
-  lastClickedVarId = id;
-
-  // Update visual state without full re-render (fast toggle)
-  document.querySelectorAll('.var-card[data-var-id]').forEach(card => {
-    const cardId = card.getAttribute('data-var-id');
-    card.classList.toggle('var-card-selected', selectedVarIds.has(cardId));
-  });
-}
-
-/** Escape key clears multi-selection. */
-function _handleSelectionKeydown(e) {
-  if (e.key === 'Escape' && selectedVarIds.size > 0) {
-    clearMultiSelect();
-  }
-}
-
-/** Clear multi-selection (e.g. after a drop or escape). */
-function clearMultiSelect() {
-  selectedVarIds.clear();
-  lastClickedVarId = null;
-  document.querySelectorAll('.var-card-selected').forEach(c => c.classList.remove('var-card-selected'));
-}
-
 function renderVarCard(variable, isReadonly = false, sectionLocked = false) {
   const tc = TYPE_CONFIG[variable.type] || TYPE_CONFIG.bom;
   const dependents = getDependents(variable.id);
   const isSource = dependents.length > 0;
 
-  // Validation status
   const valResult = validationResults[variable.id];
   const valStatus = valResult ? valResult.status : 'unchecked';
   const valColor = valStatus === 'error' ? 'var(--danger, #CF222E)'
     : valStatus === 'warning' ? 'var(--warning, #D4A015)'
     : valStatus === 'valid' ? 'var(--success, #1A7F37)'
-    : null; // unchecked → null → falls back to tc.color
-  const valDotClass = valStatus === 'error' ? 'token-error'
-    : valStatus === 'warning' ? 'token-warn'
-    : valStatus === 'valid' ? 'token-ok'
-    : 'token-none';
+    : null;
   const valTooltip = valResult && valResult.issues.length > 0
     ? valResult.issues.map(i => `${i.level}: ${i.message}`).join('\n')
     : valStatus === 'valid' ? 'Valid — verified against live data'
@@ -853,38 +662,32 @@ function renderVarCard(variable, isReadonly = false, sectionLocked = false) {
     statsChildren.push(el('div', { class: 'var-stat' }, 'catch-all'));
   }
 
-  // Right-side inline action icons (like instance row pattern)
   const actionButtons = el('div', { class: 'var-card-actions' });
   const noEdit = isReadonly || sectionLocked;
 
   if (isReadonly) {
-    // Copy-to-own button for readonly items (cookbook)
     actionButtons.appendChild(el('button', {
       class: 'row-action-btn', title: 'Copy to your catalogue',
       onclick: (e) => { e.stopPropagation(); copyToOwn(variable); },
       html: icon('copy', 14),
     }));
   } else if (sectionLocked) {
-    // Locked section: only show lock indicator + move button
     actionButtons.appendChild(el('span', {
       class: 'row-action-btn', title: 'Section is locked',
       style: { cursor: 'default', color: 'var(--text-tertiary)' },
       html: icon('lock', 14),
     }));
   } else {
-    // Move to catalogue
     actionButtons.appendChild(el('button', {
       class: 'row-action-btn', title: 'Move to catalogue',
       onclick: (e) => { e.stopPropagation(); showMoveMenu(variable, e.currentTarget); },
       html: icon('folder', 14),
     }));
-    // Duplicate
     actionButtons.appendChild(el('button', {
       class: 'row-action-btn', title: 'Duplicate dataset',
       onclick: (e) => { e.stopPropagation(); duplicateVariable(variable); },
       html: icon('copy', 14),
     }));
-    // Delete
     actionButtons.appendChild(el('button', {
       class: 'row-action-btn row-action-danger', title: 'Delete dataset',
       onclick: (e) => { e.stopPropagation(); handleDeleteVariable(variable); },
@@ -892,7 +695,6 @@ function renderVarCard(variable, isReadonly = false, sectionLocked = false) {
     }));
   }
 
-  // Expression row status background class
   const exprStatusClass = valResult
     ? valResult.status === 'error' ? 'var-expr-error'
       : valResult.status === 'warning' ? 'var-expr-warning'
@@ -914,38 +716,32 @@ function renderVarCard(variable, isReadonly = false, sectionLocked = false) {
         handleMultiSelect(variable, e);
         return;
       }
-      // If this card is selected, clicking it deselects just this one
       if (selectedVarIds.has(varIdStr)) {
         selectedVarIds.delete(varIdStr);
         card.classList.remove('var-card-selected');
         return;
       }
-      // Clicking an unselected card while others are selected → clear all
       if (selectedVarIds.size > 0) {
         clearMultiSelect();
         return;
       }
-      // Normal click with no selection — open editor
       state.set('activeVariable', variable.id);
       state.set('dataView', 'detail');
     },
   }, [
     el('div', { class: 'var-head' }, [
-      // Drag handle (for non-readonly; locked section cards get handle for moving out)
       !isReadonly ? el('span', {
         class: 'var-drag-handle',
         title: sectionLocked ? 'Drag to move out of locked section' : 'Drag to reorder',
         html: icon('moreHorizontal', 12),
         onclick: (e) => e.stopPropagation(),
       }) : null,
-      // Insert arrow (left of icon, subtle, points left → towards Word)
       el('button', {
         class: 'var-insert-btn',
         title: valTooltip + '\nClick to insert into document',
         onclick: (e) => { e.stopPropagation(); handleInsertIntoDoc(variable, valResult); },
         html: icon('chevronLeft', 12),
       }),
-      // Type icon + purpose label — colored by validation status when available
       el('div', { class: 'var-type-col', 'data-val-tip': valTooltip }, [
         el('span', { class: 'icon', style: { color: valColor || tc.color }, html: icon(tc.icon, 16) }),
         el('span', { class: 'var-purpose-label', style: { color: valColor || tc.color } },
@@ -955,8 +751,6 @@ function renderVarCard(variable, isReadonly = false, sectionLocked = false) {
       el('div', { class: 'var-info' }, [
         el('div', { class: 'var-name' }, [
           variable.name.replace(/^#/, ''),
-          // Parent-child badges (display-only — not part of expression name)
-          // A child block cannot also be a source — child badge takes priority
           variable.parentBlock
             ? el('span', {
                 class: 'badge badge-child',
@@ -999,46 +793,36 @@ function renderVarCard(variable, isReadonly = false, sectionLocked = false) {
       ]),
       actionButtons,
     ]),
-    // Expression preview row — background tinted by validation status
-    // For blocks: show "#name in source" (the $for pattern), not just the raw source
     (() => {
       if (!variable.expression) return null;
       const displayExpr = variable.purpose === 'block'
         ? `${variable.name} in ${variable.expression}`
         : variable.expression;
-      return el('div', { class: `var-expr ${exprStatusClass}${showExpr ? ' var-expr-visible' : ''}`, title: displayExpr }, [
+      return el('div', { class: `var-expr ${exprStatusClass}${getShowExpr() ? ' var-expr-visible' : ''}`, title: displayExpr }, [
         el('span', { class: 'var-expr-text' }, displayExpr),
         valResult && valResult.status !== 'valid'
           ? makeExprIssueIcon(valResult)
           : null,
       ]);
     })(),
-    // Stats row
     statsChildren.length > 0
       ? el('div', { class: 'var-stats' }, statsChildren)
       : null,
   ]);
 
-  // ── Drag & drop ──
   card.addEventListener('dragstart', (e) => {
     if (isReadonly) {
-      // Cookbook items: use a special MIME so drop zones can trigger copy-to-catalogue
       e.dataTransfer.setData('application/x-docgen-cookbook-id', String(variable.id));
       e.dataTransfer.effectAllowed = 'copy';
     } else {
-      // If this card is part of a multi-selection, drag all selected
-      // If not selected, drag just this one (and clear selection)
       if (selectedVarIds.size > 1 && selectedVarIds.has(varIdStr)) {
         e.dataTransfer.setData('application/x-docgen-var-ids', JSON.stringify([...selectedVarIds]));
       } else {
         clearMultiSelect();
       }
-      // Always set the single ID too (used by existing drop handlers as fallback)
       e.dataTransfer.setData('application/x-docgen-var-id', varIdStr);
       e.dataTransfer.effectAllowed = 'copyMove';
     }
-    // Expression text for Word drops (external targets)
-    // Blocks: raw format "#name in source", others: full expression
     if (variable.purpose === 'block') {
       const variants = buildBlockInsertVariants(variable);
       e.dataTransfer.setData('text/plain', variants.rawExpr);
@@ -1046,13 +830,11 @@ function renderVarCard(variable, isReadonly = false, sectionLocked = false) {
       e.dataTransfer.setData('text/plain', buildInsertExpression(variable));
     }
     card.classList.add('var-card-dragging');
-    // Multi-drag: dim all selected cards and show count badge as drag image
     if (selectedVarIds.size > 1 && selectedVarIds.has(varIdStr)) {
       selectedVarIds.forEach(id => {
         const c = document.querySelector(`.var-card[data-var-id="${id}"]`);
         if (c) c.classList.add('var-card-dragging');
       });
-      // Custom drag image with count
       const ghost = document.createElement('div');
       ghost.style.cssText = 'position:fixed;top:-100px;left:-100px;background:var(--tacton-blue,#0A6DC2);color:#fff;padding:4px 10px;border-radius:12px;font-size:12px;font-weight:700;white-space:nowrap;pointer-events:none;z-index:99999';
       ghost.textContent = `${selectedVarIds.size} datasets`;
@@ -1070,496 +852,7 @@ function renderVarCard(variable, isReadonly = false, sectionLocked = false) {
   return card;
 }
 
-// ─── Inline forms ───────────────────────────────────────────────────────
-
-function showNewCatalogueInline(container) {
-  // Remove existing inline form if any
-  const existing = qs('#cat-inline-form');
-  if (existing) existing.remove();
-
-  // Hide the empty-state placeholder while form is open
-  const emptyState = container.querySelector('.data-empty');
-  if (emptyState) emptyState.style.display = 'none';
-
-  const form = el('div', { class: 'cat-inline-form', id: 'cat-inline-form' });
-
-  // Restore empty state when form is removed (cancel / create / escape)
-  const obs = new MutationObserver(() => {
-    if (!form.parentNode) {
-      obs.disconnect();
-      if (emptyState && emptyState.parentNode) emptyState.style.display = '';
-    }
-  });
-  obs.observe(container, { childList: true });
-
-  const nameInput = el('input', {
-    class: 'input', placeholder: 'Catalogue name',
-    style: { fontSize: '12px', fontWeight: '600' },
-  });
-  const descInput = el('input', {
-    class: 'input', placeholder: 'Description (optional)',
-    style: { fontSize: '11px' },
-  });
-
-  // Tag picker (shared component with autocomplete)
-  const tagPicker = createTagPicker({ placeholder: 'Add tags...' });
-
-  // Scope selector (collapsible)
-  let selectedScope = 'ticket';
-  let scopeCollapsed = true;
-
-  const scopeSel = el('div', { class: 'scope-sel' });
-  Object.entries(SCOPE_CONFIG).forEach(([key, sc]) => {
-    const opt = el('div', {
-      class: `scope-opt ${key === selectedScope ? 'scope-opt-sel' : ''}`,
-      onclick: () => {
-        selectedScope = key;
-        scopeSel.querySelectorAll('.scope-opt').forEach(o => o.classList.remove('scope-opt-sel'));
-        opt.classList.add('scope-opt-sel');
-      },
-    }, [
-      el('span', { class: 'icon', style: { color: sc.color }, html: icon(sc.icon, 14) }),
-      el('span', {}, sc.label),
-    ]);
-    scopeSel.appendChild(opt);
-  });
-
-  const scopeBody = el('div', {
-    style: { display: 'none' },
-  }, [scopeSel]);
-
-  const scopeChevron = el('span', {
-    class: 'icon',
-    html: icon('chevronRight', 10),
-    style: { transition: 'transform 0.15s', display: 'inline-flex' },
-  });
-
-  const scopeHeader = el('div', {
-    class: 'field-label cat-form-section-toggle',
-    style: { marginTop: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', userSelect: 'none' },
-    onclick: () => {
-      scopeCollapsed = !scopeCollapsed;
-      scopeBody.style.display = scopeCollapsed ? 'none' : '';
-      scopeChevron.innerHTML = icon(scopeCollapsed ? 'chevronRight' : 'chevronDown', 10);
-    },
-  }, [scopeChevron, 'Scope']);
-
-  const actions = el('div', { style: { display: 'flex', gap: '6px', justifyContent: 'flex-end' } }, [
-    el('button', {
-      class: 'btn btn-primary btn-sm',
-      onclick: async () => {
-        const name = nameInput.value.trim();
-        if (!name) { nameInput.focus(); return; }
-        await createCatalogue({
-          name,
-          description: descInput.value.trim(),
-          scope: selectedScope,
-          tags: tagPicker.getTags(),
-        });
-        form.remove();
-      },
-    }, [el('span', { class: 'icon', html: icon('check', 12) }), 'Create']),
-    el('button', {
-      class: 'btn btn-outline btn-sm',
-      onclick: () => form.remove(),
-    }, 'Cancel'),
-  ]);
-
-  form.appendChild(el('div', { class: 'field-label' }, 'New Data Catalogue'));
-  form.appendChild(nameInput);
-  form.appendChild(descInput);
-  form.appendChild(tagPicker.element);
-  form.appendChild(scopeHeader);
-  form.appendChild(scopeBody);
-  form.appendChild(actions);
-
-  // Insert after the header
-  const header = container.querySelector('.data-section-head');
-  if (header && header.nextSibling) {
-    container.insertBefore(form, header.nextSibling);
-  } else {
-    container.appendChild(form);
-  }
-  nameInput.focus();
-}
-
-function showNewSectionInline(body, catalogueId) {
-  // Remove existing inline form if any
-  const existing = body.querySelector('.sec-inline-form');
-  if (existing) existing.remove();
-
-  const form = el('div', { class: 'sec-inline-form' });
-
-  const nameInput = el('input', {
-    class: 'input', placeholder: 'Section name',
-    style: { fontSize: '12px', fontWeight: '600' },
-  });
-  const descInput = el('input', {
-    class: 'input', placeholder: 'Description (optional)',
-    style: { fontSize: '11px' },
-  });
-
-  // Tag picker (shared component with autocomplete)
-  const tagPicker = createTagPicker({ placeholder: 'Add tags...' });
-
-  const actions = el('div', { style: { display: 'flex', gap: '6px', justifyContent: 'flex-end' } }, [
-    el('button', {
-      class: 'btn btn-primary btn-sm',
-      onclick: async () => {
-        const name = nameInput.value.trim();
-        if (!name) { nameInput.focus(); return; }
-        await createSection({
-          catalogueId,
-          name,
-          description: descInput.value.trim(),
-          tags: tagPicker.getTags(),
-        });
-        form.remove();
-      },
-    }, [el('span', { class: 'icon', html: icon('check', 12) }), 'Add']),
-    el('button', {
-      class: 'btn btn-outline btn-sm',
-      onclick: () => form.remove(),
-    }, 'Cancel'),
-  ]);
-
-  nameInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') actions.querySelector('.btn-primary').click();
-    if (e.key === 'Escape') form.remove();
-  });
-
-  form.appendChild(nameInput);
-  form.appendChild(descInput);
-  form.appendChild(tagPicker.element);
-  form.appendChild(actions);
-
-  // Insert before the footer actions row (which contains the "Add section" button)
-  const footer = body.querySelector('.cat-footer-actions');
-  if (footer) body.insertBefore(form, footer);
-  else body.appendChild(form);
-  nameInput.focus();
-}
-
-// ─── Data Export Dialog ─────────────────────────────────────────────────
-
-/**
- * Show export dialog with scope options:
- *   - All datasets (all user catalogues)
- *   - Selected datasets (multi-select)
- *   - Per catalogue
- */
-function showDataExportDialog(catalogues, variables, sections) {
-  const existing = qs('#data-export-dialog');
-  if (existing) existing.remove();
-
-  const userCats = catalogues;
-  const hasSelection = selectedVarIds.size > 0;
-
-  // Build scope options
-  const scopeOptions = [];
-
-  // (1) All user catalogues
-  scopeOptions.push({
-    key: 'all',
-    label: `All datasets (${variables.length})`,
-    checked: !hasSelection,
-  });
-
-  // (2) Selected datasets (only if multi-select active)
-  if (hasSelection) {
-    scopeOptions.push({
-      key: 'selected',
-      label: `Selected datasets (${selectedVarIds.size})`,
-      checked: true,
-    });
-  }
-
-  // (3) Individual catalogues
-  for (const cat of userCats) {
-    const catVars = variables.filter(v => v.catalogueId === cat.id);
-    scopeOptions.push({
-      key: `cat-${cat.id}`,
-      label: `${cat.name} (${catVars.length})`,
-      checked: false,
-      catId: cat.id,
-    });
-  }
-
-  let selectedScope = scopeOptions.find(o => o.checked)?.key || 'all';
-
-  const radioRows = scopeOptions.map(opt => {
-    const radio = el('input', {
-      type: 'radio',
-      name: 'data-export-scope',
-      value: opt.key,
-      checked: opt.checked || false,
-    });
-    radio.addEventListener('change', () => { selectedScope = opt.key; });
-    return el('label', { class: 'export-option-row' }, [
-      radio,
-      el('span', {}, opt.label),
-    ]);
-  });
-
-  const dialog = el('div', { class: 'config-dialog-overlay', id: 'data-export-dialog' }, [
-    el('div', { class: 'config-dialog' }, [
-      el('div', { class: 'config-dialog-header' }, [
-        el('span', { class: 'icon', html: icon('upload', 18) }),
-        el('span', {}, 'Export Data'),
-      ]),
-      el('div', { class: 'config-dialog-body' }, [
-        el('div', { class: 'config-dialog-hint' }, 'Choose what to include in the export file.'),
-        el('div', { class: 'export-options' }, radioRows),
-      ]),
-      el('div', { class: 'config-dialog-actions' }, [
-        el('button', { class: 'btn btn-secondary', onclick: () => dialog.remove() }, 'Cancel'),
-        el('button', { class: 'btn btn-primary', onclick: () => {
-          doDataExport(selectedScope, userCats, variables, sections);
-          dialog.remove();
-        }}, 'Export'),
-      ]),
-    ]),
-  ]);
-
-  (qs('.taskpane') || document.body).appendChild(dialog);
-}
-
-/** Execute data export based on scope */
-function doDataExport(scope, catalogues, variables, sections) {
-  let data;
-  let filename;
-
-  if (scope === 'all') {
-    // Export all user catalogues
-    data = exportCatalogue(null);
-    filename = `data-all-${new Date().toISOString().slice(0, 10)}.json`;
-  } else if (scope === 'selected') {
-    // Export only selected variables — build a virtual catalogue
-    const selectedVars = variables.filter(v => selectedVarIds.has(v.id));
-    // Group by catalogue for proper structure
-    const catIds = [...new Set(selectedVars.map(v => v.catalogueId).filter(Boolean))];
-    const allCats = state.get('catalogues') || [];
-    const allSections = state.get('sections') || [];
-
-    const exportCats = catIds.map(catId => {
-      const cat = allCats.find(c => c.id === catId);
-      if (!cat) return null;
-      const catVars = selectedVars.filter(v => v.catalogueId === catId);
-      const catSectionIds = [...new Set(catVars.map(v => v.sectionId).filter(Boolean))];
-      const catSecs = allSections.filter(s => catSectionIds.includes(s.id));
-      const secById = {};
-      catSecs.forEach(s => { secById[s.id] = s.name; });
-
-      return {
-        version: 1,
-        exportedAt: new Date().toISOString(),
-        catalogue: { name: cat.name, description: cat.description || '', scope: cat.scope || 'ticket', tags: cat.tags || [] },
-        sections: catSecs.map(s => ({ name: s.name, description: s.description || '', tags: s.tags || [], order: s.order || 0 })),
-        variables: catVars.map(v => ({
-          name: v.name, purpose: v.purpose || 'block', type: v.type || 'bom',
-          description: v.description || '', source: v.source || '',
-          filters: v.filters || [], filterLogic: v.filterLogic || 'or',
-          transforms: v.transforms || [], catchAll: v.catchAll || false,
-          excludeVars: v.excludeVars || [], instanceMode: v.instanceMode || 'all',
-          sectionName: v.sectionId ? (secById[v.sectionId] || null) : null,
-          order: v.order || 0,
-        })),
-      };
-    }).filter(Boolean);
-
-    data = { version: 1, exportedAt: new Date().toISOString(), catalogues: exportCats };
-    filename = `data-selected-${selectedVarIds.size}-${new Date().toISOString().slice(0, 10)}.json`;
-  } else if (scope.startsWith('cat-')) {
-    // Export a single catalogue
-    const catId = scope.replace('cat-', '');
-    // catalogueId could be string or number — use find with coercion
-    const cat = catalogues.find(c => String(c.id) === catId);
-    if (cat) {
-      data = exportCatalogue(cat.id);
-      filename = `data-${cat.name.replace(/\s+/g, '-').toLowerCase()}-${new Date().toISOString().slice(0, 10)}.json`;
-    } else {
-      data = exportCatalogue(null);
-      filename = `data-export-${new Date().toISOString().slice(0, 10)}.json`;
-    }
-  }
-
-  if (data) downloadJson(data, filename);
-}
-
-// ─── Import trigger ─────────────────────────────────────────────────────
-
-function triggerImport() {
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.accept = '.json';
-  input.style.display = 'none';
-  input.addEventListener('change', async () => {
-    if (!input.files || input.files.length === 0) return;
-    try {
-      const data = await readJsonFile(input.files[0]);
-      const results = await importCatalogue(data);
-      const total = results.reduce((s, r) => s + r.variableCount, 0);
-      alert(`Imported ${results.length} catalogue(s) with ${total} dataset(s).`);
-    } catch (e) {
-      alert('Import failed: ' + e.message);
-    }
-    input.remove();
-  });
-  document.body.appendChild(input);
-  input.click();
-}
-
-// ─── Context menus ──────────────────────────────────────────────────────
-
-function showCatalogueMenu(catalogue, anchor) {
-  dismissMenus();
-  const menu = el('div', { class: 'ctx-menu', id: 'ctx-menu' });
-  const isReadonly = !!catalogue.readonly;
-
-  if (!isReadonly) {
-    menu.appendChild(menuItem('plus', 'New dataset', () => {
-      dismissMenus();
-      wizState.catalogueId = catalogue.id;
-      state.set('dataView', 'new');
-    }));
-    menu.appendChild(el('div', { class: 'ctx-menu-sep' }));
-    menu.appendChild(menuItem('edit', 'Rename', () => {
-      dismissMenus();
-      startInlineEdit(catalogue.id, 'name', catalogue.name);
-    }));
-  }
-  menu.appendChild(menuItem('tag', 'Edit tags', () => {
-    dismissMenus();
-    startInlineEdit(catalogue.id, 'tags', (catalogue.tags || []).join(', '));
-  }));
-  if (!isReadonly) {
-    menu.appendChild(menuItem('arrowDown', 'Export as JSON', () => {
-      dismissMenus();
-      try {
-        const data = exportCatalogue(catalogue.id);
-        const filename = `${catalogue.name.replace(/\s+/g, '-').toLowerCase()}-catalogue.json`;
-        downloadJson(data, filename);
-      } catch (e) { showValidationDialog('Export failed', e.message, []); }
-    }));
-    menu.appendChild(el('div', { class: 'ctx-menu-sep' }));
-    menu.appendChild(menuItem('trash', 'Delete catalogue', () => {
-      dismissMenus();
-      const check = canDeleteCatalogue(catalogue.id);
-      if (!check.ok) {
-        const counts = countCascadeItems('catalogue', catalogue.id);
-        showForceDeleteDialog(
-          'catalogue', catalogue.name, counts,
-          check.details,
-          () => forceRemoveCatalogue(catalogue.id),
-        );
-        return;
-      }
-      showConfirmDialog(`Delete catalogue "${catalogue.name}"?`, 'This cannot be undone.', () => {
-        removeCatalogue(catalogue.id).catch(e => console.error('Delete failed:', e));
-      });
-    }, true));
-  }
-
-  positionMenu(menu, anchor);
-  document.body.appendChild(menu);
-  setTimeout(() => document.addEventListener('click', dismissMenus, { once: true }), 10);
-}
-
-function showSectionMenu(section, catalogue, anchor) {
-  dismissMenus();
-  const menu = el('div', { class: 'ctx-menu', id: 'ctx-menu' });
-  const isLocked = !!section.locked;
-
-  // New dataset — pre-target this section + catalogue
-  if (!isLocked && !catalogue.readonly) {
-    menu.appendChild(menuItem('plus', 'New dataset', () => {
-      dismissMenus();
-      wizState.catalogueId = catalogue.id;
-      wizState.sectionId = section.id;
-      state.set('dataView', 'new');
-    }));
-    menu.appendChild(el('div', { class: 'ctx-menu-sep' }));
-  }
-
-  // Lock / Unlock toggle — always available
-  menu.appendChild(menuItem(
-    isLocked ? 'unlock' : 'lock',
-    isLocked ? 'Unlock section' : 'Lock section',
-    async () => {
-      dismissMenus();
-      if (isLocked) {
-        await updateSection(section.id, { locked: false });
-      } else {
-        showConfirmDialog(
-          `Lock section "${section.name}"?`,
-          'Data sets inside a locked section cannot be edited or deleted until the section is unlocked.',
-          async () => { await updateSection(section.id, { locked: true }); },
-          'Lock'
-        );
-      }
-    }
-  ));
-
-  // Edit options — only when not locked
-  if (!isLocked) {
-    menu.appendChild(el('div', { class: 'ctx-menu-sep' }));
-    menu.appendChild(menuItem('edit', 'Rename', () => {
-      dismissMenus();
-      startInlineEdit(section.id, 'name', section.name, 'section');
-    }));
-    menu.appendChild(menuItem('edit', 'Edit description', () => {
-      dismissMenus();
-      startInlineEdit(section.id, 'description', section.description || '', 'section');
-    }));
-    menu.appendChild(menuItem('tag', 'Edit tags', () => {
-      dismissMenus();
-      startInlineEdit(section.id, 'tags', (section.tags || []).join(', '), 'section');
-    }));
-    menu.appendChild(el('div', { class: 'ctx-menu-sep' }));
-    menu.appendChild(menuItem('trash', 'Delete section', () => {
-      dismissMenus();
-      const check = canDeleteSection(section.id);
-      if (!check.ok) {
-        const counts = countCascadeItems('section', section.id);
-        showForceDeleteDialog(
-          'section', section.name, counts,
-          check.details,
-          () => forceRemoveSection(section.id),
-        );
-        return;
-      }
-      showConfirmDialog(`Delete section "${section.name}"?`, 'This cannot be undone.', () => {
-        removeSection(section.id).catch(e => console.error('Delete failed:', e));
-      });
-    }, true));
-  }
-
-  positionMenu(menu, anchor);
-  document.body.appendChild(menu);
-  setTimeout(() => document.addEventListener('click', dismissMenus, { once: true }), 10);
-}
-
-function menuItem(ic, label, onclick, danger = false) {
-  return el('div', {
-    class: `ctx-menu-item ${danger ? 'ctx-menu-danger' : ''}`,
-    onclick: (e) => { e.stopPropagation(); onclick(); },
-  }, [el('span', { class: 'icon', html: icon(ic, 12) }), label]);
-}
-
-function positionMenu(menu, anchor) {
-  const rect = anchor.getBoundingClientRect();
-  menu.style.top = `${rect.bottom + 4}px`;
-  // Align right edge of menu to right edge of anchor
-  menu.style.right = `${document.documentElement.clientWidth - rect.right}px`;
-  menu.style.left = 'auto';
-}
-
-function dismissMenus() {
-  const m = document.getElementById('ctx-menu');
-  if (m) m.remove();
-}
-
-// ─── Data set actions (inline) ───────────────────────────────────────
+// ─── Data set actions ───────────────────────────────────────────────────
 
 function handleDeleteVariable(variable) {
   const check = canDeleteVariable(variable.id);
@@ -1593,730 +886,14 @@ async function duplicateVariable(variable) {
     filters: variable.filters ? JSON.parse(JSON.stringify(variable.filters)) : [],
     filterLogic: variable.filterLogic || 'or',
     transforms: variable.transforms ? JSON.parse(JSON.stringify(variable.transforms)) : [],
-    catchAll: false, // never duplicate catch-all
+    catchAll: false,
     catalogueId: variable.catalogueId || null,
     sectionId: variable.sectionId || null,
   });
 }
 
-function showMoveMenu(variable, anchor) {
-  dismissMenus();
-  const catalogues = (state.get('catalogues') || []).filter(c => !c.readonly);
-  const sections = state.get('sections') || [];
-
-  if (catalogues.length === 0) {
-    alert('Create a data catalogue first to move datasets into it.');
-    return;
-  }
-
-  const menu = el('div', { class: 'ctx-menu', id: 'ctx-menu' });
-
-  // "Unassigned" option
-  menu.appendChild(menuItem('list', 'Unassigned', async () => {
-    dismissMenus();
-    await updateVariable(variable.id, { catalogueId: null, sectionId: null });
-  }));
-
-  menu.appendChild(el('div', { class: 'ctx-menu-sep' }));
-
-  for (const cat of catalogues) {
-    // Catalogue header (bold, non-clickable if it has sections)
-    const catSections = sections.filter(s => s.catalogueId === cat.id);
-
-    // Direct to catalogue (no section)
-    const isCurrent = variable.catalogueId === cat.id && !variable.sectionId;
-    menu.appendChild(el('div', {
-      class: `ctx-menu-item ${isCurrent ? 'ctx-menu-item-active' : ''}`,
-      onclick: async (e) => {
-        e.stopPropagation();
-        dismissMenus();
-        await updateVariable(variable.id, { catalogueId: cat.id, sectionId: null });
-      },
-    }, [
-      el('span', { class: 'icon', html: icon('folder', 12) }),
-      el('span', { style: { fontWeight: '600' } }, cat.name),
-      isCurrent ? el('span', { class: 'icon', style: { marginLeft: 'auto', color: 'var(--success)' }, html: icon('check', 12) }) : null,
-    ]));
-
-    // Sections within this catalogue
-    for (const sec of catSections) {
-      const isSecCurrent = variable.catalogueId === cat.id && variable.sectionId === sec.id;
-      menu.appendChild(el('div', {
-        class: `ctx-menu-item ${isSecCurrent ? 'ctx-menu-item-active' : ''}`,
-        style: { paddingLeft: '28px' },
-        onclick: async (e) => {
-          e.stopPropagation();
-          dismissMenus();
-          await updateVariable(variable.id, { catalogueId: cat.id, sectionId: sec.id });
-        },
-      }, [
-        el('span', { class: 'icon', html: icon('chevronRight', 10) }),
-        sec.name,
-        isSecCurrent ? el('span', { class: 'icon', style: { marginLeft: 'auto', color: 'var(--success)' }, html: icon('check', 12) }) : null,
-      ]));
-    }
-  }
-
-  positionMenu(menu, anchor);
-  document.body.appendChild(menu);
-  setTimeout(() => document.addEventListener('click', dismissMenus, { once: true }), 10);
-}
-
-// ─── Drag & drop zones ──────────────────────────────────────────────
-
-function makeDropZone(container, catalogueId, sectionId) {
-  container.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = e.dataTransfer.types.includes('application/x-docgen-cookbook-id') ? 'copy' : 'move';
-    container.classList.add('var-drop-target');
-  });
-  container.addEventListener('dragleave', (e) => {
-    // Only remove if actually leaving this container
-    if (!container.contains(e.relatedTarget)) {
-      container.classList.remove('var-drop-target');
-    }
-  });
-  container.addEventListener('drop', async (e) => {
-    e.preventDefault();
-    container.classList.remove('var-drop-target');
-
-    // ── Cookbook drag → copy to this catalogue ──
-    const cookbookId = e.dataTransfer.getData('application/x-docgen-cookbook-id');
-    if (cookbookId) {
-      const allVars = state.get('variables') || [];
-      const srcVar = allVars.find(v => String(v.id) === cookbookId);
-      if (!srcVar) return;
-      // Copy into this catalogue (+ optional section) via copyToOwn logic
-      await copyToCatalogue(srcVar, catalogueId, sectionId);
-      return;
-    }
-
-    // ── Normal reorder drag (supports multi-select) ──
-    const varIds = _extractDraggedIds(e);
-    if (varIds.length === 0) return;
-
-    // Check if any variable is coming from a locked section
-    const allVars = state.get('variables') || [];
-    const allSections = state.get('sections') || [];
-    const lockedVars = varIds.filter(vid => {
-      const v = allVars.find(x => String(x.id) === vid);
-      if (!v || !v.sectionId) return false;
-      const s = allSections.find(x => x.id === v.sectionId);
-      return s && s.locked && s.id !== sectionId;
-    });
-    if (lockedVars.length > 0) {
-      const names = lockedVars.map(vid => allVars.find(x => String(x.id) === vid)?.name).filter(Boolean);
-      showConfirmDialog(
-        `Move out of locked section?`,
-        `${names.length} dataset${names.length > 1 ? 's are' : ' is'} in a locked section. Moving will remove protection.`,
-        async () => { await performMultiDrop(varIds, catalogueId, sectionId, container); },
-        'Move'
-      );
-      return;
-    }
-
-    await performMultiDrop(varIds, catalogueId, sectionId, container);
-  });
-}
-
-/** Extract dragged variable IDs from a drop event (multi or single). */
-function _extractDraggedIds(e) {
-  // Multi-select drag
-  const multiData = e.dataTransfer.getData('application/x-docgen-var-ids');
-  if (multiData) {
-    try { return JSON.parse(multiData); } catch { /* fall through */ }
-  }
-  // Single drag
-  const single = e.dataTransfer.getData('application/x-docgen-var-id');
-  return single ? [single] : [];
-}
-
-/** Drop one or more variables into a catalogue/section. */
-async function performMultiDrop(varIds, catalogueId, sectionId, container) {
-    // Determine starting order
-    const cards = container ? [...container.querySelectorAll('.var-card[data-var-id]')] : [];
-    let nextOrder = cards.length;
-
-    const movedSet = new Set(varIds);
-
-    // Move all dragged variables
-    for (const vid of varIds) {
-      await updateVariable(vid, {
-        catalogueId,
-        sectionId,
-        order: nextOrder++,
-      });
-    }
-
-    // Reorder siblings (non-moved vars in the target)
-    const variables = state.get('variables') || [];
-    const siblings = variables
-      .filter(v => v.catalogueId === catalogueId && v.sectionId === sectionId && !movedSet.has(String(v.id)))
-      .sort((a, b) => (a.order || 0) - (b.order || 0));
-    let idx = 0;
-    for (const sib of siblings) {
-      await updateVariable(sib.id, { order: idx });
-      idx++;
-    }
-
-    clearMultiSelect();
-}
-
-// ─── Section drag & drop reorder ─────────────────────────────────────
-
-function makeSectionDropZone(body, catalogueId) {
-  let _dropIndicator = null;
-
-  body.addEventListener('dragover', (e) => {
-    // Only handle section drags
-    if (!e.dataTransfer.types.includes('application/x-docgen-sec-id')) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-
-    // Find the section group we're hovering over
-    const secGroups = [...body.querySelectorAll('.sec-group[data-sec-id]')];
-    if (secGroups.length === 0) return;
-
-    // Remove old indicator
-    if (_dropIndicator) _dropIndicator.remove();
-    _dropIndicator = el('div', { class: 'sec-drop-indicator' });
-
-    // Determine insert position
-    let insertBefore = null;
-    for (const sg of secGroups) {
-      const rect = sg.getBoundingClientRect();
-      if (e.clientY < rect.top + rect.height / 2) {
-        insertBefore = sg;
-        break;
-      }
-    }
-
-    if (insertBefore) {
-      body.insertBefore(_dropIndicator, insertBefore);
-    } else {
-      // After the last section group
-      const lastSec = secGroups[secGroups.length - 1];
-      if (lastSec.nextSibling) {
-        body.insertBefore(_dropIndicator, lastSec.nextSibling);
-      } else {
-        body.appendChild(_dropIndicator);
-      }
-    }
-  });
-
-  body.addEventListener('dragleave', (e) => {
-    if (!body.contains(e.relatedTarget)) {
-      if (_dropIndicator) { _dropIndicator.remove(); _dropIndicator = null; }
-    }
-  });
-
-  body.addEventListener('drop', async (e) => {
-    if (_dropIndicator) { _dropIndicator.remove(); _dropIndicator = null; }
-
-    const secId = e.dataTransfer.getData('application/x-docgen-sec-id');
-    if (!secId) return;
-    e.preventDefault();
-    e.stopPropagation();
-
-    // Determine new order based on drop position
-    const secGroups = [...body.querySelectorAll('.sec-group[data-sec-id]')];
-    let newOrder = 0;
-    for (const sg of secGroups) {
-      if (sg.dataset.secId === secId) continue; // skip self
-      const rect = sg.getBoundingClientRect();
-      if (e.clientY < rect.top + rect.height / 2) break;
-      newOrder++;
-    }
-
-    // Update the dragged section's order
-    await updateSection(secId, { order: newOrder });
-
-    // Reorder siblings
-    const allSections = state.get('sections') || [];
-    const siblings = allSections
-      .filter(s => s.catalogueId === catalogueId && s.id !== secId)
-      .sort((a, b) => (a.order || 0) - (b.order || 0));
-    let idx = 0;
-    for (const sib of siblings) {
-      if (idx === newOrder) idx++;
-      await updateSection(sib.id, { order: idx });
-      idx++;
-    }
-  });
-}
-
-// ─── Validation dialog ───────────────────────────────────────────────
-
-function showValidationDialog(title, reason, details) {
-  const existing = document.getElementById('val-dialog-overlay');
-  if (existing) existing.remove();
-
-  const overlay = el('div', {
-    id: 'val-dialog-overlay',
-    style: {
-      position: 'fixed', inset: '0', background: 'rgba(0,0,0,.35)',
-      zIndex: '9999', display: 'flex', alignItems: 'center', justifyContent: 'center',
-    },
-    onclick: (e) => { if (e.target === overlay) overlay.remove(); },
-  });
-
-  const children = [
-    el('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' } }, [
-      el('span', { class: 'icon', style: { color: 'var(--danger, #CF222E)' }, html: icon('info', 18) }),
-      el('div', { style: { fontWeight: '700', fontSize: '13px' } }, title),
-    ]),
-    el('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '10px', lineHeight: '1.5' } }, reason),
-  ];
-
-  if (details && details.length > 0) {
-    const detailList = el('div', {
-      style: {
-        fontSize: '11px', color: 'var(--text-tertiary)', background: 'var(--bg)',
-        border: '1px solid var(--border-light)', borderRadius: 'var(--radius)',
-        padding: '8px 10px', marginBottom: '10px',
-      },
-    });
-    details.forEach(d => {
-      detailList.appendChild(el('div', { style: { marginBottom: '3px' } }, `• ${d}`));
-    });
-    children.push(detailList);
-  }
-
-  children.push(
-    el('div', { style: { display: 'flex', justifyContent: 'flex-end' } }, [
-      el('button', {
-        class: 'btn btn-primary btn-sm',
-        onclick: () => overlay.remove(),
-      }, 'OK'),
-    ])
-  );
-
-  overlay.appendChild(
-    el('div', {
-      style: {
-        background: 'var(--card, #fff)', border: '1px solid var(--border)',
-        borderRadius: '8px', padding: '16px 18px', maxWidth: '360px', width: '90%',
-        boxShadow: '0 8px 24px rgba(0,0,0,.18)',
-      },
-    }, children)
-  );
-
-  document.body.appendChild(overlay);
-}
-
-// ─── Force-delete: Step 1 (validation + Force delete button) ────────────
-// ─── Force-delete: Step 2 (type DELETE to confirm) ──────────────────────
-
-/**
- * Step 1: Show what's blocking the delete, with OK to dismiss
- * and a red "Force delete" button that opens the type-DELETE confirmation.
- */
-function showForceDeleteDialog(level, name, counts, details, onConfirm) {
-  const existing = document.getElementById('val-dialog-overlay');
-  if (existing) existing.remove();
-
-  const overlay = el('div', {
-    id: 'val-dialog-overlay',
-    style: {
-      position: 'fixed', inset: '0', background: 'rgba(0,0,0,.35)',
-      zIndex: '9999', display: 'flex', alignItems: 'center', justifyContent: 'center',
-    },
-    onclick: (e) => { if (e.target === overlay) overlay.remove(); },
-  });
-
-  // Build a title like "Cannot delete catalogue"
-  const title = `Cannot delete ${level}`;
-  const reason = level === 'dataset'
-    ? 'This item is referenced by other definitions. Remove those references first, or force delete.'
-    : `Cannot delete a ${level} that still contains items. Remove or move them first, or force delete.`;
-
-  const children = [
-    el('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' } }, [
-      el('span', { class: 'icon', style: { color: 'var(--danger, #CF222E)' }, html: icon('info', 18) }),
-      el('div', { style: { fontWeight: '700', fontSize: '13px' } }, title),
-    ]),
-    el('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '10px', lineHeight: '1.5' } }, reason),
-  ];
-
-  if (details && details.length > 0) {
-    const detailList = el('div', {
-      style: {
-        fontSize: '11px', color: 'var(--text-tertiary)', background: 'var(--bg)',
-        border: '1px solid var(--border-light)', borderRadius: 'var(--radius)',
-        padding: '8px 10px', marginBottom: '10px', maxHeight: '120px', overflowY: 'auto',
-      },
-    });
-    details.forEach(d => {
-      detailList.appendChild(el('div', { style: { marginBottom: '3px' } }, `• ${d}`));
-    });
-    children.push(detailList);
-  }
-
-  children.push(
-    el('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: '6px' } }, [
-      el('button', {
-        class: 'btn btn-primary btn-sm',
-        onclick: () => overlay.remove(),
-      }, 'OK'),
-      el('button', {
-        class: 'btn btn-sm',
-        style: { background: '#CF222E', color: '#fff', border: 'none', fontWeight: '600' },
-        onclick: () => {
-          overlay.remove();
-          showForceDeleteConfirm(level, name, counts, details, onConfirm);
-        },
-      }, 'Force delete'),
-    ])
-  );
-
-  overlay.appendChild(
-    el('div', {
-      style: {
-        background: 'var(--card, #fff)', border: '1px solid var(--border)',
-        borderRadius: '8px', padding: '16px 18px', maxWidth: '360px', width: '90%',
-        boxShadow: '0 8px 24px rgba(0,0,0,.18)',
-      },
-    }, children)
-  );
-
-  document.body.appendChild(overlay);
-}
-
-/**
- * Step 2: Type DELETE to confirm — only shown after clicking "Force delete" in step 1.
- */
-function showForceDeleteConfirm(level, name, counts, details, onConfirm) {
-  const existing = document.getElementById('force-del-overlay');
-  if (existing) existing.remove();
-
-  const overlay = el('div', {
-    id: 'force-del-overlay',
-    style: {
-      position: 'fixed', inset: '0', background: 'rgba(0,0,0,.45)',
-      zIndex: '9999', display: 'flex', alignItems: 'center', justifyContent: 'center',
-    },
-    onclick: (e) => { if (e.target === overlay) overlay.remove(); },
-  });
-
-  // Build summary of what gets destroyed
-  const summaryParts = [];
-  if (counts.sections > 0) summaryParts.push(`${counts.sections} section${counts.sections !== 1 ? 's' : ''}`);
-  if (counts.variables > 0) summaryParts.push(`${counts.variables} dataset${counts.variables !== 1 ? 's' : ''}`);
-  const summaryText = summaryParts.length > 0
-    ? `This will permanently delete ${summaryParts.join(' and ')} inside this ${level}.`
-    : `This will permanently delete the ${level}.`;
-
-  // Delete button — starts disabled
-  const deleteBtn = el('button', {
-    class: 'btn btn-sm',
-    disabled: true,
-    style: {
-      background: '#999', color: '#fff', border: 'none',
-      fontWeight: '700', cursor: 'not-allowed', transition: 'background .15s',
-    },
-    onclick: () => { overlay.remove(); onConfirm(); },
-  }, 'Force delete');
-
-  // Text input
-  const input = el('input', {
-    type: 'text',
-    placeholder: 'Type DELETE to confirm',
-    autocomplete: 'off',
-    spellcheck: 'false',
-    style: {
-      width: '100%', padding: '7px 10px', fontSize: '12px',
-      border: '2px solid var(--border)', borderRadius: '4px',
-      outline: 'none', boxSizing: 'border-box',
-      fontFamily: 'monospace',
-    },
-    oninput: () => {
-      const match = input.value.trim() === 'DELETE';
-      deleteBtn.disabled = !match;
-      deleteBtn.style.background = match ? '#CF222E' : '#999';
-      deleteBtn.style.cursor = match ? 'pointer' : 'not-allowed';
-      input.style.borderColor = match ? '#CF222E' : 'var(--border)';
-    },
-    onkeydown: (e) => {
-      if (e.key === 'Enter' && input.value.trim() === 'DELETE') {
-        overlay.remove();
-        onConfirm();
-      }
-    },
-  });
-
-  const children = [
-    // Header with warning icon
-    el('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' } }, [
-      el('span', { class: 'icon', style: { color: '#CF222E' }, html: icon('warning', 18) }),
-      el('div', { style: { fontWeight: '700', fontSize: '14px', color: '#CF222E' } },
-        `Force delete ${level}`),
-    ]),
-    // Name
-    el('div', {
-      style: {
-        fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px',
-        padding: '6px 8px', background: 'var(--bg)', borderRadius: '4px',
-        fontWeight: '600', wordBreak: 'break-all',
-      },
-    }, name),
-    // Summary
-    el('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px', lineHeight: '1.5' } },
-      summaryText),
-  ];
-
-  // Detail list
-  if (details && details.length > 0) {
-    const detailList = el('div', {
-      style: {
-        fontSize: '11px', color: '#CF222E', background: '#FFF5F5',
-        border: '1px solid #FECACA', borderRadius: 'var(--radius)',
-        padding: '8px 10px', marginBottom: '10px', maxHeight: '120px', overflowY: 'auto',
-      },
-    });
-    details.forEach(d => {
-      detailList.appendChild(el('div', { style: { marginBottom: '3px' } }, `• ${d}`));
-    });
-    children.push(detailList);
-  }
-
-  // Warning text
-  children.push(
-    el('div', {
-      style: { fontSize: '11px', color: '#CF222E', fontWeight: '600', marginBottom: '8px' },
-    }, 'This action cannot be undone. All data will be permanently removed.')
-  );
-
-  // Type DELETE input
-  children.push(
-    el('div', { style: { marginBottom: '12px' } }, [
-      el('div', { style: { fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '4px' } },
-        'Type DELETE to confirm:'),
-      input,
-    ])
-  );
-
-  // Buttons
-  children.push(
-    el('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: '6px' } }, [
-      el('button', {
-        class: 'btn btn-outline btn-sm',
-        onclick: () => overlay.remove(),
-      }, 'Cancel'),
-      deleteBtn,
-    ])
-  );
-
-  overlay.appendChild(
-    el('div', {
-      style: {
-        background: 'var(--card, #fff)', border: '1px solid #FECACA',
-        borderRadius: '8px', padding: '16px 18px', maxWidth: '380px', width: '90%',
-        boxShadow: '0 8px 24px rgba(0,0,0,.22)',
-      },
-    }, children)
-  );
-
-  document.body.appendChild(overlay);
-  setTimeout(() => input.focus(), 50);
-}
-
-// ─── Inline editing (replaces prompt()) ─────────────────────────────────
-
-/**
- * Show a small inline edit dialog overlay for renaming, editing tags, etc.
- * @param {number} id - catalogue or section ID
- * @param {string} field - 'name', 'tags', or 'description'
- * @param {string} currentValue - current value as string
- * @param {string} type - 'catalogue' (default) or 'section'
- */
-function startInlineEdit(id, field, currentValue, type = 'catalogue') {
-  const existing = document.getElementById('inline-edit-overlay');
-  if (existing) existing.remove();
-
-  const labels = { name: 'Name', tags: 'Tags', description: 'Description' };
-  const isTagField = field === 'tags';
-
-  const overlay = el('div', {
-    id: 'inline-edit-overlay',
-    style: {
-      position: 'fixed', inset: '0', background: 'rgba(0,0,0,.35)',
-      zIndex: '9999', display: 'flex', alignItems: 'center', justifyContent: 'center',
-    },
-    onclick: (e) => { if (e.target === overlay) overlay.remove(); },
-  });
-
-  // ── Tag input mode ──
-  if (isTagField) {
-    const tags = currentValue ? currentValue.split(',').map(t => t.trim()).filter(Boolean) : [];
-    const chipWrap = el('div', { class: 'tag-chip-wrap' });
-    const tagInput = el('input', {
-      type: 'text',
-      class: 'tag-chip-input',
-      placeholder: tags.length ? 'Add tag\u2026' : 'Type a tag and press Space or Enter\u2026',
-    });
-
-    function renderChips() {
-      clear(chipWrap);
-      for (const t of tags) {
-        chipWrap.appendChild(el('span', { class: 'tag-chip-item' }, [
-          el('span', {}, t),
-          el('button', {
-            class: 'tag-chip-remove',
-            onclick: () => { tags.splice(tags.indexOf(t), 1); renderChips(); tagInput.focus(); },
-            html: icon('x', 8),
-          }),
-        ]));
-      }
-      chipWrap.appendChild(tagInput);
-    }
-
-    function commitTag() {
-      const val = tagInput.value.trim().replace(/,/g, '');
-      if (val && !tags.includes(val)) {
-        tags.push(val);
-        tagInput.value = '';
-        renderChips();
-      }
-      tagInput.value = '';
-    }
-
-    tagInput.addEventListener('keydown', (e) => {
-      if ((e.key === ' ' || e.key === 'Enter' || e.key === ',') && tagInput.value.trim()) {
-        e.preventDefault();
-        commitTag();
-      }
-      if (e.key === 'Backspace' && !tagInput.value && tags.length > 0) {
-        tags.pop();
-        renderChips();
-        tagInput.focus();
-      }
-      if (e.key === 'Escape') overlay.remove();
-    });
-
-    // Also commit on blur within the input
-    tagInput.addEventListener('blur', () => { if (tagInput.value.trim()) commitTag(); });
-
-    renderChips();
-
-    function saveTagField() {
-      if (tagInput.value.trim()) commitTag();
-      overlay.remove();
-      const fn = type === 'section' ? updateSection : updateCatalogue;
-      fn(id, { tags: [...tags] }).catch(e => console.error('Edit tags failed:', e));
-    }
-
-    overlay.appendChild(
-      el('div', {
-        style: {
-          background: 'var(--card, #fff)', border: '1px solid var(--border)',
-          borderRadius: '8px', padding: '16px 18px', maxWidth: '380px', width: '90%',
-          boxShadow: '0 8px 24px rgba(0,0,0,.18)',
-        },
-      }, [
-        el('div', { style: { fontWeight: '700', fontSize: '13px', marginBottom: '10px' } }, 'Edit Tags'),
-        el('div', { class: 'tag-chip-container', onclick: () => tagInput.focus() }, [chipWrap]),
-        el('div', { style: { fontSize: '10px', color: 'var(--text-tertiary)', margin: '4px 0 10px' } },
-          'Press Space or Enter to add a tag. Backspace to remove last.'),
-        el('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: '6px' } }, [
-          el('button', { class: 'btn btn-outline btn-sm', onclick: () => overlay.remove() }, 'Cancel'),
-          el('button', { class: 'btn btn-primary btn-sm', onclick: saveTagField }, 'Save'),
-        ]),
-      ])
-    );
-
-    document.body.appendChild(overlay);
-    requestAnimationFrame(() => tagInput.focus());
-    return;
-  }
-
-  // ── Simple text input mode (name, description) ──
-  const input = el('input', {
-    type: 'text',
-    class: 'data-search-input',
-    value: currentValue,
-    style: { width: '100%', marginBottom: '10px' },
-    placeholder: labels[field] || field,
-  });
-
-  function save() {
-    const val = input.value.trim();
-    overlay.remove();
-    if (!val) return;
-    const fn = type === 'section' ? updateSection : updateCatalogue;
-    fn(id, { [field]: val }).catch(e => console.error(`Edit ${field} failed:`, e));
-  }
-
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') save();
-    if (e.key === 'Escape') overlay.remove();
-  });
-
-  overlay.appendChild(
-    el('div', {
-      style: {
-        background: 'var(--card, #fff)', border: '1px solid var(--border)',
-        borderRadius: '8px', padding: '16px 18px', maxWidth: '340px', width: '90%',
-        boxShadow: '0 8px 24px rgba(0,0,0,.18)',
-      },
-    }, [
-      el('div', { style: { fontWeight: '700', fontSize: '13px', marginBottom: '10px' } },
-        `Edit ${labels[field] || field}`),
-      input,
-      el('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: '6px' } }, [
-        el('button', { class: 'btn btn-outline btn-sm', onclick: () => overlay.remove() }, 'Cancel'),
-        el('button', { class: 'btn btn-primary btn-sm', onclick: save }, 'Save'),
-      ]),
-    ])
-  );
-
-  document.body.appendChild(overlay);
-  requestAnimationFrame(() => { input.focus(); input.select(); });
-}
-
-/** Confirm dialog (replaces confirm()) */
-function showConfirmDialog(title, message, onConfirm, confirmLabel = 'Delete') {
-  const existing = document.getElementById('confirm-dialog-overlay');
-  if (existing) existing.remove();
-
-  const isDestructive = confirmLabel === 'Delete';
-  const btnBg = isDestructive ? 'var(--danger, #CF222E)' : 'var(--accent, #0969DA)';
-  const iconColor = isDestructive ? 'var(--danger, #CF222E)' : 'var(--accent, #0969DA)';
-
-  const overlay = el('div', {
-    id: 'confirm-dialog-overlay',
-    style: {
-      position: 'fixed', inset: '0', background: 'rgba(0,0,0,.35)',
-      zIndex: '9999', display: 'flex', alignItems: 'center', justifyContent: 'center',
-    },
-    onclick: (e) => { if (e.target === overlay) overlay.remove(); },
-  });
-
-  overlay.appendChild(
-    el('div', {
-      style: {
-        background: 'var(--card, #fff)', border: '1px solid var(--border)',
-        borderRadius: '8px', padding: '16px 18px', maxWidth: '340px', width: '90%',
-        boxShadow: '0 8px 24px rgba(0,0,0,.18)',
-      },
-    }, [
-      el('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' } }, [
-        el('span', { class: 'icon', style: { color: iconColor }, html: icon('info', 18) }),
-        el('div', { style: { fontWeight: '700', fontSize: '13px' } }, title),
-      ]),
-      el('div', { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '14px' } }, message),
-      el('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: '6px' } }, [
-        el('button', { class: 'btn btn-outline btn-sm', onclick: () => overlay.remove() }, 'Cancel'),
-        el('button', { class: 'btn btn-sm', style: { background: btnBg, color: '#fff', border: 'none' }, onclick: () => { overlay.remove(); onConfirm(); } }, confirmLabel),
-      ]),
-    ])
-  );
-
-  document.body.appendChild(overlay);
-}
-
 // ─── Search & Filter ────────────────────────────────────────────────────
 
-/** Collect all unique tags from catalogues and sections. */
 function collectAllTags(catalogues, sections) {
   const tags = new Set();
   for (const c of catalogues) (c.tags || []).forEach(t => tags.add(t));
@@ -2324,11 +901,9 @@ function collectAllTags(catalogues, sections) {
   return [...tags].sort();
 }
 
-/** Render the search input + tag filter chips. */
 function renderSearchFilter(allTags) {
   const wrap = el('div', { class: 'data-search-wrap' });
 
-  // Search input
   const input = el('input', {
     type: 'text',
     class: 'data-search-input',
@@ -2336,9 +911,8 @@ function renderSearchFilter(allTags) {
     value: searchQuery,
   });
   input.addEventListener('input', (e) => {
-    searchQuery = e.target.value;
+    setSearchQuery(e.target.value);
     rerender();
-    // Re-focus after rerender
     requestAnimationFrame(() => {
       const inp = qs('.data-search-input');
       if (inp) { inp.focus(); inp.selectionStart = inp.selectionEnd = inp.value.length; }
@@ -2352,25 +926,24 @@ function renderSearchFilter(allTags) {
   if (searchQuery) {
     inputWrap.appendChild(el('button', {
       class: 'data-search-clear',
-      onclick: () => { searchQuery = ''; rerender(); },
+      onclick: () => { setSearchQuery(''); rerender(); },
       html: icon('x', 12),
     }));
   }
-  // Expand-all toggle (checked = expanded, unchecked = collapsed)
+
   const expandToggle = el('label', { class: 'data-collapse-toggle', title: 'Expand / collapse all catalogues' }, [
     el('input', {
       type: 'checkbox',
-      checked: expandAll ? 'checked' : undefined,
+      checked: getExpandAll() ? 'checked' : undefined,
       onchange: (e) => { setExpandAll(e.target.checked); rerender(); },
     }),
     el('span', { class: 'data-collapse-label' }, 'Expand all'),
   ]);
 
-  // Show-expression toggle
   const exprToggle = el('label', { class: 'data-collapse-toggle', title: 'Always show expressions' }, [
     el('input', {
       type: 'checkbox',
-      checked: showExpr ? 'checked' : undefined,
+      checked: getShowExpr() ? 'checked' : undefined,
       onchange: (e) => { setShowExpr(e.target.checked); rerender(); },
     }),
     el('span', { class: 'data-collapse-label' }, 'Show exp.'),
@@ -2379,7 +952,6 @@ function renderSearchFilter(allTags) {
   const searchRow = el('div', { class: 'data-search-row' }, [inputWrap, expandToggle, exprToggle]);
   wrap.appendChild(searchRow);
 
-  // Tag chips
   if (allTags.length > 0) {
     const chipRow = el('div', { class: 'data-tag-chips' });
     for (const tag of allTags) {
@@ -2408,149 +980,10 @@ function renderSearchFilter(allTags) {
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 function rerender() {
-  // Only re-render if the user is still on the list view.
-  // If they've navigated into a wizard (detail/new), don't blow it away.
   if (state.get('dataView') && state.get('dataView') !== 'list') return;
   const zone = qs('#data-zone');
   if (zone) { clear(zone); renderVariableList(zone); }
 }
 
-/** Copy a read-only variable to the user's own catalogue. */
-async function copyToOwn(variable) {
-  const catalogues = (state.get('catalogues') || []).filter(c => !c.readonly);
-  let targetCatId = null;
+setRerenderFn(rerender);
 
-  if (catalogues.length > 0) {
-    targetCatId = catalogues[0].id;
-  } else {
-    // Auto-create a "My Data" catalogue
-    const newCat = await createCatalogue({
-      name: 'My Data',
-      description: 'Your custom data definitions',
-      scope: 'ticket',
-    });
-    targetCatId = newCat.id;
-  }
-
-  // Check for name collision
-  const existing = (state.get('variables') || []).filter(v => !v.readonly);
-  let name = variable.name;
-  if (existing.find(v => v.name === name)) {
-    name = `${name}_copy`;
-  }
-
-  // Create a fresh copy via the same createVariable path
-  const { createVariable } = await import('../../services/variables.js');
-  await createVariable({
-    purpose: variable.purpose || 'block',
-    type: variable.type || 'bom',
-    name,
-    description: variable.description || '',
-    source: variable.source || '',
-    filters: variable.filters ? JSON.parse(JSON.stringify(variable.filters)) : [],
-    filterLogic: variable.filterLogic || 'or',
-    transforms: variable.transforms ? JSON.parse(JSON.stringify(variable.transforms)) : [],
-    catchAll: variable.catchAll || false,
-    catalogueId: targetCatId,
-    sectionId: null,
-  });
-}
-
-/** Copy a read-only variable into a specific catalogue (+ optional section). Used by drag-drop from cookbook. */
-async function copyToCatalogue(variable, catalogueId, sectionId) {
-  const existing = (state.get('variables') || []).filter(v => !v.readonly);
-  let name = variable.name;
-  if (existing.find(v => v.name === name)) {
-    name = `${name}_copy`;
-  }
-
-  await createVariable({
-    purpose: variable.purpose || 'block',
-    type: variable.type || 'bom',
-    name,
-    description: variable.description || '',
-    source: variable.source || '',
-    filters: variable.filters ? JSON.parse(JSON.stringify(variable.filters)) : [],
-    filterLogic: variable.filterLogic || 'or',
-    transforms: variable.transforms ? JSON.parse(JSON.stringify(variable.transforms)) : [],
-    catchAll: variable.catchAll || false,
-    catalogueId,
-    sectionId: sectionId || null,
-  });
-}
-
-// ─── Coverage bar ───────────────────────────────────────────────────────
-
-// Coverage bar collapse state (in-memory)
-let coverageCollapsed = true;
-
-function renderCoverageBar(variables) {
-  const bomVars = variables.filter(v => v.type === 'bom');
-  const total = bomVars.reduce((sum, v) => sum + (v.matchCount || 0), 0) || 42;
-  const colors = ['#E8713A', '#D4A015', '#8250DF', '#0A6DC2', '#1A7F37', '#CF222E', '#6E40C9'];
-
-  const coverage = el('div', { class: 'coverage' });
-
-  const assigned = bomVars.reduce((s, v) => s + (v.matchCount || 0), 0);
-
-  const chevron = el('span', {
-    class: 'icon',
-    html: icon(coverageCollapsed ? 'chevronRight' : 'chevronDown', 10),
-    style: { transition: 'transform 0.15s', display: 'inline-flex', flexShrink: '0' },
-  });
-
-  const body = el('div', {
-    class: 'coverage-body',
-    style: { display: coverageCollapsed ? 'none' : '' },
-  });
-
-  const header = el('div', {
-    class: 'coverage-header',
-    style: { cursor: 'pointer', userSelect: 'none' },
-    onclick: () => {
-      coverageCollapsed = !coverageCollapsed;
-      body.style.display = coverageCollapsed ? 'none' : '';
-      chevron.innerHTML = icon(coverageCollapsed ? 'chevronRight' : 'chevronDown', 10);
-    },
-  }, [
-    el('span', { style: { display: 'flex', alignItems: 'center', gap: '4px', fontWeight: '700', fontSize: '12px' } }, [
-      chevron,
-      'BOM Coverage',
-    ]),
-    el('span', {
-      style: { color: assigned >= total ? 'var(--success)' : 'var(--warning)', fontWeight: '600', fontSize: '12px' },
-    }, `${assigned}/${total} assigned`),
-  ]);
-  coverage.appendChild(header);
-
-  const bar = el('div', { class: 'coverage-bar' });
-  bomVars.forEach((v, i) => {
-    const pct = total > 0 ? ((v.matchCount || 0) / total) * 100 : 0;
-    if (pct > 0) {
-      bar.appendChild(
-        el('div', {
-          class: 'coverage-seg',
-          style: { width: `${pct}%`, background: v.catchAll ? '#ABB4BD' : colors[i % colors.length] },
-        })
-      );
-    }
-  });
-  body.appendChild(bar);
-
-  const legend = el('div', { class: 'coverage-legend' });
-  bomVars.forEach((v, i) => {
-    legend.appendChild(
-      el('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '3px' } }, [
-        el('span', {
-          class: 'coverage-dot',
-          style: { background: v.catchAll ? '#ABB4BD' : colors[i % colors.length] },
-        }),
-        `${v.name} ${v.matchCount || 0}`,
-      ])
-    );
-  });
-  body.appendChild(legend);
-  coverage.appendChild(body);
-
-  return coverage;
-}

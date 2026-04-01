@@ -10,7 +10,7 @@
 import { el, qs, clear } from '../../core/dom.js';
 import { icon, iconEl } from '../../components/icon.js';
 import state from '../../core/state.js';
-import { resolveConfigAttrAcrossCPs } from '../data/wizard-config-explorer.js';
+import { resolveConfigAttrAcrossCPs } from '../../services/config-resolver.js';
 import { jsPDF } from 'jspdf';
 
 // ─── Module state ──────────────────────────────────────────────────

@@ -8,7 +8,7 @@
  * Renders inside the task pane as an overlay (Office Add-in can't open blob URLs).
  */
 
-import { resolveConfigAttrAcrossCPs } from './wizard-config-explorer.js';
+import { resolveConfigAttrAcrossCPs } from '../../services/config-resolver.js';
 import state from '../../core/state.js';
 
 // ─── Public Entry Point ───────────────────────────────────────────

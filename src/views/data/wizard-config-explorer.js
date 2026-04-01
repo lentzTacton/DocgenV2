@@ -25,6 +25,10 @@ import { wizState } from './wizard-state.js';
 import {
   fetchConfiguredProductData, getConfiguredProductList, indexConfigAttributes, isConnected,
 } from '../../services/data-api.js';
+import { resolveConfigAttrAcrossCPs, resetConfigResolverCache } from '../../services/config-resolver.js';
+
+// Re-export so existing callers that import from here still work during migration
+export { resolveConfigAttrAcrossCPs };
 
 // ─── Module state ──────────────────────────────────────────────────
 
@@ -183,58 +187,10 @@ function scrollSelectedIntoView() {
 }
 
 /**
- * Resolve a config attribute path across all configured products.
- */
-export async function resolveConfigAttrAcrossCPs(attrPath) {
-  if (!attrPath) return [];
-  if (!_cpList || _cpList.length === 0) {
-    try { _cpList = await getConfiguredProductList(); } catch { _cpList = null; return []; }
-  }
-  if (!_cpList?.length) return [];
-
-  const results = [];
-  for (const cp of _cpList) {
-    try {
-      const tree = await fetchConfiguredProductData(cp.id);
-      if (!tree) continue;
-      const index = indexConfigAttributes(tree);
-      const match = index.find(a => a.path === attrPath);
-      if (!match) {
-        const leafName = attrPath.split('.').pop();
-        const similar = index.filter(a => a.attrName === leafName).map(a => a.path);
-        if (similar.length > 0) {
-          console.warn(`[resolveConfigAttr] Path "${attrPath}" NOT in index. Similar paths:`, similar);
-        }
-      }
-      results.push({
-        cpDisplayId: cp.displayId || cp.id,
-        cpName: (cp.name && cp.name !== cp.displayId) ? cp.name : '',
-        solutionName: cp.solutionName || '',
-        attribute: attrPath,
-        value: match?.value || '',
-        type: match?.type || '',
-        attrType: match?.attrType || '',
-      });
-    } catch (e) {
-      console.warn(`[config-explorer] Failed to resolve ${attrPath} on CP ${cp.id}:`, e.message);
-      results.push({
-        cpDisplayId: cp.displayId || cp.id,
-        cpName: (cp.name && cp.name !== cp.displayId) ? cp.name : '',
-        solutionName: cp.solutionName || '',
-        attribute: attrPath,
-        value: '(error)',
-        type: '',
-        attrType: '',
-      });
-    }
-  }
-  return results;
-}
-
-/**
  * Reset cached data (e.g. when ticket changes).
  */
 export function resetConfigExplorer() {
+  resetConfigResolverCache();
   _cpList = null;
   _selectedCpId = null;
   _productTree = null;
