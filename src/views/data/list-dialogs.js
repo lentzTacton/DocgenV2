@@ -450,12 +450,18 @@ export function showNewCatalogueInline(container) {
       onclick: async () => {
         const name = nameInput.value.trim();
         if (!name) { nameInput.focus(); return; }
-        await createCatalogue({
+        const catData = {
           name,
           description: descInput.value.trim(),
           scope: selectedScope,
           tags: tagPicker.getTags(),
-        });
+        };
+        // Auto-bind document-scoped catalogues to the active document
+        if (selectedScope === 'document') {
+          const activeDocId = state.get('document.id');
+          if (activeDocId) catData.scopeRef = activeDocId;
+        }
+        await createCatalogue(catData);
         form.remove();
       },
     }, [el('span', { class: 'icon', html: icon('check', 12) }), 'Create']),

@@ -23,10 +23,45 @@ export const TYPE_CONFIG = {
 };
 
 export const SCOPE_CONFIG = {
-  instance: { label: 'Instance', icon: 'database', color: 'var(--purple)', desc: 'Shared across all tickets on this instance' },
-  ticket:   { label: 'Ticket',   icon: 'ticket',   color: 'var(--orange)', desc: 'Scoped to the current ticket/branch' },
   shared:   { label: 'Shared',   icon: 'globe',    color: 'var(--tacton-blue)', desc: 'Available in all projects' },
+  document: { label: 'Document', icon: 'file',     color: 'var(--purple)',      desc: 'Tied to the current Word document' },
+  ticket:   { label: 'Ticket',   icon: 'ticket',   color: 'var(--orange)',      desc: 'Scoped to the current ticket/branch' },
+  instance: { label: 'Instance', icon: 'database', color: 'var(--success)',     desc: 'Tied to a specific configured product instance' },
 };
+
+/**
+ * Check whether a catalogue is "in scope" given the current context.
+ * Used by Mode A (filter) to decide visibility.
+ */
+export function isInScope(catalogue) {
+  const scope = catalogue.scope || 'ticket';
+  const ref = catalogue.scopeRef || null;
+
+  switch (scope) {
+    case 'shared':
+      return true;
+
+    case 'document': {
+      if (showAllDocs) return true;            // "Show all documents" override
+      const activeDocId = state.get('document.id');
+      if (!activeDocId) return true;           // no doc selected → show all
+      return ref === activeDocId;              // strict match — ref must equal active doc
+    }
+
+    case 'ticket': {
+      const activeTicket = state.get('tickets.selected');
+      return !ref || (activeTicket && ref === String(activeTicket));
+    }
+
+    case 'instance': {
+      // Instance scope — always visible when connected (for now)
+      return !!state.get('connection.status');
+    }
+
+    default:
+      return true;
+  }
+}
 
 // ─── Collapse state (in-memory, persists during session) ────────────────
 
@@ -60,6 +95,18 @@ export function getShowExpr() { return showExpr; }
 export function setShowExpr(val) {
   showExpr = val;
   try { localStorage.setItem(SHOW_EXPR_KEY, String(val)); } catch { /* noop */ }
+}
+
+// ─── Show all documents toggle ─────────────────────────────────────────
+
+const SHOW_ALL_DOCS_KEY = 'docgen_show_all_docs';
+let showAllDocs = (() => { try { return localStorage.getItem(SHOW_ALL_DOCS_KEY) === 'true'; } catch { return false; } })();
+
+export function getShowAllDocs() { return showAllDocs; }
+
+export function setShowAllDocs(val) {
+  showAllDocs = val;
+  try { localStorage.setItem(SHOW_ALL_DOCS_KEY, String(val)); } catch { /* noop */ }
 }
 
 // ─── Search / filter state ──────────────────────────────────────────────

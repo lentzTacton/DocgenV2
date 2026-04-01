@@ -118,6 +118,13 @@ export const folder = createIcon(`
   <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
 `);
 
+// Folder with plus (new catalogue)
+export const folderPlus = createIcon(`
+  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+  <line x1="12" y1="11" x2="12" y2="19"/>
+  <line x1="8" y1="15" x2="16" y2="15"/>
+`);
+
 // Folder open
 export const folderOpen = createIcon(`
   <path d="M5 19a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4l2 3h9a2 2 0 0 1 2 2v1M5 19h14a2 2 0 0 0 2-2l1-7H8l-1 7a2 2 0 0 1-2 2z"/>
@@ -416,6 +423,7 @@ export function icon(name, size = 16) {
     chevronLeft,
     chevronDown,
     folder,
+    folderPlus,
     folderOpen,
     tag,
     globe,

@@ -10,6 +10,7 @@ import { createPreviewView } from '../views/preview/preview-view.js';
 import { loadAiSettings, clearAllDataRecords, getSetting, setSetting } from './storage.js';
 import { startSelectionListener } from '../services/word-api.js';
 import { initSelectionPanel } from '../views/data/selection-panel.js';
+import { initDocumentIdentity, getActiveDocument } from '../services/document-identity.js';
 
 function createHeader() {
   return el('div', { class: 'header' }, [
@@ -125,6 +126,37 @@ function showHamburgerMenu() {
         'Import',
       ]));
     }
+
+    // ── Section: Document ──
+    dropdown.appendChild(el('div', { class: 'hb-divider' }));
+    dropdown.appendChild(el('div', { class: 'hb-section-label' }, 'Document'));
+
+    // Document Registry
+    dropdown.appendChild(el('button', {
+      class: 'hb-menu-item',
+      onclick: () => { closeHamburgerMenu(); state.set('menu.action', 'document-registry'); },
+    }, [
+      el('span', { class: 'icon', html: icon('list', 14) }),
+      el('span', {}, 'Document Registry'),
+    ]));
+
+    // Tag current document
+    const activeDoc = getActiveDocument();
+    dropdown.appendChild(el('button', {
+      class: 'hb-menu-item',
+      onclick: () => {
+        closeHamburgerMenu();
+        if (activeDoc) {
+          state.set('menu.action', 'document-details');
+        } else {
+          state.set('menu.action', 'document-tag');
+        }
+      },
+    }, [
+      el('span', { class: 'icon', html: icon(activeDoc ? 'file' : 'tag', 14) }),
+      el('span', {}, activeDoc ? 'Document details' : 'Tag current document'),
+      activeDoc ? el('span', { class: 'hb-menu-hint' }, `dg:${activeDoc.id}`) : null,
+    ]));
   }
 
   const dropdown = el('div', { class: 'hamburger-dropdown', id: 'hamburger-dropdown' });
@@ -258,6 +290,11 @@ export async function initApp() {
 
   // Initial toggle state
   updateModeToggleState();
+
+  // Document identity — detect/link current Word document
+  initDocumentIdentity().then(doc => {
+    if (doc) console.log(`[app] Document linked: ${doc.name} (${doc.documentId})`);
+  });
 
   // Selection panel + Word listener
   initSelectionPanel();

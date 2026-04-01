@@ -40,10 +40,18 @@ import {
   TYPE_CONFIG, SCOPE_CONFIG,
   isCollapsed, toggleCollapse, setExpandAll, getExpandAll,
   getShowExpr, setShowExpr,
+  getShowAllDocs, setShowAllDocs,
   searchQuery, setSearchQuery, activeTagFilters,
   selectedVarIds,
   setRerenderFn,
+  isInScope,
 } from './list-state.js';
+import {
+  getActiveDocument, getAllDocuments, setActiveDocument,
+  getDocumentByTag, isDocBarOpen, toggleDocBar,
+  getScopeMode, setScopeMode,
+  generateDocId, writeDocumentTag, createDocumentRecord,
+} from '../../services/document-identity.js';
 import { showCatalogueMenu, showSectionMenu, showMoveMenu } from './list-menus.js';
 import { showForceDeleteDialog, showNewCatalogueInline, showNewSectionInline } from './list-dialogs.js';
 import {
@@ -61,6 +69,11 @@ let validationCtx = {
 };
 let validationCtxLoaded = false;
 const validationResults = {};
+
+// ─── View bar state (expand / show-expr toggle bar) ───────────────────
+let _viewBarOpen = false;
+function isViewBarOpen() { return _viewBarOpen; }
+function toggleViewBar() { _viewBarOpen = !_viewBarOpen; }
 
 async function ensureValidationCtx() {
   if (validationCtxLoaded || !isConnected()) return;
@@ -171,17 +184,11 @@ export function renderVariableList(container) {
         el('span', { class: 'icon', style: { color: 'var(--tacton-blue)' }, html: icon('database', 15) }),
         el('span', { style: { fontWeight: '700', fontSize: '13px' } }, 'Data'),
       ]),
-      el('div', { style: { display: 'flex', gap: '4px' } }, [
-        el('button', {
-          class: 'btn btn-outline btn-sm',
-          onclick: () => showNewCatalogueInline(container),
-        }, [el('span', { class: 'icon', html: icon('folder', 12) }), 'New catalogue']),
-      ]),
     ])
   );
 
   const allTags = collectAllTags(catalogues, sections);
-  container.appendChild(renderSearchFilter(allTags));
+  container.appendChild(renderSearchFilter(allTags, container));
 
   const ownedCats = catalogues.filter(c => !c.readonly);
   const ownedVars = variables.filter(v => !v.readonly);
@@ -220,31 +227,77 @@ export function renderVariableList(container) {
       || (v.source || '').toLowerCase().includes(q);
   }
 
+  const scopeMode = getScopeMode();
   const userCats = catalogues.filter(c => !c.readonly);
   const readonlyCats = catalogues.filter(c => c.readonly);
 
-  for (const cat of userCats) {
-    if (activeTagFilters.size > 0 && !matchesCatalogueTags(cat)) continue;
-    const catSections = sections.filter(s => s.catalogueId === cat.id);
-    let catVars = variables.filter(v => v.catalogueId === cat.id);
-    if (hasFilter) catVars = catVars.filter(matchesVariable);
-    if (!matchesCatalogue(cat) && catVars.length === 0) continue;
-    container.appendChild(renderCatalogue(cat, catSections, catVars));
+  /** Render a single catalogue with scope-awareness. */
+  function renderScopedCatalogue(cat, catSections, catVars) {
+    const inScope = isInScope(cat);
+
+    // Mode A (filter): skip out-of-scope entirely
+    if (scopeMode === 'filter' && !inScope) return;
+
+    const el_ = renderCatalogue(cat, catSections, catVars);
+
+    // Mode B (badge): dim out-of-scope
+    if (scopeMode === 'badge' && !inScope) {
+      el_.classList.add('cat-out-of-scope');
+    }
+
+    container.appendChild(el_);
   }
 
-  let unassigned = variables.filter(v => !v.catalogueId);
-  if (hasFilter) unassigned = unassigned.filter(matchesVariable);
-  if (unassigned.length > 0) {
-    container.appendChild(renderUnassigned(unassigned));
+  /** Render all catalogues in a list, respecting scope. */
+  function renderCatList(cats) {
+    for (const cat of cats) {
+      if (activeTagFilters.size > 0 && !matchesCatalogueTags(cat)) continue;
+      const catSections = sections.filter(s => s.catalogueId === cat.id);
+      let catVars = variables.filter(v => v.catalogueId === cat.id);
+      if (hasFilter) catVars = catVars.filter(matchesVariable);
+      if (!matchesCatalogue(cat) && catVars.length === 0) continue;
+      renderScopedCatalogue(cat, catSections, catVars);
+    }
   }
 
-  for (const cat of readonlyCats) {
-    if (activeTagFilters.size > 0 && !matchesCatalogueTags(cat)) continue;
-    const catSections = sections.filter(s => s.catalogueId === cat.id);
-    let catVars = variables.filter(v => v.catalogueId === cat.id);
-    if (hasFilter) catVars = catVars.filter(matchesVariable);
-    if (!matchesCatalogue(cat) && catVars.length === 0) continue;
-    container.appendChild(renderCatalogue(cat, catSections, catVars));
+  // Mode C (grouped): render under scope group headers
+  if (scopeMode === 'grouped') {
+    const scopeOrder = ['shared', 'document', 'ticket', 'instance'];
+    for (const scopeKey of scopeOrder) {
+      const sc = SCOPE_CONFIG[scopeKey];
+      const scopeUserCats = userCats.filter(c => (c.scope || 'ticket') === scopeKey);
+      const scopeReadonlyCats = readonlyCats.filter(c => (c.scope || 'ticket') === scopeKey);
+      if (scopeUserCats.length === 0 && scopeReadonlyCats.length === 0) continue;
+
+      // Scope group header
+      container.appendChild(el('div', { class: 'scope-group-header' }, [
+        el('span', { class: 'icon', style: { color: sc.color }, html: icon(sc.icon, 12) }),
+        el('span', { style: { color: sc.color } }, sc.label),
+      ]));
+
+      renderCatList(scopeUserCats);
+      renderCatList(scopeReadonlyCats);
+    }
+  } else {
+    // Modes A & B: flat list (filtering/dimming handled in renderScopedCatalogue)
+    renderCatList(userCats);
+
+    let unassigned = variables.filter(v => !v.catalogueId);
+    if (hasFilter) unassigned = unassigned.filter(matchesVariable);
+    if (unassigned.length > 0) {
+      container.appendChild(renderUnassigned(unassigned));
+    }
+
+    renderCatList(readonlyCats);
+  }
+
+  // Unassigned block (also in grouped mode, at the end)
+  if (scopeMode === 'grouped') {
+    let unassigned = variables.filter(v => !v.catalogueId);
+    if (hasFilter) unassigned = unassigned.filter(matchesVariable);
+    if (unassigned.length > 0) {
+      container.appendChild(renderUnassigned(unassigned));
+    }
   }
 
   container.appendChild(
@@ -901,7 +954,7 @@ function collectAllTags(catalogues, sections) {
   return [...tags].sort();
 }
 
-function renderSearchFilter(allTags) {
+function renderSearchFilter(allTags, listContainer) {
   const wrap = el('div', { class: 'data-search-wrap' });
 
   const input = el('input', {
@@ -931,26 +984,45 @@ function renderSearchFilter(allTags) {
     }));
   }
 
-  const expandToggle = el('label', { class: 'data-collapse-toggle', title: 'Expand / collapse all catalogues' }, [
-    el('input', {
-      type: 'checkbox',
-      checked: getExpandAll() ? 'checked' : undefined,
-      onchange: (e) => { setExpandAll(e.target.checked); rerender(); },
-    }),
-    el('span', { class: 'data-collapse-label' }, 'Expand all'),
-  ]);
+  // ── Icon toggle buttons ──
+  const activeDoc = getActiveDocument();
+  const hasViewOptions = getExpandAll() || getShowExpr() || getShowAllDocs();
 
-  const exprToggle = el('label', { class: 'data-collapse-toggle', title: 'Always show expressions' }, [
-    el('input', {
-      type: 'checkbox',
-      checked: getShowExpr() ? 'checked' : undefined,
-      onchange: (e) => { setShowExpr(e.target.checked); rerender(); },
-    }),
-    el('span', { class: 'data-collapse-label' }, 'Show exp.'),
-  ]);
+  const docBtn = el('button', {
+    class: `toolbar-icon-btn ${activeDoc ? 'toolbar-icon-active' : ''} ${isDocBarOpen() ? 'toolbar-icon-open' : ''}`,
+    title: activeDoc ? `Document: ${activeDoc.name} (${activeDoc.id})` : 'Document identity',
+    onclick: () => { toggleDocBar(); rerender(); },
+    html: icon('file', 14),
+  });
 
-  const searchRow = el('div', { class: 'data-search-row' }, [inputWrap, expandToggle, exprToggle]);
+  const viewBtn = el('button', {
+    class: `toolbar-icon-btn ${hasViewOptions ? 'toolbar-icon-active' : ''} ${isViewBarOpen() ? 'toolbar-icon-open' : ''}`,
+    title: 'View options',
+    onclick: () => { toggleViewBar(); rerender(); },
+    html: icon('eye', 14),
+  });
+
+  const addBtn = el('button', {
+    class: 'toolbar-icon-btn toolbar-icon-action',
+    title: 'New catalogue',
+    onclick: () => { if (listContainer) showNewCatalogueInline(listContainer); },
+    html: icon('folderPlus', 14),
+  });
+
+  const searchRow = el('div', { class: 'data-search-row' }, [inputWrap, docBtn, viewBtn, addBtn]);
   wrap.appendChild(searchRow);
+
+  // ── Collapsible document bar ──
+  if (isDocBarOpen()) {
+    const docBar = renderDocumentBar();
+    wrap.appendChild(docBar);
+  }
+
+  // ── Collapsible view options bar ──
+  if (isViewBarOpen()) {
+    const viewBar = renderViewBar();
+    wrap.appendChild(viewBar);
+  }
 
   if (allTags.length > 0) {
     const chipRow = el('div', { class: 'data-tag-chips' });
@@ -975,6 +1047,200 @@ function renderSearchFilter(allTags) {
   }
 
   return wrap;
+}
+
+// ─── Document Bar ──────────────────────────────────────────────────────
+
+// ─── View Options Bar ────────────────────────────────────────────────
+
+function renderViewBar() {
+  const bar = el('div', { class: 'view-bar' });
+
+  const expandToggle = el('label', { class: 'view-bar-toggle', title: 'Expand / collapse all catalogues' }, [
+    el('input', {
+      type: 'checkbox',
+      checked: getExpandAll() ? 'checked' : undefined,
+      onchange: (e) => { setExpandAll(e.target.checked); rerender(); },
+    }),
+    el('span', {}, 'Expand all'),
+  ]);
+
+  const exprToggle = el('label', { class: 'view-bar-toggle', title: 'Show expressions on all datasets' }, [
+    el('input', {
+      type: 'checkbox',
+      checked: getShowExpr() ? 'checked' : undefined,
+      onchange: (e) => { setShowExpr(e.target.checked); rerender(); },
+    }),
+    el('span', {}, 'Show expressions'),
+  ]);
+
+  const allDocsToggle = el('label', { class: 'view-bar-toggle', title: 'Show catalogues from all documents' }, [
+    el('input', {
+      type: 'checkbox',
+      checked: getShowAllDocs() ? 'checked' : undefined,
+      onchange: (e) => { setShowAllDocs(e.target.checked); rerender(); },
+    }),
+    el('span', {}, 'All documents'),
+  ]);
+
+  bar.append(expandToggle, exprToggle, allDocsToggle);
+  return bar;
+}
+
+// ─── Document Bar ────────────────────────────────────────────────────
+
+function renderDocumentBar() {
+  const bar = el('div', { class: 'doc-bar' });
+  const activeDoc = getActiveDocument();
+  const mode = getScopeMode();
+
+  // ── Left side: document identity ──
+  const leftSide = el('div', { class: 'doc-bar-left' });
+
+  if (activeDoc) {
+    // Document dropdown
+    const docSelect = el('select', {
+      class: 'doc-bar-select',
+      onchange: async (e) => {
+        const val = e.target.value;
+        if (val === '__registry__') {
+          state.set('menu.action', 'document-registry');
+          return;
+        }
+        if (val === '__new__') {
+          await handleTagCurrentDocument();
+          return;
+        }
+        // Switch to selected document
+        const doc = await getDocumentByTag(val);
+        if (doc) {
+          setActiveDocument(doc);
+          rerender();
+        }
+      },
+    });
+
+    // Populate async (will flash, but acceptable)
+    getAllDocuments().then(docs => {
+      docs.forEach(d => {
+        const opt = el('option', {
+          value: d.documentId,
+          selected: d.documentId === activeDoc.id ? 'selected' : undefined,
+        }, d.name || `Doc ${d.documentId}`);
+        docSelect.appendChild(opt);
+      });
+      docSelect.appendChild(el('option', { disabled: true }, '───'));
+      docSelect.appendChild(el('option', { value: '__registry__' }, 'Document Registry…'));
+    });
+
+    // Tag label
+    const tagLabel = el('span', { class: 'doc-bar-tag' }, `dg:${activeDoc.id}`);
+
+    leftSide.append(docSelect, tagLabel);
+  } else {
+    // No document linked
+    leftSide.appendChild(el('span', { class: 'doc-bar-unlinked' }, 'No document linked'));
+    leftSide.appendChild(el('button', {
+      class: 'btn btn-sm doc-bar-tag-btn',
+      onclick: async () => { await handleTagCurrentDocument(); },
+    }, [el('span', { html: icon('tag', 11) }), 'Tag this document']));
+  }
+
+  // ── Right side: scope mode toggle ──
+  const modeToggle = el('div', { class: 'doc-bar-mode-toggle' });
+  const modes = [
+    { key: 'filter',  label: 'Focus',  title: 'Focus — hide out-of-scope catalogues' },
+    { key: 'badge',   label: 'All',    title: 'All — dim out-of-scope catalogues' },
+    { key: 'grouped', label: 'Group',  title: 'Group — organize catalogues by scope' },
+  ];
+  for (const m of modes) {
+    modeToggle.appendChild(el('button', {
+      class: `doc-bar-mode-btn ${mode === m.key ? 'doc-bar-mode-active' : ''}`,
+      title: m.title,
+      onclick: () => { setScopeMode(m.key); rerender(); },
+    }, m.label));
+  }
+
+  bar.append(leftSide, modeToggle);
+  return bar;
+}
+
+/** Handle tagging the current (unlinked) document. */
+async function handleTagCurrentDocument() {
+  const docId = generateDocId();
+  await writeDocumentTag(docId);
+  const doc = await createDocumentRecord(docId, `Document ${docId}`);
+  setActiveDocument(doc);
+  rerender();
+}
+
+// ─── New Document / Copy of Existing Dialog ────────────────────────────
+
+function showNewDocumentDialog() {
+  const overlay = el('div', { class: 'dialog-overlay doc-new-dialog-overlay' });
+  const dialog = el('div', { class: 'dialog doc-new-dialog' });
+
+  dialog.appendChild(el('div', { class: 'dialog-header' }, [
+    el('span', { html: icon('file', 16) }),
+    el('span', {}, 'New document detected'),
+  ]));
+
+  const body = el('div', { class: 'dialog-body' });
+
+  body.appendChild(el('p', { style: { fontSize: '12px', color: 'var(--text-secondary)', margin: '0 0 12px' } },
+    'This document has no DocGen tag. Would you like to link it?'));
+
+  // Option 1: New document
+  const newBtn = el('button', {
+    class: 'btn btn-primary doc-new-opt',
+    onclick: async () => {
+      overlay.remove();
+      await handleTagCurrentDocument();
+    },
+  }, [el('span', { html: icon('plus', 13) }), 'New document']);
+
+  // Option 2: Copy of existing
+  const copySelect = el('select', { class: 'doc-new-copy-select', style: { display: 'none' } });
+  const copyBtn = el('button', {
+    class: 'btn btn-outline doc-new-opt',
+    onclick: async () => {
+      if (copySelect.style.display === 'none') {
+        // Show dropdown
+        copySelect.style.display = 'block';
+        const docs = await getAllDocuments();
+        copySelect.innerHTML = '';
+        copySelect.appendChild(el('option', { value: '' }, 'Select source document…'));
+        docs.forEach(d => {
+          copySelect.appendChild(el('option', { value: d.id }, d.name || `Doc ${d.documentId}`));
+        });
+      } else {
+        // Confirm copy
+        const sourceProjectId = copySelect.value;
+        if (!sourceProjectId) return;
+        overlay.remove();
+        const docId = generateDocId();
+        await writeDocumentTag(docId);
+        const newDoc = await createDocumentRecord(docId, `Copy — ${docId}`);
+        const { cloneDocumentCatalogues } = await import('../../services/document-identity.js');
+        await cloneDocumentCatalogues(sourceProjectId, newDoc.id, docId);
+        setActiveDocument(newDoc);
+        rerender();
+      }
+    },
+  }, [el('span', { html: icon('copy', 13) }), 'Copy from existing']);
+
+  // Option 3: Skip
+  const skipBtn = el('button', {
+    class: 'btn btn-ghost doc-new-opt',
+    onclick: () => { overlay.remove(); },
+  }, 'Skip');
+
+  body.append(newBtn, copyBtn, copySelect, skipBtn);
+  dialog.appendChild(body);
+  overlay.appendChild(dialog);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+
+  (qs('.taskpane') || document.body).appendChild(overlay);
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────

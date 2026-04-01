@@ -4160,17 +4160,22 @@ select.input {
   display: flex; align-items: center; gap: 10px;
 }
 .data-search-row .data-search-input-wrap { flex: 1; min-width: 0; }
-.data-collapse-toggle {
-  display: flex; align-items: center; gap: 5px;
-  cursor: pointer; white-space: nowrap;
-  font-size: 11px; color: var(--text-secondary);
-  user-select: none;
+/* ─── Toolbar icon toggle buttons (doc / expand / expr) ─── */
+.toolbar-icon-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; flex-shrink: 0;
+  border: 1px solid var(--border-light, #e5e7eb);
+  border-radius: 6px; background: var(--bg, #fff);
+  cursor: pointer; color: var(--text-tertiary);
+  transition: all .15s;
+  position: relative;
 }
-.data-collapse-toggle input[type="checkbox"] {
-  width: 14px; height: 14px; margin: 0; cursor: pointer;
-  accent-color: var(--tacton-blue, #0071c8);
-}
-.data-collapse-label { font-weight: 500; }
+.toolbar-icon-btn:hover { border-color: var(--tacton-blue); color: var(--tacton-blue); }
+/* Action variant — always blue (e.g. "new catalogue") */
+.toolbar-icon-action { color: var(--tacton-blue, #0071c8); border-color: var(--tacton-blue, #0071c8); }
+.toolbar-icon-action:hover { background: var(--tacton-light, #e0f0ff); }
+.toolbar-icon-active { background: var(--tacton-light, #e0f0ff); border-color: var(--tacton-blue); color: var(--tacton-blue); }
+.toolbar-icon-open { background: var(--tacton-light, #e0f0ff); border-color: var(--tacton-blue); color: var(--tacton-blue); }
 .data-search-input-wrap {
   position: relative;
   display: flex;
@@ -4260,6 +4265,156 @@ select.input {
   background: var(--bg);
   color: var(--danger, #dc2626);
   border-color: var(--danger, #dc2626);
+}
+
+/* ─── Document Bar (collapsible, below search row) ─── */
+
+/* Active dot indicator for doc button when document is linked */
+.toolbar-icon-btn.toolbar-icon-active::after {
+  content: '';
+  position: absolute; bottom: 2px; right: 2px;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--purple, #8250DF);
+  border: 1px solid var(--bg, #fff);
+}
+
+/* ─── View Options Bar (collapsible, below search row) ─── */
+
+.view-bar {
+  display: flex; align-items: center; justify-content: flex-end;
+  gap: 14px; padding: 5px 10px;
+  background: var(--bg-secondary, #f9fafb);
+  border: 1px solid var(--border-light, #e5e7eb);
+  border-radius: 8px; margin-top: 6px;
+}
+.view-bar-toggle {
+  display: flex; align-items: center; gap: 5px;
+  cursor: pointer; white-space: nowrap;
+  font-size: 11px; color: var(--text-secondary);
+  user-select: none; font-weight: 500;
+}
+.view-bar-toggle input[type="checkbox"] {
+  width: 14px; height: 14px; margin: 0; cursor: pointer;
+  accent-color: var(--tacton-blue, #0071c8);
+}
+
+/* ─── Document Bar (collapsible, below search row) ─── */
+
+.doc-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; padding: 6px 10px;
+  background: linear-gradient(135deg, #f8f6ff 0%, #f0f7ff 100%);
+  border: 1px solid var(--border-light, #e5e7eb);
+  border-radius: 8px; margin-top: 6px;
+}
+
+.doc-bar-left {
+  display: flex; align-items: center; gap: 8px;
+  flex: 1; min-width: 0;
+}
+
+.doc-bar-select {
+  font-size: 11px; font-weight: 600;
+  padding: 3px 6px; border-radius: 4px;
+  border: 1px solid var(--border-light, #e5e7eb);
+  background: var(--bg, #fff);
+  max-width: 160px; min-width: 80px;
+  cursor: pointer;
+}
+.doc-bar-select:focus { outline: none; border-color: var(--tacton-blue); }
+
+.doc-bar-tag {
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 9px; color: var(--purple, #8250DF);
+  background: #F3EEFF; padding: 2px 6px;
+  border-radius: 4px; white-space: nowrap;
+}
+
+.doc-bar-unlinked {
+  font-size: 11px; color: var(--text-tertiary);
+  font-style: italic;
+}
+
+.doc-bar-tag-btn {
+  font-size: 10px !important;
+  padding: 3px 8px !important;
+  gap: 4px;
+  border-style: dashed !important;
+}
+
+.doc-bar-mode-toggle {
+  display: flex; gap: 0; border: 1px solid var(--border-light, #e5e7eb);
+  border-radius: 5px; overflow: hidden; flex-shrink: 0;
+}
+
+.doc-bar-mode-btn {
+  padding: 0 7px; height: 22px;
+  font-size: 10px; font-weight: 600; white-space: nowrap;
+  border: none; background: var(--bg, #fff);
+  color: var(--text-tertiary); cursor: pointer;
+  transition: all .12s;
+}
+.doc-bar-mode-btn:not(:last-child) { border-right: 1px solid var(--border-light, #e5e7eb); }
+.doc-bar-mode-btn:hover { background: var(--bg-secondary, #f5f5f5); color: var(--text-primary); }
+.doc-bar-mode-active {
+  background: var(--tacton-blue, #0071c8) !important;
+  color: #fff !important;
+}
+
+/* ─── Scope group headers (Mode C) ─── */
+
+.scope-group-header {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 14px 4px;
+  font-size: 10px; font-weight: 700;
+  letter-spacing: .05em; text-transform: uppercase;
+  border-bottom: 1px solid var(--border-light, #eee);
+  margin-bottom: 4px;
+}
+
+/* ─── Out-of-scope catalogue (Mode B) ─── */
+
+.cat-out-of-scope {
+  opacity: 0.45;
+  filter: grayscale(0.4);
+  transition: opacity .2s, filter .2s;
+}
+.cat-out-of-scope:hover {
+  opacity: 0.7;
+  filter: grayscale(0);
+}
+
+/* ─── Hamburger menu extras ─── */
+
+.hb-divider {
+  height: 1px; background: var(--border-light, #e5e7eb);
+  margin: 4px 0;
+}
+
+.hb-menu-hint {
+  margin-left: auto;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 9px; color: var(--purple, #8250DF);
+  background: #F3EEFF; padding: 1px 5px;
+  border-radius: 3px;
+}
+
+/* ─── New Document Dialog ─── */
+
+.doc-new-dialog {
+  max-width: 320px;
+}
+.doc-new-dialog .dialog-body {
+  display: flex; flex-direction: column; gap: 8px;
+}
+.doc-new-opt {
+  justify-content: flex-start; gap: 8px; width: 100%;
+  text-align: left;
+}
+.doc-new-copy-select {
+  font-size: 11px; padding: 4px 8px;
+  border: 1px solid var(--border-light); border-radius: 4px;
+  width: 100%;
 }
 
 /* ─── Tag chip editor (in edit dialog) ─── */

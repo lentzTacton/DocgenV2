@@ -252,6 +252,14 @@ export async function forceClearSection(id) {
   });
 }
 
+// ─── All Projects (for Document Registry) ───────────────────────────────
+
+/** Return all projects that have a documentId (i.e. linked documents). */
+export async function getAllProjects() {
+  const all = await db.projects.toArray();
+  return all.filter(p => p.documentId).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+}
+
 // ─── Settings (key-value pairs) ─────────────────────────────────────────
 
 export async function getSetting(key) {

@@ -159,7 +159,8 @@ export async function createCatalogue(data) {
     projectId,
     name: data.name || 'Untitled catalogue',
     description: data.description || '',
-    scope: data.scope || 'ticket',   // 'instance' | 'ticket' | 'shared'
+    scope: data.scope || 'ticket',   // 'instance' | 'ticket' | 'shared' | 'document'
+    scopeRef: data.scopeRef || null,
     tags: data.tags || [],
     readonly: data.readonly || false,
     order: existing.length,
