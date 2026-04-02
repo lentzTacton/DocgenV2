@@ -20,6 +20,7 @@ import { iconEl, icon } from '../../components/icon.js';
 import state from '../../core/state.js';
 import events from '../../core/events.js';
 import { getModel } from '../../services/api.js';
+import { fetchModel as dataApiFetchModel } from '../../services/data-api.js';
 import { getInstance, loadFavorites, saveFavorites } from '../../core/storage.js';
 
 /** Cached object model */
@@ -147,39 +148,52 @@ async function handleTicketAuthorized({ ticketId }) {
 }
 
 async function loadObjectModel(ticketId) {
-  const instanceId = state.get('connection.instanceId');
-  const instance = await getInstance(instanceId);
-  if (!instance) return;
-
   const listEl = qs('#so-list');
   clear(listEl);
   listEl.appendChild(el('div', { class: 'loading-state' }, 'Loading object model…'));
 
-  const result = await getModel(instance, ticketId);
+  let objects;
+  const isOffline = !!state.get('connection.offlinePackageId');
 
-  if (!result.ok) {
-    clear(listEl);
-    listEl.appendChild(el('div', { class: 'error-state' }, `Failed: ${result.error}`));
-    return;
+  if (isOffline) {
+    // Use data-api layer which routes through the offline adapter
+    objects = await dataApiFetchModel();
+    if (!objects || objects.length === 0) {
+      clear(listEl);
+      listEl.appendChild(el('div', { class: 'error-state' }, 'No model data in offline package'));
+      return;
+    }
+  } else {
+    const instanceId = state.get('connection.instanceId');
+    const instance = await getInstance(instanceId);
+    if (!instance) return;
+
+    const result = await getModel(instance, ticketId);
+    if (!result.ok) {
+      clear(listEl);
+      listEl.appendChild(el('div', { class: 'error-state' }, `Failed: ${result.error}`));
+      return;
+    }
+    objects = objects;
   }
 
-  cachedModel = result.objects;
+  cachedModel = objects;
   showAllTypes = false;
 
   // Reload favorites
   objFavs = await loadFavorites('starting-objects');
 
-  renderObjectList(result.objects);
+  renderObjectList(objects);
 
   // Show "Show all types" toggle if there are unsupported types
-  const hasUnsupported = result.objects.some(o => !SUPPORTED.has(o.name));
+  const hasUnsupported = objects.some(o => !SUPPORTED.has(o.name));
   const toggleBtn = qs('#so-show-all-btn');
   if (toggleBtn) toggleBtn.style.display = hasUnsupported ? '' : 'none';
 
   // Restore selection if already set, or auto-select favorite
   const current = state.get('startingObject.type');
   const autoSelect = current
-    || [...objFavs].find(name => result.objects.some(o => o.name === name));
+    || [...objFavs].find(name => objects.some(o => o.name === name));
 
   if (autoSelect) {
     highlightedType = autoSelect;
@@ -188,7 +202,7 @@ async function loadObjectModel(ticketId) {
       'startingObject.type': autoSelect,
       'startingObject.name': autoSelect,
     });
-    renderObjectList(result.objects);
+    renderObjectList(objects);
     showAttributePreview(autoSelect);
     updateUnsupportedWarning(autoSelect);
     events.emit('startingObject:selected', { type: autoSelect });

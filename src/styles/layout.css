@@ -201,6 +201,12 @@
   color: var(--tacton-blue, #0071c8);
 }
 
+.hb-disabled {
+  opacity: 0.4;
+  pointer-events: none;
+  cursor: default;
+}
+
 /* ── Mode Toggle (in header) ── */
 .mode-toggle {
   display: inline-flex;
@@ -308,6 +314,29 @@
   background-color: #FAFBFC;
   border-bottom: 1px solid var(--border-light);
   flex-shrink: 0;
+}
+
+/* ===== OFFLINE MODE BANNER ===== */
+.offline-mode-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 5px 12px;
+  background: #f97316;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+.offline-mode-banner .icon {
+  display: flex;
+  align-items: center;
+}
+.offline-mode-banner .icon svg {
+  stroke: #fff;
 }
 
 .tab {

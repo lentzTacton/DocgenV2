@@ -172,6 +172,21 @@ export function createTicketCard(container) {
     style: { display: 'none' },
   });
 
+  // Offline read-only banner
+  const offlineTicketBanner = el('div', {
+    class: 'offline-readonly-banner',
+    id: 'offline-ticket-banner',
+    style: { display: 'none' },
+  });
+
+  const normalTicketBody = el('div', { class: 'card-body', id: 'ticket-normal-body' }, [
+    searchRow,
+    ticketList,
+    authSection,
+    statusMsg,
+    el('div', { class: 'card-actions', id: 'ticket-card-actions' }),
+  ]);
+
   const card = el('div', { class: 'card', id: 'ticket-card' }, [
     el('div', { class: 'card-header' }, [
       el('div', { class: 'card-header-left' }, [
@@ -183,16 +198,36 @@ export function createTicketCard(container) {
       ]),
       refreshBtn,
     ]),
-    el('div', { class: 'card-body' }, [
-      searchRow,
-      ticketList,
-      authSection,
-      statusMsg,
-      el('div', { class: 'card-actions', id: 'ticket-card-actions' }),
-    ]),
+    offlineTicketBanner,
+    normalTicketBody,
   ]);
 
   container.appendChild(card);
+
+  // Offline mode: swap normal body with read-only banner
+  state.on('connection.offlinePackageId', (pkgId) => {
+    if (pkgId) {
+      normalTicketBody.style.display = 'none';
+      offlineTicketBanner.style.display = '';
+      const ticketId = state.get('tickets.selected') || 'No ticket';
+      const tickets = state.get('tickets.list') || [];
+      const ticket = tickets.find(t => t.id === ticketId);
+      clear(offlineTicketBanner);
+      offlineTicketBanner.append(
+        el('div', { class: 'offline-banner-row' }, [
+          el('span', { class: 'icon', style: { color: 'var(--tacton-blue)' }, html: icon('database', 16) }),
+          el('span', { class: 'offline-banner-label' }, 'Offline — Ticket from captured data'),
+        ]),
+        el('div', { class: 'offline-banner-detail' }, [
+          el('span', { class: 'offline-banner-key' }, 'Ticket'),
+          el('span', { class: 'offline-banner-val' }, ticketId + (ticket?.summary ? ` — ${ticket.summary}` : '')),
+        ]),
+      );
+    } else {
+      normalTicketBody.style.display = '';
+      offlineTicketBanner.style.display = 'none';
+    }
+  });
 
   loadFavorites('tickets').then(f => { favs = f; });
 

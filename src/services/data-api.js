@@ -8,6 +8,26 @@
 import state from '../core/state.js';
 import { getModel, listRecords, fetchConfiguredProduct, parseConfiguredProductXml, ticketFetch } from './api.js';
 import { getInstance } from '../core/storage.js';
+import {
+  isOfflineMode,
+  offlineFetchModel,
+  offlineGetObjectTypes,
+  offlineGetObjectAttributes,
+  offlineGetRefAttributes,
+  offlineFetchRecords,
+  offlineFetchBomRecords,
+  offlineGetBomFields,
+  offlineGetBomFieldValues,
+  offlineGetBomSources,
+  offlineDescribeObject,
+  offlineDescribeObjectWithData,
+  offlineGetConfiguredProductList,
+  offlineFetchConfiguredProductData,
+  offlineIndexConfigAttributes,
+  offlineGetObjectRecordCount,
+  offlineGetObjectSampleValues,
+  offlineResolveCurrentObject,
+} from './offline/offline-adapter.js';
 
 // ─── Caches ─────────────────────────────────────────────────────────
 
@@ -32,6 +52,7 @@ function getConnection() {
 
 /** Is the Data tab able to make API calls? */
 export function isConnected() {
+  if (isOfflineMode()) return true;
   const { instanceId, ticketId, connected } = getConnection();
   return !!(connected && instanceId && ticketId);
 }
@@ -49,6 +70,7 @@ export function connectionInfo() {
  * Returns array of { name, attributes: [{name, type, refType}], listUrl }
  */
 export async function fetchModel() {
+  if (isOfflineMode()) return offlineFetchModel();
   const { instanceId, ticketId, connected } = getConnection();
   if (!connected || !instanceId || !ticketId) return null;
 
@@ -71,6 +93,7 @@ export async function fetchModel() {
  * Get all object type names from the model.
  */
 export async function getObjectTypes() {
+  if (isOfflineMode()) return offlineGetObjectTypes();
   const objects = await fetchModel();
   if (!objects) return [];
   return objects.map(o => o.name).sort();
@@ -81,6 +104,7 @@ export async function getObjectTypes() {
  * Returns [{name, type, refType}]
  */
 export async function getObjectAttributes(objectName) {
+  if (isOfflineMode()) return offlineGetObjectAttributes(objectName);
   const objects = await fetchModel();
   if (!objects) return [];
   const obj = objects.find(o => o.name.toLowerCase() === objectName.toLowerCase());
@@ -92,6 +116,7 @@ export async function getObjectAttributes(objectName) {
  * Returns [{name, refType}] — only attributes that point to other objects.
  */
 export async function getRefAttributes(objectName) {
+  if (isOfflineMode()) return offlineGetRefAttributes(objectName);
   const attrs = await getObjectAttributes(objectName);
   return attrs.filter(a => a.refType);
 }
@@ -104,6 +129,7 @@ export async function getRefAttributes(objectName) {
  * @returns {Promise<Array>}
  */
 export async function fetchRecords(objectName) {
+  if (isOfflineMode()) return offlineFetchRecords(objectName);
   const { instanceId, ticketId, connected } = getConnection();
   if (!connected || !instanceId || !ticketId) return [];
 
@@ -132,6 +158,7 @@ export async function fetchRecords(objectName) {
  * Tries 'FlatBomItem', 'FlatBom', 'flatbom', 'BomItem' etc.
  */
 export async function fetchBomRecords() {
+  if (isOfflineMode()) return offlineFetchBomRecords();
   if (cachedBomRecords) return cachedBomRecords;
 
   const objects = await fetchModel();
@@ -164,6 +191,7 @@ export async function fetchBomRecords() {
  * Returns array of field name strings.
  */
 export async function getBomFields() {
+  if (isOfflineMode()) return offlineGetBomFields();
   if (cachedBomFields) return cachedBomFields;
 
   const records = await fetchBomRecords();
@@ -198,6 +226,7 @@ export async function getBomFields() {
  * Returns sorted array of distinct values.
  */
 export async function getBomFieldValues(fieldName) {
+  if (isOfflineMode()) return offlineGetBomFieldValues(fieldName);
   const records = await fetchBomRecords();
   const vals = new Set();
   for (const rec of records) {
@@ -220,6 +249,7 @@ export async function getBomFieldValues(fieldName) {
  *   cpContext (on BOM sources): { objectName, refAttr, expression } — the parent CP info
  */
 export async function getBomSources() {
+  if (isOfflineMode()) return offlineGetBomSources();
   const objects = await fetchModel();
   if (!objects) return [{ name: 'flatbom', expression: '#this.flatbom', count: '?', objectName: null, category: 'bom', description: 'Flat BOM items' }];
 
@@ -423,6 +453,7 @@ export function getStartingObject() {
  * }>}
  */
 export async function describeObject(objectName) {
+  if (isOfflineMode()) return offlineDescribeObject(objectName);
   // Cache hit — skip recomputation
   if (cachedDescriptions[objectName]) return cachedDescriptions[objectName];
 
@@ -476,6 +507,7 @@ export function clearModelCache() {
  * Resolve the current object name after walking a path.
  */
 export async function resolveCurrentObject(pathSegments, rootOverride) {
+  if (isOfflineMode()) return offlineResolveCurrentObject(pathSegments, rootOverride);
   const objects = await fetchModel();
   if (!objects) return rootOverride || getStartingObject();
 
@@ -498,6 +530,7 @@ export async function resolveCurrentObject(pathSegments, rootOverride) {
  * Caches via fetchRecords.
  */
 export async function getObjectRecordCount(objectName) {
+  if (isOfflineMode()) return offlineGetObjectRecordCount(objectName);
   const records = await fetchRecords(objectName);
   return records.length;
 }
@@ -513,6 +546,7 @@ export async function getObjectRecordCount(objectName) {
  * @returns {Promise<string[]>}
  */
 export async function getObjectSampleValues(objectName, attrName, max = 8) {
+  if (isOfflineMode()) return offlineGetObjectSampleValues(objectName, attrName, max);
   const records = await fetchRecords(objectName);
   const vals = new Set();
   for (const rec of records) {
@@ -530,6 +564,7 @@ export async function getObjectSampleValues(objectName, attrName, max = 8) {
  * for the first few attributes. This gives a richer view than describe alone.
  */
 export async function describeObjectWithData(objectName) {
+  if (isOfflineMode()) return offlineDescribeObjectWithData(objectName);
   const desc = await describeObject(objectName);
   const count = await getObjectRecordCount(objectName).catch(() => 0);
 
@@ -593,6 +628,7 @@ export async function isExplorerFavorite(objectName, attrName) {
  * @returns {Promise<object|null>}
  */
 export async function fetchConfiguredProductData(cpId) {
+  if (isOfflineMode()) return offlineFetchConfiguredProductData(cpId);
   if (!cpId) { console.warn('[config] fetchConfiguredProductData: no cpId'); return null; }
   const { instanceId, ticketId, connected } = getConnection();
   if (!connected || !instanceId || !ticketId) {
@@ -632,6 +668,7 @@ export async function fetchConfiguredProductData(cpId) {
  * Returns array of { id, name, summary }
  */
 export async function getConfiguredProductList() {
+  if (isOfflineMode()) return offlineGetConfiguredProductList();
   const objects = await fetchModel();
   if (!objects) { console.warn('[config] getConfiguredProductList: no model objects'); return []; }
 
@@ -1092,4 +1129,8 @@ export function clearDataCache() {
   cachedBomFields = null;
   cachedBomRecords = null;
   cachedConfigProducts = {};
+  // Also clear offline cache when switching data sources
+  if (isOfflineMode()) {
+    import('./offline/offline-adapter.js').then(m => m.clearOfflineCache());
+  }
 }

@@ -11,6 +11,9 @@ import { loadAiSettings, clearAllDataRecords, getSetting, setSetting } from './s
 import { startSelectionListener } from '../services/word-api.js';
 import { initSelectionPanel } from '../views/data/selection-panel.js';
 import { initDocumentIdentity, getActiveDocument } from '../services/document-identity.js';
+import { openOfflineWizard } from '../views/setup/offline-wizard.js';
+import { importPackageFromFile } from '../services/offline/offline-storage.js';
+import { initInstances } from '../views/setup/connection-card.js';
 
 function createHeader() {
   return el('div', { class: 'header' }, [
@@ -105,6 +108,39 @@ function showHamburgerMenu() {
       ]));
     }
 
+    // Offline — expandable
+    const offlineItem = el('button', {
+      class: `hb-menu-item hb-expandable ${expandedGroup === 'offline' ? 'hb-expanded' : ''}`,
+      onclick: (e) => { e.stopPropagation(); expandedGroup = expandedGroup === 'offline' ? null : 'offline'; buildMenu(); },
+    }, [
+      el('span', { class: 'icon', html: icon('database', 14) }),
+      el('span', {}, 'Offline'),
+      el('span', { class: 'hb-chevron icon', html: icon(expandedGroup === 'offline' ? 'chevronDown' : 'chevronRight', 10) }),
+    ]);
+    dropdown.appendChild(offlineItem);
+
+    if (expandedGroup === 'offline') {
+      // Capture — only enabled when connected with a ticket (ready to capture)
+      const canCapture = state.get('connection.status') === 'connected'
+        && state.get('tickets.selected')
+        && !state.get('connection.offlinePackageId'); // not already offline
+      const captureBtn = el('button', {
+        class: `hb-sub-item ${!canCapture ? 'hb-disabled' : ''}`,
+        onclick: canCapture ? () => { closeHamburgerMenu(); openOfflineWizard(); } : null,
+      }, [
+        el('span', { class: 'icon', html: icon('download', 12) }),
+        'Capture',
+      ]);
+      if (!canCapture) captureBtn.title = 'Connect to an instance with a ticket first';
+      dropdown.appendChild(captureBtn);
+
+      // Import
+      dropdown.appendChild(el('button', { class: 'hb-sub-item', onclick: () => { closeHamburgerMenu(); handleOfflineImport(); } }, [
+        el('span', { class: 'icon', html: icon('upload', 12) }),
+        'Import Package',
+      ]));
+    }
+
     // Data — expandable
     const dataItem = el('button', {
       class: `hb-menu-item hb-expandable ${expandedGroup === 'data' ? 'hb-expanded' : ''}`,
@@ -181,6 +217,25 @@ function closeHamburgerMenu() {
   if (dd) dd.remove();
 }
 
+function handleOfflineImport() {
+  const input = el('input', { type: 'file', accept: '.json', style: { display: 'none' } });
+  input.addEventListener('change', async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      const pkg = await importPackageFromFile(file);
+      console.log('[offline] Imported package:', pkg.name || pkg.id);
+      // Refresh instance list so the package appears
+      initInstances();
+    } catch (e) {
+      console.error('[offline] Import failed:', e);
+    }
+  });
+  document.body.appendChild(input);
+  input.click();
+  input.remove();
+}
+
 function switchMode(mode) {
   // Only allow switching if toggle is enabled
   const toggle = qs('#mode-toggle');
@@ -224,9 +279,20 @@ export async function initApp() {
 
   const appContainer = qs('#app');
 
+  // Offline mode banner — shown between header/tabs and zones
+  const offlineModeBanner = el('div', {
+    class: 'offline-mode-banner',
+    id: 'offline-mode-banner',
+    style: { display: 'none' },
+  }, [
+    el('span', { class: 'icon', html: icon('database', 14) }),
+    el('span', { class: 'offline-mode-banner-text' }, 'Offline Mode'),
+  ]);
+
   // Main app wrapper (header + tabs + zones) — hidden until splash dismissed
   const mainApp = el('div', { id: 'main-app', style: { display: 'none' } }, [
     createHeader(),
+    offlineModeBanner,
     createTabs(),
     el('div', { id: 'zone-container', class: 'zone-container' }, [
       el('div', { class: 'zone', id: 'zone-setup' }),
@@ -268,6 +334,11 @@ export async function initApp() {
   // Subscribe to connection status changes — update toggle state
   state.on('connection.status', () => {
     updateModeToggleState();
+  });
+
+  // Show/hide the global offline mode banner
+  state.on('connection.offlinePackageId', (pkgId) => {
+    offlineModeBanner.style.display = pkgId ? '' : 'none';
   });
 
   // Subscribe to AI key validation — update toggle state

@@ -27,9 +27,19 @@ import {
   getSetting,
 } from '../../core/storage.js';
 import { testAdminCredentials, clearAdminTokenCache } from '../../services/auth.js';
+import {
+  getAllPackages,
+  getPackage as getOfflinePackage,
+  deletePackage as deleteOfflinePackage,
+  exportPackageAsJson,
+  countRecords as countOfflineRecords,
+} from '../../services/offline/offline-storage.js';
+import { clearOfflineCache } from '../../services/offline/offline-adapter.js';
+import events from '../../core/events.js';
 
 let instanceFavs = new Set();
 let allInstances = [];
+let allOfflinePackages = [];
 
 // Track whether a test has passed (even before saving)
 let testPassed = false;
@@ -217,6 +227,11 @@ export function createConnectionCard(container) {
   // React to connection state changes
   state.on('connection.status', updateBadge);
 
+  // When offline mode changes, re-render the instance list to update active states
+  state.on('connection.offlinePackageId', () => {
+    renderInstanceList();
+  });
+
   // Auto-connect when splash triggers reconnect via state flag
   state.on('config.autoConnectPending', async (pending) => {
     if (!pending) return;
@@ -240,6 +255,7 @@ export function createConnectionCard(container) {
 export async function initInstances() {
   instanceFavs = await loadFavorites('instances');
   allInstances = await getInstances();
+  allOfflinePackages = await getAllPackages();
   renderInstanceList();
 
   // Skip auto-connect when config is locked — the boot() function in
@@ -272,6 +288,12 @@ function handleNewInstance() {
 async function selectInstance(id, autoConnect = false) {
   const instance = await getInstance(id);
   if (!instance) return;
+
+  // If switching from offline mode to a live instance, clear offline state
+  if (state.get('connection.offlinePackageId')) {
+    clearOfflineCache();
+    state.set('connection.offlinePackageId', null);
+  }
 
   selectedInstanceId = id;
 
@@ -563,7 +585,7 @@ function renderInstanceList() {
   const listEl = qs('#instance-list');
   clear(listEl);
 
-  if (!allInstances.length) {
+  if (!allInstances.length && !allOfflinePackages.length) {
     listEl.appendChild(el('div', { class: 'empty-state' }, 'No saved instances'));
     return;
   }
@@ -662,6 +684,139 @@ function renderInstanceList() {
 
     listEl.appendChild(row);
   }
+
+  // ── Offline packages (rendered after live instances) ──
+  if (allOfflinePackages.length > 0) {
+    if (allInstances.length > 0) {
+      listEl.appendChild(el('div', { class: 'ticket-separator' }));
+    }
+
+    for (const pkg of allOfflinePackages) {
+      const pkgId = pkg.id;
+      const isActive = state.get('connection.offlinePackageId') === pkgId;
+      const pkgName = pkg.name || pkg.instanceUrl || 'Offline Package';
+      const ticketLabel = pkg.ticketId ? `Ticket: ${truncate(pkg.ticketId, 14)}` : '';
+      const dateStr = pkg.capturedAt ? new Date(pkg.capturedAt).toLocaleDateString() : '';
+      const records = countOfflineRecords(pkg);
+      const subtitle = [ticketLabel, dateStr, `${records} rec`].filter(Boolean).join(' · ');
+
+      const dotClass = isActive ? 'token-ok' : 'token-none';
+      const dotTitle = isActive ? 'Active offline source' : 'Offline package';
+
+      // Export button
+      const exportBtn = el('button', {
+        class: 'row-action-btn',
+        title: 'Export as JSON',
+        html: icon('upload', 14),
+        onclick: (e) => {
+          e.stopPropagation();
+          exportPackageAsJson(pkg);
+        },
+      });
+
+      // Delete button
+      const delBtn = el('button', {
+        class: 'row-action-btn',
+        title: 'Delete offline package',
+        html: icon('trash', 14),
+        onclick: (e) => {
+          e.stopPropagation();
+          handleDeleteOfflinePackage(pkgId, pkgName);
+        },
+      });
+
+      const pkgRow = el('div', {
+        class: `ticket-row offline-pkg-row ${isActive ? 'ticket-row-selected' : ''}`,
+        onclick: () => {
+          if (isActive) {
+            disconnectOfflinePackage();
+          } else {
+            activateOfflinePackage(pkgId);
+          }
+        },
+      }, [
+        el('span', { class: 'offline-pkg-icon', html: icon('database', 14) }),
+        el('div', { class: 'ticket-row-left' }, [
+          el('span', { class: 'ticket-id' }, pkgName),
+          el('span', { class: 'ticket-summary' }, subtitle),
+        ]),
+        el('div', { class: 'ticket-row-right' }, [
+          el('span', { class: `ticket-token-dot ${dotClass}`, title: dotTitle }),
+          exportBtn,
+          delBtn,
+        ]),
+      ]);
+
+      listEl.appendChild(pkgRow);
+    }
+  }
+}
+
+// ─── Offline package handlers ──────────────────────────────────────────
+
+async function activateOfflinePackage(pkgId) {
+  const pkg = await getOfflinePackage(pkgId);
+  if (!pkg) return;
+
+  clearOfflineCache();
+  selectedInstanceId = null;
+  clearForm();
+  showForm(false);
+
+  state.batch({
+    'connection.offlinePackageId': pkgId,
+    'connection.instanceId': null,
+    'connection.url': pkg.instanceUrl || '',
+    'connection.status': 'connected',
+    'connection.error': null,
+    'tickets.selected': pkg.ticketId || null,
+    'tickets.list': pkg.ticketId ? [{ id: pkg.ticketId, summary: pkg.ticketSummary || '' }] : [],
+    'tickets.included': pkg.ticketId ? [pkg.ticketId] : [],
+    'startingObject.type': pkg.startingObject || null,
+    'startingObject.id': null,
+    'startingObject.name': null,
+    'startingObject.locked': false,
+  });
+
+  renderInstanceList();
+
+  // Notify downstream cards — ticket is embedded in the offline package
+  if (pkg.ticketId) {
+    events.emit('ticket:selected', { ticketId: pkg.ticketId, hasToken: true });
+  }
+}
+
+function disconnectOfflinePackage() {
+  clearOfflineCache();
+
+  state.batch({
+    'connection.offlinePackageId': null,
+    'connection.instanceId': null,
+    'connection.url': '',
+    'connection.status': 'disconnected',
+    'connection.error': null,
+    'tickets.selected': null,
+    'tickets.list': [],
+    'tickets.included': [],
+    'tickets.tokenMap': {},
+    'startingObject.type': null,
+    'startingObject.id': null,
+    'startingObject.name': null,
+    'startingObject.locked': false,
+  });
+
+  renderInstanceList();
+}
+
+function handleDeleteOfflinePackage(pkgId, name) {
+  const isActive = state.get('connection.offlinePackageId') === pkgId;
+
+  showDeleteConfirm(name, async () => {
+    if (isActive) disconnectOfflinePackage();
+    await deleteOfflinePackage(pkgId);
+    allOfflinePackages = await getAllPackages();
+    renderInstanceList();
+  });
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────

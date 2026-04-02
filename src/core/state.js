@@ -25,6 +25,7 @@ const _data = {
   // Connection
   connection: {
     instanceId: null,
+    offlinePackageId: null, // When set, offline adapter intercepts data-api calls
     url: '',
     status: 'disconnected', // disconnected | connecting | connected | restoring | error
     error: null,
@@ -177,7 +178,7 @@ function _notify(path, value, oldValue) {
 function reset() {
   Object.assign(_data, {
     activeZone: 'setup',
-    connection: { instanceId: null, url: '', status: 'disconnected', error: null },
+    connection: { instanceId: null, offlinePackageId: null, url: '', status: 'disconnected', error: null },
     tickets: { list: [], included: [], selected: null, tokenMap: {}, loading: false },
     startingObject: { type: null, id: null, name: null, locked: false },
     project: { id: null, name: null, documentId: null, loaded: false },

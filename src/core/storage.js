@@ -52,6 +52,18 @@ db.version(3).stores({
   sections:   '++id, catalogueId, projectId, name, order',
 });
 
+db.version(4).stores({
+  instances:       '++id, name, url',
+  tokens:          'key',
+  projects:        'id, documentId, instanceId, updatedAt',
+  tickets:         '[projectId+ticketId], projectId',
+  variables:       '++id, projectId, name, type, order, sectionId, catalogueId',
+  settings:        'key',
+  catalogues:      '++id, projectId, scope, name, order',
+  sections:        '++id, catalogueId, projectId, name, order',
+  offlinePackages: '++id, name, instanceUrl, ticketId, capturedAt',
+});
+
 // NOTE: Dexie doesn't support changing primary keys, so we keep ++id (auto-increment)
 // but always supply a UUID string as the id for new records. Dexie accepts user-supplied
 // ids even with ++id schema — auto-increment only kicks in when id is absent.

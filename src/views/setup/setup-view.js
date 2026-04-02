@@ -69,12 +69,13 @@ const summaryCollapseState = {};
  * `fallback` is used when the saved value is missing.
  */
 const CONFIG_SCHEMA = [
-  { key: 'instanceId',  state: 'connection.instanceId',  fallback: null },
-  { key: 'url',         state: 'connection.url',         fallback: '' },
-  { key: 'ticketId',    state: 'tickets.selected',       fallback: null },
-  { key: 'tokenMap',    state: 'tickets.tokenMap',       fallback: {} },
-  { key: 'objectType',  state: 'startingObject.type',    fallback: null },
-  { key: 'aiKeyValid',  state: 'ai.apiKeyValid',         fallback: false },
+  { key: 'instanceId',        state: 'connection.instanceId',        fallback: null },
+  { key: 'offlinePackageId',  state: 'connection.offlinePackageId',  fallback: null },
+  { key: 'url',               state: 'connection.url',               fallback: '' },
+  { key: 'ticketId',          state: 'tickets.selected',             fallback: null },
+  { key: 'tokenMap',          state: 'tickets.tokenMap',             fallback: {} },
+  { key: 'objectType',        state: 'startingObject.type',          fallback: null },
+  { key: 'aiKeyValid',        state: 'ai.apiKeyValid',              fallback: false },
 ];
 
 /** Build a snapshot object from current state using CONFIG_SCHEMA */
@@ -93,9 +94,9 @@ function applyConfigSnapshot(saved) {
     updates[path] = saved[key] ?? fallback;
   }
   // Derived state not in schema.
-  // Status is 'restoring' — the real 'connected' comes after the
-  // auto-connect health check in connection-card re-tests credentials.
-  updates['connection.status'] = 'restoring';
+  // For offline packages, go straight to 'connected' — no credential test needed.
+  // For live connections, 'restoring' triggers the auto-connect health check.
+  updates['connection.status'] = saved.offlinePackageId ? 'connected' : 'restoring';
   updates['startingObject.name'] = saved.objectType ?? null;
   return updates;
 }
@@ -354,15 +355,40 @@ async function handleConfigLock() {
   state.set('config.locked', newLocked);
 
   if (newLocked) {
-    await setSetting('config-locked', buildConfigSnapshot());
+    const snapshot = buildConfigSnapshot();
+    await setSetting('config-locked', snapshot);
+    const ticketId = snapshot.ticketId;
+
+    if (snapshot.offlinePackageId) {
+      // Offline mode — no real tokens; mark health as "ok" immediately
+      state.set('tickets.tokenHealth', {
+        status: 'ok',
+        steps: [{ label: 'Offline Package', status: 'pass', detail: 'Data is local — no token required' }],
+        ticketId,
+      });
+    } else if (ticketId) {
+      // Live mode — run a quick token health check so the summary shows real status
+      const instanceId = snapshot.instanceId;
+      const instance = instanceId ? await getInstance(instanceId) : null;
+      if (instance) {
+        try {
+          const health = await testTicketToken(instance, ticketId);
+          state.set('tickets.tokenHealth', { status: health.status, steps: health.steps, ticketId });
+        } catch (_) { /* summary will show "Pending…" — user can run diagnostics */ }
+      }
+    }
+
     showLockedSummary();
   } else {
     await deleteSetting('config-locked');
     hideLockedSummary();
     setActiveStep('connection');
-    // Trigger auto-connect so the connection card re-validates credentials
-    // and ticket card loads tickets (connection.status may still be 'restoring')
-    state.set('config.autoConnectPending', true);
+    // For live connections, trigger auto-connect so the connection card
+    // re-validates credentials and ticket card loads tickets.
+    // For offline packages, the data is already local — no reconnect needed.
+    if (!state.get('connection.offlinePackageId')) {
+      state.set('config.autoConnectPending', true);
+    }
   }
 }
 
@@ -397,8 +423,21 @@ async function loadLockedConfig() {
   hideSplash();
   state.set('activeZone', 'data');
 
-  // ── Step 3: Test admin credentials ──
+  // ── Step 3: Validate credentials ──
   const instanceId = saved.instanceId;
+
+  // Offline packages don't need credential testing — data is local
+  if (saved.offlinePackageId) {
+    console.log('[boot] Offline package — skipping credential tests');
+    state.set('tickets.tokenHealth', {
+      status: 'ok',
+      steps: [{ label: 'Offline Package', status: 'pass', detail: 'Data is local — no token required' }],
+      ticketId: saved.ticketId,
+    });
+    // Already 'connected' from applyConfigSnapshot — nothing more to do
+    return;
+  }
+
   if (!instanceId) return;
 
   const instance = await getInstance(instanceId);
@@ -477,11 +516,15 @@ function renderLockedSummaryContent() {
   const objectType = state.get('startingObject.type') || '—';
   const hasAi = !!state.get('ai.apiKeyValid');
   const tokenHealth = state.get('tickets.tokenHealth');
+  const isOffline = !!state.get('connection.offlinePackageId');
 
   // Derive ticket token display
   let tokenLabel = 'Pending…';
   let tokenOk = false;
-  if (tokenHealth && tokenHealth.ticketId === state.get('tickets.selected')) {
+  if (isOffline) {
+    tokenLabel = 'Offline';
+    tokenOk = true;
+  } else if (tokenHealth && tokenHealth.ticketId === state.get('tickets.selected')) {
     const s = tokenHealth.status;
     tokenOk = s === 'ok';
     tokenLabel = s === 'ok' ? 'Valid'
@@ -494,9 +537,9 @@ function renderLockedSummaryContent() {
   const sections = [
     {
       title: 'Connection',
-      desc: 'Tacton CPQ instance used for data access',
+      desc: isOffline ? 'Offline package — data is local' : 'Tacton CPQ instance used for data access',
       items: [
-        { label: 'Instance', value: hostname, ok: true },
+        { label: 'Instance', value: isOffline ? `${hostname} (offline)` : hostname, ok: true },
       ],
     },
     {
@@ -505,7 +548,7 @@ function renderLockedSummaryContent() {
       items: [
         { label: 'Ticket', value: ticketId, ok: true },
         { label: 'Object', value: objectType, ok: true },
-        { label: 'Ticket Token', value: tokenLabel, ok: tokenOk, hasTooltip: !!tokenHealth, isToken: true },
+        { label: 'Ticket Token', value: tokenLabel, ok: tokenOk, hasTooltip: !isOffline && !!tokenHealth, isToken: !isOffline },
       ],
     },
     {
@@ -605,8 +648,8 @@ function renderLockedSummaryContent() {
     }
   }
 
-  // ── Inline re-auth section (using shared auth form) ──
-  if (ticketId !== '—') {
+  // ── Inline re-auth section (using shared auth form) — skip for offline ──
+  if (ticketId !== '—' && !isOffline) {
     lockedAuthForm = buildAuthForm({
       idPrefix: 'locked-reauth',
       title: `Authorize ${ticketId}`,
@@ -621,7 +664,9 @@ function renderLockedSummaryContent() {
     summaryEl.appendChild(lockedAuthForm.section);
   }
 
-  // ── Diagnostics section — collapsible (using shared diagnostic steps) ──
+  // ── Diagnostics section — collapsible (skip for offline) ──
+  if (isOffline) return; // No diagnostics needed for offline packages
+
   const testStepsContainer = el('div', {
     class: 'conn-tooltip-steps',
     id: 'locked-test-steps',
