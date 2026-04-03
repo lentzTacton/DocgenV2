@@ -240,6 +240,7 @@ export function createTicketCard(container) {
   state.on('connection.status', async (status) => {
     const btn = qs('#ticket-refresh-btn');
     const search = qs('#ticket-search-row');
+    const searchInput = qs('#ticket-search');
     if (status === 'connected') {
       if (btn) btn.style.display = '';
 
@@ -259,6 +260,7 @@ export function createTicketCard(container) {
     } else {
       if (btn) btn.style.display = 'none';
       if (search) search.style.display = 'none';
+      if (searchInput) searchInput.value = '';
       highlightedTicketId = null;
       authFormOpen = false;
       tokenStatus = {};
@@ -267,6 +269,37 @@ export function createTicketCard(container) {
       qs('#ticket-list').appendChild(
         el('div', { class: 'empty-state' }, 'Connect to an instance first')
       );
+    }
+  });
+
+  // When the instance changes (even if status stays 'connected'), reset
+  // the ticket list and re-fetch from the new instance.
+  state.on('connection.instanceId', async (instanceId) => {
+    if (!instanceId) return;
+    // Only act if already connected — the status listener handles the
+    // initial connect flow.
+    if (state.get('connection.status') !== 'connected') return;
+
+    // Guard: verify the instance has admin credentials before attempting
+    // to fetch tickets. During import/restore the instanceId may be set
+    // before credentials are fully available in storage.
+    const instance = await getInstance(instanceId);
+    if (!instance?.admin?.clientId || !instance?.admin?.clientSecret) return;
+
+    // Reset ticket state for the new instance
+    highlightedTicketId = null;
+    authFormOpen = false;
+    tokenStatus = {};
+    hideAuthSection();
+    const searchInput = qs('#ticket-search');
+    if (searchInput) searchInput.value = '';
+
+    // Re-fetch tickets from the new instance
+    await handleRefreshTickets();
+
+    const preSelected = state.get('tickets.selected');
+    if (preSelected) {
+      await runTicketTokenHealthCheck(preSelected);
     }
   });
 
@@ -732,6 +765,7 @@ async function openAuthForm(ticketId) {
   showTicketStatus('', '');
 
   const instanceId = state.get('connection.instanceId');
+  if (!instanceId) return;
   const instance = await getInstance(instanceId);
   if (instance) {
     try {
@@ -755,6 +789,7 @@ function hideAuthSection() {
 async function handleOpenAuthUrl(ticketId) {
   // If called from inline button (with ticketId) or from auth section
   let instanceId = state.get('connection.instanceId');
+  if (!instanceId) return;
   const instance = await getInstance(instanceId);
   if (!instance) return;
 
@@ -781,6 +816,7 @@ async function handleSubmitAuth() {
   }
 
   const instanceId = state.get('connection.instanceId');
+  if (!instanceId) return;
   const instance = await getInstance(instanceId);
   if (!instance) return;
 

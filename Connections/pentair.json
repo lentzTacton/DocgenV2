@@ -1,0 +1,38 @@
+{
+  "_docgenExport": true,
+  "_version": 1,
+  "_exportedAt": "2026-03-30T21:18:34.928Z",
+  "instanceUrl": "https://pentair-admin.tactoncpq.com",
+  "instanceName": "Pentair",
+  "adminCreds": {
+    "clientId": "54e69395fbf843b8a40e03d0fa44524b",
+    "clientSecret": "fb2951bcfbca49a7bcf9749755360638"
+  },
+  "frontendCreds": {
+    "clientId": "fb8357b93478404ab0dbf0c3c9798a84",
+    "clientSecret": "d3bb959749d3484292b6f2bde102c1dd"
+  },
+  "ticketToken": {
+    "ticketId": "T-00001238",
+    "access": "d2ca7c84a4194a9a90e1ed234daeedce",
+    "refresh": "c9e77d7f0ef948ac8997fddfa35deaeb-cbb44e1f520c4b52ab4e577dd1ba8134fb51725cf27f4d39bc025188b97dbd11"
+  },
+  "ticketSelection": {
+    "selected": "T-00001238",
+    "tokenMap": {},
+    "favorites": [
+      "T-00000034"
+    ]
+  },
+  "startingObject": {
+    "type": "Solution",
+    "name": "Solution",
+    "id": null,
+    "instanceId": null,
+    "instanceDisplayId": null,
+    "instanceName": null,
+    "favorites": [
+      "Solution"
+    ]
+  }
+}

@@ -165,6 +165,7 @@ async function loadObjectModel(ticketId) {
     }
   } else {
     const instanceId = state.get('connection.instanceId');
+    if (!instanceId) return;
     const instance = await getInstance(instanceId);
     if (!instance) return;
 
@@ -174,7 +175,7 @@ async function loadObjectModel(ticketId) {
       listEl.appendChild(el('div', { class: 'error-state' }, `Failed: ${result.error}`));
       return;
     }
-    objects = objects;
+    objects = result.objects;
   }
 
   cachedModel = objects;

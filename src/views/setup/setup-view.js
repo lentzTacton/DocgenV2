@@ -307,6 +307,11 @@ export function createSetupView(container) {
     refreshProgressBar();
   });
 
+  // Update collapsed ticket bar when loading state changes
+  state.on('tickets.loading', () => {
+    refreshCollapsedBars();
+  });
+
   // ── Hamburger menu actions (connection import/export) ──
   state.on('menu.action', (action) => {
     if (action === 'connection-export') showExportDialog();
@@ -1051,10 +1056,15 @@ function refreshCollapsedBars() {
     connStatus === 'connected');
 
   // Ticket
+  const ticketsLoading = state.get('tickets.loading');
   const ticketId = state.get('tickets.selected');
-  setBarContent('ticket', ticketId || '—',
-    ticketId ? 'SELECTED' : '',
-    !!ticketId);
+  if (ticketsLoading) {
+    setBarContent('ticket', 'Loading tickets…', '', false, true);
+  } else {
+    setBarContent('ticket', ticketId || '—',
+      ticketId ? 'SELECTED' : '',
+      !!ticketId);
+  }
 
   // Starting Object
   const objType = state.get('startingObject.type');
@@ -1069,10 +1079,19 @@ function refreshCollapsedBars() {
     hasAi);
 }
 
-function setBarContent(stepId, value, badgeText, isOk) {
+function setBarContent(stepId, value, badgeText, isOk, isLoading = false) {
   const valEl = qs(`#step-bar-val-${stepId}`);
   const badgeEl = qs(`#step-bar-badge-${stepId}`);
-  if (valEl) valEl.textContent = value;
+  if (valEl) {
+    valEl.textContent = value;
+    if (isLoading) {
+      valEl.style.fontStyle = 'italic';
+      valEl.style.opacity = '0.6';
+    } else {
+      valEl.style.fontStyle = '';
+      valEl.style.opacity = '';
+    }
+  }
   if (badgeEl) {
     badgeEl.textContent = badgeText;
     badgeEl.className = `step-bar-badge ${isOk ? 'step-bar-badge-ok' : 'step-bar-badge-muted'}`;

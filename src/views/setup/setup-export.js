@@ -339,11 +339,33 @@ export function showImportDialog() {
       const opts = {};
       for (const [key, cb] of Object.entries(checkboxes)) opts[key] = cb.checked;
       await applyImportData(importedData, opts);
+
+      // Capture imported state before initInstances potentially overwrites it.
+      // initInstances auto-connects to the first favorite/first instance,
+      // which may differ from the imported instance and reset tickets/objects.
+      const importedInstanceId = state.get('connection.instanceId');
+      const importedTicketSelected = state.get('tickets.selected');
+      const importedTokenMap = state.get('tickets.tokenMap');
+      const importedSOType = state.get('startingObject.type');
+      const importedSOName = state.get('startingObject.name');
+
       dialog.remove();
       await initInstances();
       _callbacks.refreshCollapsedBars();
       _callbacks.refreshProgressBar();
       _callbacks.updateStepperState();
+
+      // Restore imported state that initInstances may have overwritten,
+      // so the auto-connect targets the imported instance and preserves
+      // the imported ticket selection (including its stored token).
+      state.batch({
+        'connection.instanceId': importedInstanceId,
+        'tickets.selected': importedTicketSelected,
+        'tickets.tokenMap': importedTokenMap,
+        'startingObject.type': importedSOType,
+        'startingObject.name': importedSOName,
+      });
+
       // Trigger re-connect if we imported credentials
       if (opts.adminCreds || opts.frontendCreds) {
         state.set('config.autoConnectPending', true);

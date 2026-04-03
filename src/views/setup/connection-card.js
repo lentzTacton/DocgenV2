@@ -323,8 +323,15 @@ async function selectInstance(id, autoConnect = false) {
 
   renderInstanceList();
 
-  // Auto-connect if requested (on load)
-  if (autoConnect) {
+  // Clear stale caches from previous environment on instance switch
+  if (!isCurrentlyConnected) {
+    clearAdminTokenCache(instance.url);
+  }
+
+  // Auto-connect if requested (on load), OR if the instance already has
+  // saved credentials (client ID + secret) — no need to click "Save & Connect"
+  const hasSavedCredentials = instance.admin?.clientId && instance.admin?.clientSecret;
+  if (autoConnect || (!isCurrentlyConnected && hasSavedCredentials)) {
     await handleSaveInstance();
   }
 }

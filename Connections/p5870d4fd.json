@@ -1,0 +1,39 @@
+{
+  "_docgenExport": true,
+  "_version": 1,
+  "_exportedAt": "2026-04-03T21:28:01.086Z",
+  "instanceUrl": "https://p5870d4fd-edu.earlyaccess.tactoncpq.com",
+  "instanceName": "p5870d4fd",
+  "adminCreds": {
+    "clientId": "6614a189f8ce47b383493acf53b0c251",
+    "clientSecret": "893b7d62dd604a95ac4f42bcddf4356d"
+  },
+  "frontendCreds": {
+    "clientId": "9e01dd49849345d79691dadd4b7e2e36",
+    "clientSecret": "479eaaec079b44d79b37008c2886a2b1"
+  },
+  "ticketToken": {
+    "ticketId": "T-00000010",
+    "access": "36d3efbbb3254d25b49030c3d490f998",
+    "refresh": "879b98de71a143c0872cbf2748a187ef-f7108097d6524ba5b996cbf0e06168c14e0a131ed9904b7e8559ec14e9366d77"
+  },
+  "ticketSelection": {
+    "selected": "T-00000010",
+    "tokenMap": {},
+    "favorites": [
+      "T-00001238",
+      "T-00000010"
+    ]
+  },
+  "startingObject": {
+    "type": "Solution",
+    "name": "Solution",
+    "id": null,
+    "instanceId": null,
+    "instanceDisplayId": null,
+    "instanceName": null,
+    "favorites": [
+      "Solution"
+    ]
+  }
+}
